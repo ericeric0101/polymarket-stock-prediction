@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polymarket-stock"
+version = "0.1.0"
+description = "Shadow-only research foundation for Polymarket daily equity direction markets"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+polymarket-stock = "polymarket_stock.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.unittest]
+start-directory = "tests"
