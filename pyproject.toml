@@ -7,7 +7,7 @@ name = "polymarket-stock"
 version = "0.1.0"
 description = "Shadow-only research foundation for Polymarket daily equity direction markets"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["websockets>=15,<16"]
 
 [project.scripts]
 polymarket-stock = "polymarket_stock.cli:main"

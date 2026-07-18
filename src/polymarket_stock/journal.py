@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -66,13 +68,29 @@ CREATE INDEX IF NOT EXISTS idx_alpaca_option_quotes_symbol_observed
 """
 
 
+@dataclass(frozen=True)
+class StoredOutcomeToken:
+    label: str
+    token_id: str
+
+
+@contextmanager
+def _database_connection(path: Path):
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 class ShadowJournal:
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
+        with _database_connection(self.path) as connection:
             connection.executescript(SCHEMA)
             self._migrate_market_candidate_columns(connection)
 
@@ -112,7 +130,7 @@ class ShadowJournal:
         digest_source = f"{timestamp.isoformat()}|{market_id}|{outcome}|{payload_json}"
         decision_id = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
 
-        with sqlite3.connect(self.path) as connection:
+        with _database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO shadow_decisions (
@@ -150,7 +168,7 @@ class ShadowJournal:
             getattr(candidate, "review_status"),
             json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str),
         )
-        with sqlite3.connect(self.path) as connection:
+        with _database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO market_candidates (
@@ -183,7 +201,7 @@ class ShadowJournal:
 
     def record_order_book_snapshot(self, market_id: str, snapshot: object) -> None:
         raw_payload = getattr(snapshot, "raw_payload")
-        with sqlite3.connect(self.path) as connection:
+        with _database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO order_book_snapshots (
@@ -201,8 +219,41 @@ class ShadowJournal:
                 ),
             )
 
+    def get_market_outcome_tokens(self, market_id: str) -> tuple[StoredOutcomeToken, StoredOutcomeToken]:
+        """Return both outcome tokens for a discovered market."""
+
+        with _database_connection(self.path) as connection:
+            row = connection.execute(
+                """
+                SELECT outcome_a_label, outcome_a_token_id, outcome_b_label, outcome_b_token_id
+                FROM market_candidates WHERE market_id = ?
+                """,
+                (market_id,),
+            ).fetchone()
+        if row is None or not all(row):
+            raise KeyError(f"market {market_id} is not present in the local candidate journal")
+        return (
+            StoredOutcomeToken(label=row[0], token_id=row[1]),
+            StoredOutcomeToken(label=row[2], token_id=row[3]),
+        )
+
+    def get_latest_outcome_asks(self, market_id: str) -> tuple[float, float]:
+        outcomes = self.get_market_outcome_tokens(market_id)
+        asks: list[float] = []
+        with _database_connection(self.path) as connection:
+            for outcome in outcomes:
+                row = connection.execute(
+                    """SELECT best_ask FROM order_book_snapshots
+                    WHERE market_id = ? AND token_id = ? ORDER BY id DESC LIMIT 1""",
+                    (market_id, outcome.token_id),
+                ).fetchone()
+                if row is None or row[0] is None:
+                    raise KeyError(f"market {market_id} has no stored ask for {outcome.label}")
+                asks.append(float(row[0]))
+        return asks[0], asks[1]
+
     def record_alpaca_indicative_option_quote(self, quote: object) -> None:
-        with sqlite3.connect(self.path) as connection:
+        with _database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO alpaca_indicative_option_quotes (

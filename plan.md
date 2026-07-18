@@ -111,12 +111,11 @@ Planned modules:
 
 ### Phase 2: Fair-probability research
 
-- [ ] Implement baseline binary option probability model.
-- [ ] Estimate separate overnight and regular-session volatility regimes.
-- [ ] Select near-the-money options and filter illiquid/stale contracts.
-- [ ] Add event risk gates: earnings, major economic releases, dividends, and halts.
-- [ ] Log calibration metrics: Brier score, log loss, calibration buckets, and
-  paper PnL with conservative transaction costs.
+- [x] Implement baseline binary option probability model.
+- [x] Estimate separate overnight and regular-session volatility regimes.
+- [x] Select near-the-money options and filter illiquid/stale contracts.
+- [x] Add event risk gates: earnings, major economic releases, dividends, and halts.
+- [x] Add calibration metrics: Brier score, log loss, and conservative paper PnL.
 
 ### Phase 3: Shadow validation
 
@@ -169,3 +168,8 @@ Planned modules:
 | 2026-07-18 | Added Alpaca free Indicative option-quote adapter. Local live Gamma validation is blocked by a Python TLS certificate-chain error; SSL verification remains enabled. | Active environment issue |
 | 2026-07-18 | Corrected discovery for Polymarket daily equity events: preserve `Up`/`Down` outcome labels and support exact event-slug scans. TSLA daily markets resolve against Pyth regular-session close and include 50-50 tie/no-trade rules. | Complete |
 | 2026-07-18 | Replaced capped market-list discovery with Gamma event keyset pagination across `stocks` and `equities` tags for broad daily-equity coverage. | Complete |
+| 2026-07-18 | Reduced Phase 1 operator steps: snapshot both CLOB outcome books by market ID, or automatically during broad equity scans. | Complete |
+| 2026-07-18 | Added Phase 2 research core: option-implied IV, two-session volatility blending, event gates, conservative edge evaluation, and calibration metrics. | Complete |
+| 2026-07-18 | Added a provider-independent realized-volatility fallback using verified daily closes; stale fallback data blocks paper recommendations and increases the error buffer. | Complete |
+| 2026-07-18 | Added Nasdaq public baseline provider with local cache failover; cached or stale data cannot bypass the conservative recommendation gate. | Complete |
+| 2026-07-19 | Added read-only Polymarket Market and Alpaca IEX WebSocket observation streams, with 500 ms debounce and freshness tracking. Streams only record shadow re-evaluation requests. | Complete |
