@@ -34,6 +34,7 @@ remain enabled.
 # Broad daily-equity discovery and optional order-book capture
 polymarket-stock scan-equity-events --tag-slugs stocks,equities --max-pages-per-tag 100
 polymarket-stock scan-equity-events --tag-slugs stocks,equities --snapshot-books
+polymarket-stock list-markets --symbol TSLA
 
 # Inspect a known event or capture both Up/Down books from a market ID
 polymarket-stock scan-event --slug tsla-up-or-down-on-july-20-2026 --symbols TSLA
@@ -85,23 +86,31 @@ Indicative option data is not a live-grade pricing source.
 
 ### Real-Time Shadow Streams
 
-Add your own Alpaca credentials to `.env`; do not commit them:
+Finnhub is the default stock-quote provider and does not require a brokerage
+account. Add its API key to `.env`; do not commit it:
 
 ```dotenv
-ALPACA_API_KEY_ID=...
-ALPACA_API_SECRET_KEY=...
+FINNHUB_API_KEY=...
 ```
 
 ```zsh
 polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --duration-seconds 0
+
+# Keep the existing Alpaca IEX adapter available when you want to compare it.
+polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --spot-provider alpaca
 ```
 
-This consumes Polymarket's public Market WebSocket and Alpaca Basic IEX stock
+This consumes Polymarket's public Market WebSocket and the selected stock-quote
 WebSocket, coalesces incoming book/spot updates with a 500 ms debounce, and
-logs `SHADOW_REEVALUATION_REQUESTED` events to `logs/shadow_bot.jsonl`.
+prints and logs `REALTIME_BASELINE_EVALUATED` records. Each record includes the
+freshness-gated spot, executable Up/Down asks, fair probability, raw net edge,
+and any skip reason. It also persists every result in the local SQLite journal.
+Repeated identical stale-data states are recorded at most once per minute, and
+the public streams reconnect automatically after a transient network closure.
 `--duration-seconds 0` runs until interrupted. Alpaca's free IEX feed is not a
-consolidated SIP feed, and this stream does not yet obtain live option IV. It
-is therefore an observation and timing layer only, not a trading signal.
+consolidated SIP feed; Finnhub coverage and latency should likewise be measured
+against the market before relying on it. This stream does not yet obtain live
+option IV, so it is an observation and timing layer only, not a trading signal.
 
 ### Current Limits
 
@@ -142,6 +151,7 @@ python -m unittest discover -s tests -v
 # 廣泛掃描單日美股市場；第二個指令會一併擷取訂單簿
 polymarket-stock scan-equity-events --tag-slugs stocks,equities --max-pages-per-tag 100
 polymarket-stock scan-equity-events --tag-slugs stocks,equities --snapshot-books
+polymarket-stock list-markets --symbol TSLA
 
 # 查看已知事件，或依 market ID 自動擷取 Up / Down 兩側訂單簿
 polymarket-stock scan-event --slug tsla-up-or-down-on-july-20-2026 --symbols TSLA
@@ -182,18 +192,22 @@ polymarket-stock snapshot-alpaca-options --symbols SPY260718C00600000
 
 ### 即時 Shadow Stream
 
-請把自己的 Alpaca 憑證填入 `.env`，不要提交至 Git：
+Finnhub 是預設的股價報價 provider，不需要券商帳戶。請把 API key 填入
+`.env`，不要提交至 Git：
 
 ```dotenv
-ALPACA_API_KEY_ID=...
-ALPACA_API_SECRET_KEY=...
+FINNHUB_API_KEY=...
 ```
 
 ```zsh
 polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --duration-seconds 0
+
+# 保留既有 Alpaca IEX adapter，日後可用它和 Finnhub 比較。
+polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --spot-provider alpaca
 ```
 
-此指令會連接 Polymarket 公開 Market WebSocket 與 Alpaca Basic IEX 美股 WebSocket。它以 500 ms debounce 合併短時間內的訂單簿與現貨更新，並將 `SHADOW_REEVALUATION_REQUESTED` 事件寫入 `logs/shadow_bot.jsonl`。`--duration-seconds 0` 代表持續運行至手動中斷。免費的 Alpaca IEX 不是完整 SIP 整合報價，而且目前 stream 尚未取得即時期權 IV；它只負責觀察與觸發重新評估，並不是交易訊號。
+此指令會連接 Polymarket 公開 Market WebSocket 與選定的美股報價 WebSocket。它以 500 ms debounce 合併短時間內的訂單簿與現貨更新，輸出並記錄 `REALTIME_BASELINE_EVALUATED`。每筆結果都包含 freshness gate 後的 spot、可成交 Up/Down ask、合理機率、raw net edge 與 skip reason，也會寫入本機 SQLite journal。`--duration-seconds 0` 代表持續運行至手動中斷。免費 Alpaca IEX 不是完整 SIP 整合報價；Finnhub 的覆蓋與延遲也應先和市場比較驗證。目前 stream 尚未取得即時期權 IV；它只負責觀察與觸發重新評估，並不是交易訊號。
+重複且相同的 stale-data 狀態最多每分鐘記錄一次；公開資料流因暫時網路中斷關閉時會自動重連。美股休市期間，沒有 Finnhub trade 時會顯示 `MISSING_SPOT`，這是預期的安全結果。
 
 ### 目前限制
 

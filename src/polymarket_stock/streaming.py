@@ -8,19 +8,56 @@ from datetime import UTC, datetime, timedelta
 import inspect
 import json
 from typing import Awaitable, Callable, Mapping
+from urllib.parse import urlencode
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 
 POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 ALPACA_IEX_WS = "wss://stream.data.alpaca.markets/v2/iex"
+FINNHUB_WS = "wss://ws.finnhub.io"
 EventCallback = Callable[[Mapping[str, object]], Awaitable[None] | None]
+StreamRunner = Callable[[], Awaitable[None]]
 
 
 async def _emit(callback: EventCallback, payload: Mapping[str, object]) -> None:
     result = callback(payload)
     if inspect.isawaitable(result):
         await result
+
+
+async def run_with_reconnect(
+    name: str,
+    run_once: StreamRunner,
+    status_callback: EventCallback,
+    *,
+    initial_delay_seconds: float = 1.0,
+    maximum_delay_seconds: float = 30.0,
+) -> None:
+    """Keep a public read-only stream alive across transient network closures."""
+
+    delay_seconds = initial_delay_seconds
+    while True:
+        try:
+            await run_once()
+            error_message = "stream ended without an explicit close reason"
+        except asyncio.CancelledError:
+            raise
+        except (ConnectionClosed, OSError, TimeoutError) as error:
+            error_message = str(error)
+        await _emit(
+            status_callback,
+            {
+                "event_type": "STREAM_RECONNECTING",
+                "stream": name,
+                "error": error_message,
+                "retry_in_seconds": delay_seconds,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        await asyncio.sleep(delay_seconds)
+        delay_seconds = min(maximum_delay_seconds, delay_seconds * 2)
 
 
 class DebouncedReevaluation:
@@ -73,6 +110,8 @@ class ShadowStreamCoordinator:
     freshness: StreamFreshness = field(init=False)
     latest_spots: dict[str, float] = field(default_factory=dict)
     latest_books: dict[str, Mapping[str, object]] = field(default_factory=dict)
+    latest_best_asks: dict[str, float] = field(default_factory=dict)
+    latest_best_bids: dict[str, float] = field(default_factory=dict)
     _debouncer: DebouncedReevaluation = field(init=False)
 
     def __post_init__(self) -> None:
@@ -81,11 +120,36 @@ class ShadowStreamCoordinator:
 
     async def on_polymarket_message(self, payload: Mapping[str, object]) -> None:
         event_type = str(payload.get("event_type", ""))
+        if event_type == "price_change":
+            changes = payload.get("price_changes")
+            if isinstance(changes, list):
+                changed = False
+                for change in changes:
+                    if isinstance(change, Mapping):
+                        changed = self._update_book(str(change.get("asset_id", "")), change, event_type) or changed
+                if changed:
+                    self._debouncer.notify("POLYMARKET_PRICE_CHANGE")
+            return
         asset_id = str(payload.get("asset_id", ""))
-        if asset_id and event_type in {"book", "price_change", "best_bid_ask", "last_trade_price"}:
-            self.latest_books[asset_id] = dict(payload)
-            self.freshness.last_book_at = datetime.now(UTC)
-            self._debouncer.notify(f"POLYMARKET_{event_type.upper()}")
+        if asset_id and event_type in {"book", "best_bid_ask", "last_trade_price"}:
+            if self._update_book(asset_id, payload, event_type):
+                self._debouncer.notify(f"POLYMARKET_{event_type.upper()}")
+
+    def _update_book(self, asset_id: str, payload: Mapping[str, object], event_type: str) -> bool:
+        if not asset_id:
+            return False
+        best_bid = _as_probability(payload.get("best_bid"))
+        best_ask = _as_probability(payload.get("best_ask"))
+        if event_type == "book":
+            best_bid = _best_level_price(payload.get("bids"), maximum=True)
+            best_ask = _best_level_price(payload.get("asks"), maximum=False)
+        self.latest_books[asset_id] = dict(payload)
+        if best_bid is not None:
+            self.latest_best_bids[asset_id] = best_bid
+        if best_ask is not None:
+            self.latest_best_asks[asset_id] = best_ask
+        self.freshness.last_book_at = datetime.now(UTC)
+        return True
 
     async def on_alpaca_message(self, payload: Mapping[str, object]) -> None:
         message_type = str(payload.get("T", ""))
@@ -96,8 +160,45 @@ class ShadowStreamCoordinator:
             self.freshness.last_spot_at = datetime.now(UTC)
             self._debouncer.notify(f"ALPACA_{message_type.upper()}")
 
+    async def on_finnhub_message(self, payload: Mapping[str, object]) -> None:
+        """Accept Finnhub's trade batches in the same spot-update pipeline."""
+
+        if payload.get("type") != "trade":
+            return
+        trades = payload.get("data")
+        if not isinstance(trades, list):
+            return
+        received_spot = False
+        for trade in trades:
+            if not isinstance(trade, Mapping):
+                continue
+            symbol = trade.get("s")
+            price = trade.get("p")
+            if isinstance(symbol, str) and isinstance(price, (int, float)) and price > 0:
+                self.latest_spots[symbol] = float(price)
+                received_spot = True
+        if received_spot:
+            self.freshness.last_spot_at = datetime.now(UTC)
+            self._debouncer.notify("FINNHUB_TRADE")
+
     async def close(self) -> None:
         await self._debouncer.close()
+
+
+def _as_probability(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if 0 <= parsed <= 1 else None
+
+
+def _best_level_price(levels: object, *, maximum: bool) -> float | None:
+    if not isinstance(levels, list):
+        return None
+    prices = [_as_probability(level.get("price")) for level in levels if isinstance(level, Mapping)]
+    usable = [price for price in prices if price is not None]
+    return (max(usable) if maximum else min(usable)) if usable else None
 
 
 class PolymarketMarketStream:
@@ -109,11 +210,21 @@ class PolymarketMarketStream:
             heartbeat = asyncio.create_task(self._heartbeat(websocket))
             try:
                 async for raw_message in websocket:
-                    payload = json.loads(raw_message)
+                    payload = self._decode_message(raw_message)
                     if isinstance(payload, dict):
                         await _emit(callback, payload)
             finally:
                 heartbeat.cancel()
+
+    @staticmethod
+    def _decode_message(raw_message: str | bytes) -> dict[str, object] | None:
+        """Ignore text heartbeat acknowledgements such as the server's PONG."""
+
+        try:
+            payload = json.loads(raw_message)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     @staticmethod
     async def _heartbeat(websocket: object) -> None:
@@ -140,3 +251,24 @@ class AlpacaIexStockStream:
                 for payload in messages if isinstance(messages, list) else [messages]:
                     if isinstance(payload, dict):
                         await _emit(callback, payload)
+
+
+class FinnhubStockStream:
+    """Read-only US equity trade stream; no brokerage account is involved."""
+
+    def __init__(self, api_key: str) -> None:
+        if not api_key:
+            raise ValueError("Finnhub API key is required for stock streaming")
+        self._api_key = api_key
+
+    async def run(self, symbols: tuple[str, ...], callback: EventCallback) -> None:
+        if not symbols:
+            raise ValueError("at least one Finnhub symbol is required")
+        websocket_url = f"{FINNHUB_WS}?{urlencode({'token': self._api_key})}"
+        async with connect(websocket_url) as websocket:
+            for symbol in symbols:
+                await websocket.send(json.dumps({"type": "subscribe", "symbol": symbol}))
+            async for raw_message in websocket:
+                payload = json.loads(raw_message)
+                if isinstance(payload, dict):
+                    await _emit(callback, payload)

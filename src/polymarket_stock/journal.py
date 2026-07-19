@@ -65,6 +65,21 @@ CREATE TABLE IF NOT EXISTS alpaca_indicative_option_quotes (
 );
 CREATE INDEX IF NOT EXISTS idx_alpaca_option_quotes_symbol_observed
     ON alpaca_indicative_option_quotes (option_symbol, observed_at);
+CREATE TABLE IF NOT EXISTS realtime_evaluations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    evaluated_at TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    spot REAL,
+    up_ask REAL,
+    down_ask REAL,
+    fair_up_probability REAL,
+    signal_status TEXT NOT NULL,
+    skip_reasons_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_realtime_evaluations_market_evaluated
+    ON realtime_evaluations (market_id, evaluated_at);
 """
 
 
@@ -72,6 +87,17 @@ CREATE INDEX IF NOT EXISTS idx_alpaca_option_quotes_symbol_observed
 class StoredOutcomeToken:
     label: str
     token_id: str
+
+
+@dataclass(frozen=True)
+class StoredMarketCandidate:
+    market_id: str
+    question: str
+    slug: str
+    end_date: str
+    outcome_a_label: str
+    outcome_b_label: str
+    review_status: str
 
 
 @contextmanager
@@ -237,6 +263,34 @@ class ShadowJournal:
             StoredOutcomeToken(label=row[2], token_id=row[3]),
         )
 
+    def list_market_candidates(self, symbol: str | None = None) -> tuple[StoredMarketCandidate, ...]:
+        """Return concise local candidate metadata without exposing CLOB token IDs."""
+
+        normalized_symbol = symbol.strip().upper() if symbol else ""
+        query = """
+            SELECT market_id, question, slug, end_date, outcome_a_label, outcome_b_label, review_status
+            FROM market_candidates
+        """
+        parameters: tuple[object, ...] = ()
+        if normalized_symbol:
+            query += " WHERE UPPER(question) LIKE ?"
+            parameters = (f"%{normalized_symbol}%",)
+        query += " ORDER BY end_date ASC, market_id ASC"
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(StoredMarketCandidate(*row) for row in rows)
+
+    def get_market_candidate(self, market_id: str) -> StoredMarketCandidate:
+        with _database_connection(self.path) as connection:
+            row = connection.execute(
+                """SELECT market_id, question, slug, end_date, outcome_a_label, outcome_b_label, review_status
+                FROM market_candidates WHERE market_id = ?""",
+                (market_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"market {market_id} is not present in the local candidate journal")
+        return StoredMarketCandidate(*row)
+
     def get_latest_outcome_asks(self, market_id: str) -> tuple[float, float]:
         outcomes = self.get_market_outcome_tokens(market_id)
         asks: list[float] = []
@@ -267,5 +321,27 @@ class ShadowJournal:
                     getattr(quote, "ask_price"),
                     getattr(quote, "feed"),
                     getattr(quote, "quality_label"),
+                ),
+            )
+
+    def record_realtime_evaluation(self, payload: Mapping[str, object]) -> None:
+        """Persist every fresh or rejected real-time shadow evaluation for calibration."""
+
+        required = {"evaluated_at", "market_id", "symbol", "signal_status", "skip_reasons"}
+        missing = required.difference(payload)
+        if missing:
+            raise ValueError(f"realtime evaluation is missing: {', '.join(sorted(missing))}")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT INTO realtime_evaluations (
+                    evaluated_at, market_id, symbol, spot, up_ask, down_ask,
+                    fair_up_probability, signal_status, skip_reasons_json, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(payload["evaluated_at"]), str(payload["market_id"]), str(payload["symbol"]),
+                    payload.get("spot"), payload.get("up_ask"), payload.get("down_ask"),
+                    payload.get("fair_up_probability"), str(payload["signal_status"]),
+                    json.dumps(payload["skip_reasons"], sort_keys=True),
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )

@@ -173,3 +173,7 @@ Planned modules:
 | 2026-07-18 | Added a provider-independent realized-volatility fallback using verified daily closes; stale fallback data blocks paper recommendations and increases the error buffer. | Complete |
 | 2026-07-18 | Added Nasdaq public baseline provider with local cache failover; cached or stale data cannot bypass the conservative recommendation gate. | Complete |
 | 2026-07-19 | Added read-only Polymarket Market and Alpaca IEX WebSocket observation streams, with 500 ms debounce and freshness tracking. Streams only record shadow re-evaluation requests. | Complete |
+| 2026-07-19 | Added Finnhub as the default read-only equity quote provider while retaining the Alpaca IEX adapter for side-by-side validation. | Complete |
+| 2026-07-19 | Added local candidate listing with market IDs and fixed Polymarket text-heartbeat handling in the shadow WebSocket stream. | Complete |
+| 2026-07-19 | Added freshness-gated real-time realized-volatility evaluations from Finnhub/Alpaca spot and Polymarket WebSocket books. Every evaluation or skip is persisted for later calibration; no execution path was added. | Complete |
+| 2026-07-19 | Added automatic reconnect with capped exponential backoff for public WebSocket closures and throttled repeated stale-state records to one per minute. | Complete |

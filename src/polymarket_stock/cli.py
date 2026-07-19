@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import ssl
 
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_closes_csv
@@ -16,15 +17,18 @@ from .http import PublicApiError
 from .journal import ShadowJournal
 from .logging import log_event
 from .market_discovery import GammaMarketClient
-from .nasdaq_data import NasdaqBaselineClient, load_baseline_cache, save_baseline_cache
+from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, load_baseline_cache, save_baseline_cache
 from .polymarket_data import ClobMarketDataClient
-from .streaming import AlpacaIexStockStream, PolymarketMarketStream, ShadowStreamCoordinator
+from .realtime import RealtimeBaselineEvaluator
+from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Polymarket stock shadow research tools")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("init-db", help="initialize the local shadow journal")
+    list_parser = subparsers.add_parser("list-markets", help="list locally discovered review-required markets and IDs")
+    list_parser.add_argument("--symbol", help="optional ticker filter, for example TSLA")
     scan_parser = subparsers.add_parser("scan-markets", help="discover review-required daily equity candidates")
     scan_parser.add_argument("--symbols", default="SPY,QQQ,AAPL,NVDA,TSLA")
     scan_parser.add_argument("--limit", type=int, default=200)
@@ -52,9 +56,11 @@ def build_parser() -> argparse.ArgumentParser:
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
     nasdaq_baseline_parser.add_argument("--resolves-at", required=True)
-    stream_parser = subparsers.add_parser("stream-shadow", help="read-only Polymarket and Alpaca IEX live streams")
+    stream_parser = subparsers.add_parser("stream-shadow", help="read-only Polymarket and stock-quote live streams")
     stream_parser.add_argument("--market-id", required=True)
     stream_parser.add_argument("--symbol", required=True)
+    stream_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
+    stream_parser.add_argument("--resolves-at", help="ISO-8601 resolution timestamp; defaults to the discovered market end date")
     stream_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
     alpaca_parser = subparsers.add_parser("snapshot-alpaca-options", help="store free Alpaca indicative option quotes")
     alpaca_parser.add_argument("--symbols", required=True, help="comma-separated OCC option symbols, maximum 100")
@@ -73,6 +79,9 @@ def main() -> None:
             {"journal_path": str(settings.journal_path), "shadow_mode": settings.shadow_mode},
         )
         print(f"Shadow journal initialized at {settings.journal_path}")
+    elif arguments.command == "list-markets":
+        candidates = journal.list_market_candidates(arguments.symbol)
+        _print_market_candidates(candidates)
     elif arguments.command == "scan-markets":
         symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
         try:
@@ -128,6 +137,9 @@ def main() -> None:
             "data_is_fresh": assessment.data_is_fresh,
             "model_error_buffer": assessment.model_error_buffer,
             "paper_outcome": assessment.paper_outcome,
+            "signal_status": _signal_status(assessment.paper_outcome),
+            "up_model_edge_before_costs": round(assessment.fair_up_probability - up_ask, 6),
+            "down_model_edge_before_costs": round((1 - assessment.fair_up_probability) - down_ask, 6),
         }
         log_event(settings.log_path, "BASELINE_EVALUATED", result)
         print(json.dumps(result, sort_keys=True))
@@ -163,16 +175,58 @@ def main() -> None:
             "realized_volatility": round(assessment.annualized_realized_volatility, 6),
             "data_is_fresh": assessment.data_is_fresh, "model_error_buffer": assessment.model_error_buffer,
             "paper_outcome": assessment.paper_outcome, "provider": provider,
+            "signal_status": _signal_status(assessment.paper_outcome),
+            "up_model_edge_before_costs": round(assessment.fair_up_probability - up_ask, 6),
+            "down_model_edge_before_costs": round((1 - assessment.fair_up_probability) - down_ask, 6),
         }
         log_event(settings.log_path, "NASDAQ_BASELINE_EVALUATED", result)
         print(json.dumps(result, sort_keys=True))
     elif arguments.command == "stream-shadow":
-        api_key = os.getenv("ALPACA_API_KEY_ID", "")
-        api_secret = os.getenv("ALPACA_API_SECRET_KEY", "")
-        if not api_key or not api_secret:
-            raise SystemExit("stream-shadow requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in .env")
-        outcomes = journal.get_market_outcome_tokens(arguments.market_id)
-        asyncio.run(_run_shadow_stream(settings, arguments.market_id, tuple(item.token_id for item in outcomes), arguments.symbol.upper(), api_key, api_secret, arguments.duration_seconds))
+        if arguments.spot_provider == "finnhub":
+            finnhub_api_key = os.getenv("FINNHUB_API_KEY", "")
+            if not finnhub_api_key:
+                raise SystemExit("stream-shadow --spot-provider finnhub requires FINNHUB_API_KEY in .env")
+            api_key = ""
+            api_secret = ""
+        else:
+            api_key = os.getenv("ALPACA_API_KEY_ID", "")
+            api_secret = os.getenv("ALPACA_API_SECRET_KEY", "")
+            finnhub_api_key = ""
+            if not api_key or not api_secret:
+                raise SystemExit("stream-shadow --spot-provider alpaca requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in .env")
+        try:
+            market = journal.get_market_candidate(arguments.market_id)
+            outcomes = journal.get_market_outcome_tokens(arguments.market_id)
+        except KeyError as error:
+            raise SystemExit(f"Unknown market id: {error}") from error
+        resolves_at = datetime.fromisoformat((arguments.resolves_at or market.end_date).replace("Z", "+00:00"))
+        now = datetime.now(UTC)
+        cache_path = Path("data") / "baseline_cache" / f"{arguments.symbol.upper()}.json"
+        daily_provider = "NASDAQ_PUBLIC_NON_SETTLEMENT"
+        try:
+            nasdaq_client = NasdaqBaselineClient()
+            cached_quote = nasdaq_client.latest_quote(arguments.symbol)
+            closes = nasdaq_client.daily_closes(arguments.symbol, now)
+            save_baseline_cache(cache_path, cached_quote, closes)
+        except (PublicApiError, NasdaqPayloadError):
+            try:
+                _, closes = load_baseline_cache(cache_path)
+                daily_provider = "NASDAQ_LOCAL_CACHE_NON_SETTLEMENT"
+            except NasdaqPayloadError as error:
+                raise SystemExit("stream-shadow requires fresh daily baseline data or a usable local cache") from error
+        try:
+            asyncio.run(
+                _run_shadow_stream(
+                    settings, arguments.market_id, tuple(item.token_id for item in outcomes), arguments.symbol.upper(),
+                    arguments.spot_provider, api_key, api_secret, finnhub_api_key, resolves_at, closes,
+                    daily_provider, arguments.duration_seconds, journal,
+                )
+            )
+        except ssl.SSLCertVerificationError as error:
+            raise SystemExit(
+                "WebSocket TLS verification failed. Set SSL_CERT_FILE in .env to the PEM file for your "
+                "VPN or proxy certificate authority; SSL verification remains enabled."
+            ) from error
     elif arguments.command == "scan-event":
         symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
         try:
@@ -224,6 +278,7 @@ def main() -> None:
             f"Scanned {report.events_scanned} event(s) across {report.pages_scanned} page(s); "
             f"stored {len(report.candidates)} review-required candidate(s) and {book_snapshots} order-book snapshot(s)"
         )
+        _print_market_candidates(report.candidates)
     elif arguments.command == "snapshot-alpaca-options":
         symbols = tuple(symbol.strip() for symbol in arguments.symbols.split(",") if symbol.strip())
         quotes = AlpacaIndicativeOptionsClient(AlpacaCredentials.from_environment()).latest_quotes(symbols)
@@ -248,6 +303,27 @@ def _report_public_api_failure(settings: Settings, event_type: str, error: Publi
     raise SystemExit(f"Public API request failed: {message}")
 
 
+def _signal_status(paper_outcome: str | None) -> str:
+    return f"PAPER_{paper_outcome}" if paper_outcome else "NO_PAPER_TRADE"
+
+
+def _print_market_candidates(candidates: object) -> None:
+    """Render market IDs in terminal output while withholding CLOB token IDs."""
+
+    items = tuple(candidates)
+    if not items:
+        print("No locally discovered market candidates.")
+        return
+    print("\nReview-required markets:")
+    for candidate in items:
+        print(
+            f"  market_id={getattr(candidate, 'market_id')} | "
+            f"outcomes={getattr(candidate, 'outcome_a_label')}/{getattr(candidate, 'outcome_b_label')} | "
+            f"end={getattr(candidate, 'end_date')} | "
+            f"{getattr(candidate, 'question')}"
+        )
+
+
 def _snapshot_market_books(journal: ShadowJournal, market_id: str, outcomes: tuple[object, object]) -> int:
     """Fetch both published outcome books; this remains public read-only I/O."""
 
@@ -258,18 +334,101 @@ def _snapshot_market_books(journal: ShadowJournal, market_id: str, outcomes: tup
     return len(outcomes)
 
 
-async def _run_shadow_stream(settings: Settings, market_id: str, token_ids: tuple[str, str], symbol: str, api_key: str, api_secret: str, duration_seconds: float) -> None:
-    async def log_revaluation(payload: dict[str, object]) -> None:
-        log_event(settings.log_path, str(payload["event_type"]), {**payload, "market_id": market_id, "symbol": symbol})
+async def _run_shadow_stream(
+    settings: Settings,
+    market_id: str,
+    token_ids: tuple[str, str],
+    symbol: str,
+    spot_provider: str,
+    api_key: str,
+    api_secret: str,
+    finnhub_api_key: str,
+    resolves_at: datetime,
+    closes: list[object],
+    daily_provider: str,
+    duration_seconds: float,
+    journal: ShadowJournal,
+) -> None:
+    evaluator = RealtimeBaselineEvaluator(
+        market_id=market_id,
+        symbol=symbol,
+        resolves_at=resolves_at,
+        closes=closes,
+        spot_provider=spot_provider.upper(),
+    )
+    coordinator: ShadowStreamCoordinator
+    last_skip_reasons: tuple[str, ...] | None = None
+    last_skip_logged_at: datetime | None = None
 
-    coordinator = ShadowStreamCoordinator(callback=log_revaluation)
+    async def evaluate_realtime(payload: dict[str, object]) -> None:
+        nonlocal last_skip_reasons, last_skip_logged_at
+        now = datetime.now(UTC)
+        spot_updated_at = coordinator.freshness.last_spot_at
+        book_updated_at = coordinator.freshness.last_book_at
+        spot_age = _age_seconds(now, spot_updated_at)
+        book_age = _age_seconds(now, book_updated_at)
+        evaluation = evaluator.evaluate(
+            now=now,
+            spot=coordinator.latest_spots.get(symbol),
+            up_ask=coordinator.latest_best_asks.get(token_ids[0]),
+            down_ask=coordinator.latest_best_asks.get(token_ids[1]),
+            spot_age_seconds=spot_age,
+            book_age_seconds=book_age,
+            stream_ready=coordinator.freshness.ready(now),
+            trigger_reasons=tuple(str(reason) for reason in payload.get("reasons", ())),
+        )
+        result = {**evaluation.as_payload(), "daily_provider": daily_provider}
+        if evaluation.skip_reasons:
+            skip_reasons = evaluation.skip_reasons
+            should_record_skip = (
+                skip_reasons != last_skip_reasons
+                or last_skip_logged_at is None
+                or (now - last_skip_logged_at).total_seconds() >= 60
+            )
+            if not should_record_skip:
+                return
+            last_skip_reasons = skip_reasons
+            last_skip_logged_at = now
+        else:
+            last_skip_reasons = None
+            last_skip_logged_at = None
+        journal.record_realtime_evaluation(result)
+        log_event(settings.log_path, "REALTIME_BASELINE_EVALUATED", result)
+        print(json.dumps(result, sort_keys=True))
+
+    coordinator = ShadowStreamCoordinator(callback=evaluate_realtime)
+    if spot_provider == "finnhub":
+        spot_stream = FinnhubStockStream(finnhub_api_key)
+        spot_callback = coordinator.on_finnhub_message
+    else:
+        spot_stream = AlpacaIexStockStream(api_key, api_secret)
+        spot_callback = coordinator.on_alpaca_message
+
+    async def log_stream_status(payload: dict[str, object]) -> None:
+        log_event(settings.log_path, str(payload["event_type"]), {**payload, "market_id": market_id, "symbol": symbol})
+        print(json.dumps(payload, sort_keys=True))
+
     tasks = [
-        asyncio.create_task(PolymarketMarketStream().run(token_ids, coordinator.on_polymarket_message)),
-        asyncio.create_task(AlpacaIexStockStream(api_key, api_secret).run((symbol,), coordinator.on_alpaca_message)),
+        asyncio.create_task(
+            run_with_reconnect(
+                "POLYMARKET_MARKET",
+                lambda: PolymarketMarketStream().run(token_ids, coordinator.on_polymarket_message),
+                log_stream_status,
+            )
+        ),
+        asyncio.create_task(
+            run_with_reconnect(
+                f"{spot_provider.upper()}_STOCK",
+                lambda: spot_stream.run((symbol,), spot_callback),
+                log_stream_status,
+            )
+        ),
     ]
     try:
         if duration_seconds > 0:
-            await asyncio.wait(tasks, timeout=duration_seconds, return_when=asyncio.FIRST_EXCEPTION)
+            done, _ = await asyncio.wait(tasks, timeout=duration_seconds, return_when=asyncio.FIRST_EXCEPTION)
+            for task in done:
+                task.result()
         else:
             await asyncio.gather(*tasks)
     finally:
@@ -277,6 +436,12 @@ async def _run_shadow_stream(settings: Settings, market_id: str, token_ids: tupl
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await coordinator.close()
+
+
+def _age_seconds(now: datetime, observed_at: datetime | None) -> float | None:
+    if observed_at is None:
+        return None
+    return max(0.0, (now - observed_at).total_seconds())
 
 
 if __name__ == "__main__":
