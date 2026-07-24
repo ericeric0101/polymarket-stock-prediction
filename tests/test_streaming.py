@@ -4,7 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 import unittest
 
-from polymarket_stock.streaming import PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from polymarket_stock.streaming import FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -82,3 +82,8 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(attempts, 2)
         self.assertEqual(statuses[0]["event_type"], "STREAM_RECONNECTING")
+
+    async def test_finnhub_stream_rejects_non_positive_silence_timeout(self) -> None:
+        stream = FinnhubStockStream("test-key")
+        with self.assertRaises(ValueError):
+            await stream.run(("TSLA",), lambda _payload: None, maximum_silence_seconds=0)

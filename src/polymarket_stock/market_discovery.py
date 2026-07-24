@@ -87,6 +87,26 @@ class DiscoveryReport:
     tag_slugs: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MarketSettlement:
+    market_id: str
+    closed: bool
+    winning_outcome: str | None
+    raw_payload: Mapping[str, object]
+
+    @classmethod
+    def from_gamma_payload(cls, market_id: str, payload: Mapping[str, object]) -> "MarketSettlement":
+        closed = payload.get("closed") is True
+        outcomes = _as_string_list(payload.get("outcomes"), "outcomes")
+        prices = _as_string_list(payload.get("outcomePrices"), "outcomePrices")
+        if len(outcomes) != len(prices):
+            raise MarketPayloadError("settlement outcomes and prices have different lengths")
+        winners = [outcome for outcome, price in zip(outcomes, prices) if float(price) >= 0.99]
+        if len(winners) > 1:
+            raise MarketPayloadError("settlement reports more than one winning outcome")
+        return cls(market_id=market_id, closed=closed, winning_outcome=winners[0] if winners else None, raw_payload=dict(payload))
+
+
 def is_daily_equity_direction_candidate(candidate: MarketCandidate, symbols: Iterable[str] | None) -> bool:
     """Use a narrow title filter; contract eligibility still requires human review."""
 
@@ -132,6 +152,14 @@ class GammaMarketClient:
         if not isinstance(response, list) or len(response) != 1 or not isinstance(response[0], dict):
             raise MarketPayloadError(f"Gamma did not return exactly one event for slug {slug}")
         return response[0]
+
+    def get_market_settlement(self, market_id: str) -> MarketSettlement:
+        if not market_id.strip():
+            raise ValueError("market_id is required")
+        response = self._get_json(f"{GAMMA_MARKETS_URL}/{market_id}", {})
+        if not isinstance(response, dict):
+            raise MarketPayloadError("Gamma market response must be an object")
+        return MarketSettlement.from_gamma_payload(market_id, response)
 
     def discover_event_candidates(self, slug: str, symbols: Iterable[str]) -> list[MarketCandidate]:
         event = self.get_event_by_slug(slug)

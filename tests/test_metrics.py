@@ -13,5 +13,5 @@ class MetricsTests(unittest.TestCase):
         self.assertGreater(metrics.log_loss, 0)
 
     def test_paper_pnl_includes_costs(self) -> None:
-        self.assertAlmostEqual(paper_pnl(0.50, True, 0.02, 0.01), 0.48)
-        self.assertAlmostEqual(paper_pnl(0.50, False, 0.02, 0.01), -0.52)
+        self.assertAlmostEqual(paper_pnl(0.50, True, 0.04), 0.49)
+        self.assertAlmostEqual(paper_pnl(0.50, False, 0.04), -0.51)

@@ -1,0 +1,671 @@
+"""Scheduled multi-market shadow observation and hold-to-settlement lifecycle."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+import json
+from pathlib import Path
+import re
+from typing import Awaitable, Callable, Mapping
+from zoneinfo import ZoneInfo
+
+from .baseline import DailyClose, daily_close_data_is_fresh
+from .calibration import CalibrationRecommendation, load_calibration_recommendation
+from .checkpoints import latest_checkpoint
+from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
+from .event_risk import EventCalendarError, combined_risk_events
+from .fees import PolymarketFeeRateClient
+from .journal import ShadowJournal
+from .logging import log_event
+from .market_discovery import GammaMarketClient, MarketCandidate
+from .maker_shadow import MakerQuoteProposal, propose_maker_buy_quote
+from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, NasdaqQuote, load_baseline_cache, save_baseline_cache
+from .option_iv import OptionIvSurface, OptionSurfaceError, PolygonOptionIvClient, TradierOptionIvClient
+from .portfolio_risk import PaperEntryCandidate, select_diversified_entries
+from .realtime import RealtimeBaselineEvaluator
+from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+
+
+MODEL_VERSION = "realized-vol-observation-v1"
+IV_MODEL_VERSION = "iv-blend-v1"
+MAX_OPTION_IV_AGE_SECONDS = 900.0
+EventSink = Callable[[str, Mapping[str, object]], None]
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def symbol_from_candidate(candidate: MarketCandidate) -> str | None:
+    """Daily equity templates publish the ticker in parentheses in the question."""
+
+    match = re.search(r"\(([A-Z][A-Z.]{0,9})\)", candidate.question.upper())
+    return match.group(1) if match else None
+
+
+def select_active_candidates(
+    candidates: tuple[MarketCandidate, ...], *, now: datetime, max_markets: int, minimum_seconds_to_resolution: float
+) -> tuple[MarketCandidate, ...]:
+    if now.tzinfo is None or max_markets < 1 or minimum_seconds_to_resolution < 0:
+        raise ValueError("invalid active-universe selection inputs")
+    selected: list[MarketCandidate] = []
+    for candidate in sorted(candidates, key=lambda item: (item.end_date, item.market_id)):
+        try:
+            resolves_at = datetime.fromisoformat(candidate.end_date.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        # A daily contract belongs to the New York calendar date of its close.
+        if now.astimezone(NEW_YORK).date() != resolves_at.astimezone(NEW_YORK).date():
+            continue
+        if not symbol_from_candidate(candidate) or (resolves_at - now).total_seconds() < minimum_seconds_to_resolution:
+            continue
+        selected.append(candidate)
+        if len(selected) >= max_markets:
+            break
+    return tuple(selected)
+
+
+@dataclass
+class ActiveMarket:
+    candidate: MarketCandidate
+    contract: DailyEquityCloseContract
+    symbol: str
+    evaluator: RealtimeBaselineEvaluator
+    daily_provider: str
+    up_fee_rate: float | None
+    down_fee_rate: float | None
+    reference_spot: float
+    reference_spot_observed_at: datetime
+    option_surface: OptionIvSurface | None
+    option_quality_flags: tuple[str, ...]
+    risk_reasons: tuple[str, ...]
+    additional_model_error_buffer: float
+    coordinator: ShadowStreamCoordinator
+    last_skip_reasons: tuple[str, ...] | None = None
+    last_skip_logged_at: datetime | None = None
+
+    @property
+    def token_ids(self) -> tuple[str, str]:
+        return (self.candidate.outcome_a_token_id, self.candidate.outcome_b_token_id)
+
+
+@dataclass(frozen=True)
+class PendingPaperEntry:
+    candidate: PaperEntryCandidate
+    runtime: ActiveMarket
+    payload: Mapping[str, object]
+    created_at: datetime
+
+
+class MultiMarketRouter:
+    """Dispatch one shared provider stream to the relevant market evaluators."""
+
+    def __init__(self, runtimes: Mapping[str, ActiveMarket], spot_provider: str) -> None:
+        self._runtimes = runtimes
+        self._spot_provider = spot_provider
+        self._token_market_ids: dict[str, list[str]] = {}
+        self._symbol_market_ids: dict[str, list[str]] = {}
+        for market_id, runtime in runtimes.items():
+            for token_id in runtime.token_ids:
+                self._token_market_ids.setdefault(token_id, []).append(market_id)
+            self._symbol_market_ids.setdefault(runtime.symbol, []).append(market_id)
+
+    async def on_polymarket_message(self, payload: Mapping[str, object]) -> None:
+        event_type = str(payload.get("event_type", ""))
+        if event_type == "price_change":
+            changes = payload.get("price_changes")
+            if not isinstance(changes, list):
+                return
+            for change in changes:
+                if not isinstance(change, Mapping):
+                    continue
+                await self._dispatch_book({"event_type": event_type, "price_changes": [dict(change)]}, str(change.get("asset_id", "")))
+            return
+        await self._dispatch_book(payload, str(payload.get("asset_id", "")))
+
+    async def _dispatch_book(self, payload: Mapping[str, object], token_id: str) -> None:
+        for market_id in self._token_market_ids.get(token_id, ()):
+            await self._runtimes[market_id].coordinator.on_polymarket_message(payload)
+
+    async def on_spot_message(self, payload: Mapping[str, object]) -> None:
+        if self._spot_provider == "finnhub":
+            trades = payload.get("data") if payload.get("type") == "trade" else None
+            if not isinstance(trades, list):
+                return
+            by_symbol: dict[str, list[object]] = {}
+            for trade in trades:
+                if isinstance(trade, Mapping) and isinstance(trade.get("s"), str):
+                    by_symbol.setdefault(str(trade["s"]).upper(), []).append(dict(trade))
+            for symbol, symbol_trades in by_symbol.items():
+                for market_id in self._symbol_market_ids.get(symbol, ()):
+                    await self._runtimes[market_id].coordinator.on_finnhub_message({"type": "trade", "data": symbol_trades})
+            return
+        symbol = payload.get("S")
+        if isinstance(symbol, str):
+            for market_id in self._symbol_market_ids.get(symbol.upper(), ()):
+                await self._runtimes[market_id].coordinator.on_alpaca_message(payload)
+
+
+class MultiMarketShadowSupervisor:
+    """Refreshes the active universe and manages paper entries through settlement."""
+
+    def __init__(
+        self,
+        *,
+        journal: ShadowJournal,
+        log_path: Path,
+        spot_provider: str,
+        finnhub_api_key: str = "",
+        alpaca_api_key: str = "",
+        alpaca_api_secret: str = "",
+        max_markets: int = 18,
+        minimum_seconds_to_resolution: float = 900,
+        maker_minimum_edge: float = 0.005,
+        maker_reprice_minimum_price_change: float = 0.02,
+        maker_minimum_quote_lifetime_seconds: float = 30.0,
+        paper_batch_seconds: float = 30.0,
+        max_daily_paper_entries: int = 3,
+        max_per_risk_group: int = 1,
+        max_same_direction_paper_entries: int = 2,
+        gamma_client: GammaMarketClient | None = None,
+        daily_client: NasdaqBaselineClient | None = None,
+        fee_client: PolymarketFeeRateClient | None = None,
+        tradier_api_token: str = "",
+        polygon_api_key: str = "",
+        event_calendar_path: Path = Path("data/event_calendar.json"),
+        calibration_path: Path = Path("data/model_calibration.json"),
+        event_sink: EventSink | None = None,
+    ) -> None:
+        if spot_provider not in {"finnhub", "alpaca"}:
+            raise ValueError("spot_provider must be finnhub or alpaca")
+        if max_markets < 1:
+            raise ValueError("max_markets must be positive")
+        if maker_minimum_edge < 0 or maker_minimum_edge >= 1:
+            raise ValueError("maker_minimum_edge must be between 0 and 1")
+        if maker_reprice_minimum_price_change < 0 or maker_minimum_quote_lifetime_seconds < 0:
+            raise ValueError("maker reprice thresholds must be non-negative")
+        if paper_batch_seconds <= 0 or min(max_daily_paper_entries, max_per_risk_group, max_same_direction_paper_entries) < 1:
+            raise ValueError("paper portfolio limits must be positive")
+        self.journal = journal
+        self.log_path = log_path
+        self.spot_provider = spot_provider
+        self.finnhub_api_key = finnhub_api_key
+        self.alpaca_api_key = alpaca_api_key
+        self.alpaca_api_secret = alpaca_api_secret
+        self.max_markets = max_markets
+        self.minimum_seconds_to_resolution = minimum_seconds_to_resolution
+        self.maker_minimum_edge = maker_minimum_edge
+        self.maker_reprice_minimum_price_change = maker_reprice_minimum_price_change
+        self.maker_minimum_quote_lifetime_seconds = maker_minimum_quote_lifetime_seconds
+        self.paper_batch_seconds = paper_batch_seconds
+        self.max_daily_paper_entries = max_daily_paper_entries
+        self.max_per_risk_group = max_per_risk_group
+        self.max_same_direction_paper_entries = max_same_direction_paper_entries
+        self.gamma = gamma_client or GammaMarketClient()
+        self.daily_client = daily_client or NasdaqBaselineClient()
+        self.fee_client = fee_client or PolymarketFeeRateClient()
+        # Polygon/Massive is preferred when configured because it is a data-only
+        # provider; its adapter rejects free/15-minute-delayed data for entries.
+        self.option_client = PolygonOptionIvClient(polygon_api_key) if polygon_api_key.strip() else TradierOptionIvClient(tradier_api_token)
+        self.event_calendar_path = event_calendar_path
+        self.calibration_path = calibration_path
+        try:
+            self.calibration: CalibrationRecommendation | None = load_calibration_recommendation(calibration_path)
+        except ValueError:
+            self.calibration = None
+        self.event_sink = event_sink or self._default_event_sink
+        self.runtimes: dict[str, ActiveMarket] = {}
+        self._stream_tasks: list[asyncio.Task[None]] = []
+        self._stream_runtimes: dict[str, ActiveMarket] = {}
+        self._stream_signature: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._pending_paper_entries: dict[str, PendingPaperEntry] = {}
+        self._paper_batch_task: asyncio.Task[None] | None = None
+
+    def _default_event_sink(self, event_type: str, payload: Mapping[str, object]) -> None:
+        log_event(self.log_path, event_type, payload)
+        print(json.dumps({"event_type": event_type, **payload}, sort_keys=True, default=str))
+
+    async def refresh(self) -> None:
+        """Discover current candidates, settle completed positions, and reconcile streams."""
+
+        now = datetime.now(UTC)
+        await self._settle_open_positions()
+        await self._reconcile_evaluation_settlements()
+        report = await asyncio.to_thread(
+            self.gamma.discover_active_equity_candidates,
+            tag_slugs=("stocks", "equities"),
+            page_size=500,
+            max_pages_per_tag=100,
+            pause_seconds=0.2,
+        )
+        for candidate in report.candidates:
+            self.journal.upsert_market_candidate(candidate)
+        selected = select_active_candidates(
+            report.candidates, now=now, max_markets=self.max_markets,
+            minimum_seconds_to_resolution=self.minimum_seconds_to_resolution,
+        )
+        runtimes: dict[str, ActiveMarket] = {}
+        for candidate in selected:
+            try:
+                contract = parse_daily_equity_close_contract(candidate)
+            except EquityContractParseError as error:
+                self.journal.record_contract_review(candidate.market_id, accepted=False, reason=str(error))
+                self.event_sink("SUPERVISOR_MARKET_SKIPPED", {"market_id": candidate.market_id, "reason": str(error)})
+                continue
+            self.journal.record_contract_review(
+                candidate.market_id, accepted=True, reason="PYTH_DAILY_CLOSE_TEMPLATE", contract=contract.as_payload()
+            )
+            symbol = contract.symbol
+            existing = self.runtimes.get(candidate.market_id)
+            if existing and existing.symbol == symbol and existing.candidate.end_date == candidate.end_date and existing.token_ids == (candidate.outcome_a_token_id, candidate.outcome_b_token_id):
+                existing.up_fee_rate, existing.down_fee_rate = await asyncio.to_thread(self._fee_rates, candidate)
+                existing.option_surface, existing.option_quality_flags = await asyncio.to_thread(
+                    self._option_surface, symbol, existing.reference_spot, now, contract.resolves_at
+                )
+                try:
+                    events = combined_risk_events(self.event_calendar_path, symbol, now, contract.resolves_at, self.finnhub_api_key)
+                    existing.risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
+                except EventCalendarError:
+                    existing.risk_reasons = ("EVENT_CALENDAR_INVALID",)
+                runtimes[candidate.market_id] = existing
+                continue
+            try:
+                closes, provider, reference_quote = await asyncio.to_thread(self._daily_closes, symbol, now)
+            except (NasdaqPayloadError, OSError) as error:
+                self.event_sink("SUPERVISOR_MARKET_SKIPPED", {"market_id": candidate.market_id, "symbol": symbol, "reason": str(error)})
+                continue
+            up_fee_rate, down_fee_rate = await asyncio.to_thread(self._fee_rates, candidate)
+            option_surface, option_flags = await asyncio.to_thread(
+                self._option_surface, symbol, reference_quote.price, now, contract.resolves_at
+            )
+            try:
+                events = combined_risk_events(self.event_calendar_path, symbol, now, contract.resolves_at, self.finnhub_api_key)
+                risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
+            except EventCalendarError as error:
+                risk_reasons = ("EVENT_CALENDAR_INVALID",)
+                self.event_sink("SUPERVISOR_EVENT_CALENDAR_ERROR", {"market_id": candidate.market_id, "error": str(error)})
+            runtimes[candidate.market_id] = self._make_runtime(
+                candidate, contract, closes, provider, reference_quote, up_fee_rate, down_fee_rate,
+                option_surface, option_flags, risk_reasons
+            )
+        self.runtimes = runtimes
+        self.event_sink(
+            "SUPERVISOR_UNIVERSE_REFRESHED",
+            {
+                "candidate_count": len(report.candidates), "active_market_count": len(runtimes),
+                "events_scanned": report.events_scanned, "pages_scanned": report.pages_scanned,
+            },
+        )
+        await self._reconcile_streams()
+
+    def _daily_closes(self, symbol: str, now: datetime) -> tuple[list[DailyClose], str, NasdaqQuote]:
+        cache_path = Path("data") / "baseline_cache" / f"{symbol}.json"
+        try:
+            quote, closes = load_baseline_cache(cache_path)
+            if daily_close_data_is_fresh(closes, now):
+                return closes, "NASDAQ_LOCAL_CACHE_NON_SETTLEMENT", quote
+        except NasdaqPayloadError:
+            pass
+        quote = self.daily_client.latest_quote(symbol)
+        closes = self.daily_client.daily_closes(symbol, now)
+        save_baseline_cache(cache_path, quote, closes)
+        return closes, "NASDAQ_PUBLIC_NON_SETTLEMENT", quote
+
+    def _option_surface(
+        self, symbol: str, spot: float, now: datetime, resolves_at: datetime
+    ) -> tuple[OptionIvSurface | None, tuple[str, ...]]:
+        if not self.option_client.configured:
+            return None, ("OPTION_IV_PROVIDER_UNCONFIGURED",)
+        try:
+            surface = self.option_client.option_surface(symbol, spot, now, resolves_at)
+        except (OptionSurfaceError, OSError) as error:
+            reason = str(error).replace(" ", "_")[:120] or type(error).__name__
+            return None, (f"OPTION_IV_UNAVAILABLE:{reason}",)
+        return surface, surface.quality_flags
+
+    def _fee_rates(self, candidate: MarketCandidate) -> tuple[float | None, float | None]:
+        """Never substitute a guessed fee: unavailable rates simply remain unavailable."""
+
+        try:
+            up_rate = self.fee_client.get_fee_rate(candidate.outcome_a_token_id).fee_rate
+            down_rate = self.fee_client.get_fee_rate(candidate.outcome_b_token_id).fee_rate
+        except Exception as error:
+            self.event_sink("SUPERVISOR_FEE_RATE_UNAVAILABLE", {"market_id": candidate.market_id, "error": str(error)})
+            return None, None
+        return up_rate, down_rate
+
+    def _make_runtime(self, candidate: MarketCandidate, contract: DailyEquityCloseContract, closes: list[DailyClose], daily_provider: str, reference_quote: NasdaqQuote, up_fee_rate: float | None, down_fee_rate: float | None, option_surface: OptionIvSurface | None, option_quality_flags: tuple[str, ...], risk_reasons: tuple[str, ...]) -> ActiveMarket:
+        calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
+        calibrated_buffer = self.calibration.recommended_model_error_buffer if self.calibration else 0.07
+        evaluator = RealtimeBaselineEvaluator(
+            market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
+            closes=closes, spot_provider=self.spot_provider.upper(), up_fee_rate=up_fee_rate,
+            down_fee_rate=down_fee_rate, minimum_edge=calibrated_minimum_edge,
+        )
+        runtime: ActiveMarket
+
+        async def evaluate_callback(payload: Mapping[str, object]) -> None:
+            await self._evaluate_runtime(runtime, payload)
+
+        coordinator = ShadowStreamCoordinator(callback=evaluate_callback)
+        runtime = ActiveMarket(
+            candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,
+            reference_quote.last_trade_at, option_surface, option_quality_flags, risk_reasons,
+            max(0.0, calibrated_buffer - 0.07), coordinator,
+        )
+        return runtime
+
+    async def _evaluate_runtime(self, runtime: ActiveMarket, trigger: Mapping[str, object]) -> None:
+        now = datetime.now(UTC)
+        coordinator = runtime.coordinator
+        token_ids = runtime.token_ids
+        evaluation = runtime.evaluator.evaluate(
+            now=now,
+            spot=coordinator.latest_spots.get(runtime.symbol),
+            up_ask=coordinator.latest_best_asks.get(token_ids[0]),
+            down_ask=coordinator.latest_best_asks.get(token_ids[1]),
+            up_bid=coordinator.latest_best_bids.get(token_ids[0]),
+            down_bid=coordinator.latest_best_bids.get(token_ids[1]),
+            reference_spot=runtime.reference_spot,
+            reference_spot_age_seconds=_age_seconds(now, runtime.reference_spot_observed_at),
+            option_iv=_usable_option_iv(runtime.option_surface, now),
+            option_skew=runtime.option_surface.put_call_skew if runtime.option_surface else None,
+            option_iv_provider=runtime.option_surface.provider if runtime.option_surface else None,
+            option_iv_age_seconds=_option_iv_age_seconds(runtime.option_surface, now),
+            option_quality_flags=_current_option_quality_flags(runtime.option_surface, runtime.option_quality_flags, now),
+            risk_reasons=runtime.risk_reasons,
+            additional_model_error_buffer=runtime.additional_model_error_buffer,
+            spot_age_seconds=_age_seconds(now, coordinator.freshness.last_spot_at),
+            book_age_seconds=_age_seconds(now, coordinator.freshness.last_book_at),
+            stream_ready=coordinator.freshness.ready(now),
+            trigger_reasons=tuple(str(reason) for reason in trigger.get("reasons", ())),
+        )
+        model_version = IV_MODEL_VERSION if evaluation.option_iv_status == "IV_VALID" else MODEL_VERSION
+        result = {
+            **evaluation.as_payload(), "daily_provider": runtime.daily_provider, "model_version": model_version,
+            "contract": runtime.contract.as_payload(),
+            "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
+        }
+        maker_quotes = self._sync_maker_shadow_quotes(runtime, evaluation, result, now)
+        result["maker_shadow_quotes"] = maker_quotes
+        if evaluation.skip_reasons:
+            should_record = (
+                runtime.last_skip_reasons != evaluation.skip_reasons
+                or runtime.last_skip_logged_at is None
+                or (now - runtime.last_skip_logged_at).total_seconds() >= 60
+            )
+            if not should_record:
+                return
+            runtime.last_skip_reasons = evaluation.skip_reasons
+            runtime.last_skip_logged_at = now
+        else:
+            runtime.last_skip_reasons = None
+            runtime.last_skip_logged_at = None
+        self.journal.record_realtime_evaluation(result)
+        checkpoint = latest_checkpoint(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
+        if checkpoint:
+            checkpoint_date, checkpoint_name = checkpoint
+            if self.journal.record_checkpoint_observation(
+                checkpoint_date=checkpoint_date, checkpoint_name=checkpoint_name, payload=result
+            ):
+                self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
+                    "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
+                    "checkpoint_date": checkpoint_date, "checkpoint_name": checkpoint_name,
+                })
+        self.event_sink("REALTIME_BASELINE_EVALUATED", result)
+        if evaluation.paper_outcome and evaluation.fair_up_probability is not None:
+            await self._queue_paper_entry(runtime, evaluation, result, now)
+
+    async def _queue_paper_entry(
+        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
+    ) -> None:
+        outcome = getattr(evaluation, "paper_outcome")
+        entry_ask = getattr(evaluation, "up_ask") if outcome == "UP" else getattr(evaluation, "down_ask")
+        edge = getattr(evaluation, "up_edge") if outcome == "UP" else getattr(evaluation, "down_edge")
+        fair_up = getattr(evaluation, "fair_up_probability")
+        if outcome not in {"UP", "DOWN"} or entry_ask is None or edge is None or fair_up is None:
+            return
+        fair_probability = float(fair_up) if outcome == "UP" else 1 - float(fair_up)
+        self._pending_paper_entries[runtime.candidate.market_id] = PendingPaperEntry(
+            PaperEntryCandidate(runtime.candidate.market_id, runtime.symbol, outcome, float(entry_ask), fair_probability, float(edge)),
+            runtime, dict(payload), now,
+        )
+        if self._paper_batch_task is None or self._paper_batch_task.done():
+            self._paper_batch_task = asyncio.create_task(self._flush_paper_entries_after_delay())
+
+    async def _flush_paper_entries_after_delay(self) -> None:
+        await asyncio.sleep(self.paper_batch_seconds)
+        pending = tuple(self._pending_paper_entries.values())
+        self._pending_paper_entries.clear()
+        self._paper_batch_task = None
+        if not pending:
+            return
+        now = datetime.now(UTC)
+        today = now.astimezone(NEW_YORK).date()
+        existing = tuple(
+            position for position in self.journal.list_paper_positions()
+            if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == today
+        )
+        existing_market_ids = {position.market_id for position in existing}
+        batch_id = f"{today.isoformat()}-{int(now.timestamp() // self.paper_batch_seconds)}"
+        candidates = tuple(item.candidate for item in pending if item.candidate.market_id not in existing_market_ids)
+        rejected_existing = tuple(item for item in pending if item.candidate.market_id in existing_market_ids)
+        decisions = select_diversified_entries(
+            candidates, existing_symbols=((position.symbol, position.outcome) for position in existing),
+            max_daily_entries=self.max_daily_paper_entries, max_per_risk_group=self.max_per_risk_group,
+            max_same_direction=self.max_same_direction_paper_entries,
+        )
+        pending_by_market = {item.candidate.market_id: item for item in pending}
+        for item in rejected_existing:
+            self.journal.record_portfolio_decision(
+                batch_id=batch_id, market_id=item.candidate.market_id, symbol=item.candidate.symbol,
+                outcome=item.candidate.outcome, risk_group=item.candidate.risk_group, edge=item.candidate.edge,
+                selected=False, reason="ALREADY_POSITIONED", payload=item.payload, created_at=now,
+            )
+        for decision in decisions:
+            item = pending_by_market[decision.candidate.market_id]
+            self.journal.record_portfolio_decision(
+                batch_id=batch_id, market_id=decision.candidate.market_id, symbol=decision.candidate.symbol,
+                outcome=decision.candidate.outcome, risk_group=decision.candidate.risk_group, edge=decision.candidate.edge,
+                selected=decision.accepted, reason=decision.reason, payload=item.payload, created_at=now,
+            )
+            if not decision.accepted:
+                self.event_sink("PAPER_ENTRY_REJECTED", {"batch_id": batch_id, "market_id": decision.candidate.market_id, "reason": decision.reason})
+                continue
+            fee_rate = item.runtime.up_fee_rate if decision.candidate.outcome == "UP" else item.runtime.down_fee_rate
+            if fee_rate is None:
+                continue
+            position, created = self.journal.open_paper_position(
+                market_id=decision.candidate.market_id, symbol=decision.candidate.symbol, outcome=decision.candidate.outcome,
+                entry_ask=decision.candidate.entry_ask, fair_probability=decision.candidate.fair_probability,
+                model_version=str(item.payload["model_version"]), payload=item.payload, fee_rate=fee_rate,
+            )
+            if created:
+                self.event_sink("PAPER_POSITION_OPENED", {
+                    "batch_id": batch_id, "position_id": position.position_id, "market_id": position.market_id,
+                    "symbol": position.symbol, "outcome": position.outcome, "entry_ask": position.entry_ask,
+                })
+
+    def _sync_maker_shadow_quotes(
+        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
+    ) -> list[Mapping[str, object]]:
+        """Maintain research-only passive quotes; touches never become assumed fills."""
+
+        quotes: list[Mapping[str, object]] = []
+        fair_up = getattr(evaluation, "fair_up_probability")
+        proposals: tuple[MakerQuoteProposal | None, MakerQuoteProposal | None]
+        if fair_up is None or getattr(evaluation, "skip_reasons"):
+            proposals = (None, None)
+        else:
+            proposals = (
+                propose_maker_buy_quote(
+                    outcome="UP", fair_probability=float(fair_up), best_bid=getattr(evaluation, "up_bid"),
+                    best_ask=getattr(evaluation, "up_ask"), minimum_edge=self.maker_minimum_edge,
+                ),
+                propose_maker_buy_quote(
+                    outcome="DOWN", fair_probability=1 - float(fair_up), best_bid=getattr(evaluation, "down_bid"),
+                    best_ask=getattr(evaluation, "down_ask"), minimum_edge=self.maker_minimum_edge,
+                ),
+            )
+        for outcome, proposal, current_ask in (
+            ("UP", proposals[0], getattr(evaluation, "up_ask")),
+            ("DOWN", proposals[1], getattr(evaluation, "down_ask")),
+        ):
+            if current_ask is not None:
+                touched = self.journal.record_maker_shadow_touch(
+                    market_id=runtime.candidate.market_id, outcome=outcome, current_ask=float(current_ask), observed_at=now
+                )
+                if touched is not None:
+                    self.event_sink("MAKER_SHADOW_QUOTE_TOUCHED", _maker_quote_payload(touched))
+            quote, action = self.journal.sync_maker_shadow_quote(
+                market_id=runtime.candidate.market_id, symbol=runtime.symbol, outcome=outcome,
+                limit_price=proposal.limit_price if proposal else None,
+                fair_probability=proposal.fair_probability if proposal else None,
+                theoretical_edge=proposal.theoretical_edge if proposal else None,
+                best_bid=proposal.best_bid if proposal else None, best_ask=proposal.best_ask if proposal else None,
+                payload={"evaluated_at": now.isoformat(), "model_version": payload.get("model_version", MODEL_VERSION), "source": "MAKER_SHADOW"},
+                no_quote_reason="MODEL_OR_DATA_INVALID" if fair_up is None else "NO_MAKER_EDGE", observed_at=now,
+                minimum_reprice_price_change=self.maker_reprice_minimum_price_change,
+                minimum_quote_lifetime_seconds=self.maker_minimum_quote_lifetime_seconds,
+            )
+            if action:
+                event_type = f"MAKER_SHADOW_QUOTE_{action}"
+                self.event_sink(event_type, _maker_quote_payload(quote) if quote else {"market_id": runtime.candidate.market_id, "symbol": runtime.symbol, "outcome": outcome})
+            if quote is not None:
+                quotes.append(_maker_quote_payload(quote))
+        return quotes
+
+    async def _settle_open_positions(self) -> None:
+        for position in self.journal.list_paper_positions("OPEN"):
+            try:
+                settlement = await asyncio.to_thread(self.gamma.get_market_settlement, position.market_id)
+            except Exception as error:  # Public data failures should not stop the supervisor.
+                self.event_sink("PAPER_SETTLEMENT_CHECK_FAILED", {"position_id": position.position_id, "market_id": position.market_id, "error": str(error)})
+                continue
+            outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
+            if not settlement.closed or outcome not in {"UP", "DOWN"}:
+                continue
+            settled = self.journal.settle_paper_position(
+                position.position_id, settlement_outcome=outcome, settlement_payload=settlement.raw_payload,
+            )
+            self.journal.cancel_maker_shadow_quotes(position.market_id, "MARKET_SETTLED")
+            self.event_sink("PAPER_POSITION_SETTLED", {"position_id": settled.position_id, "market_id": settled.market_id, "outcome": settled.outcome, "settlement_outcome": outcome, "realized_pnl": settled.realized_pnl})
+
+    async def _reconcile_evaluation_settlements(self) -> None:
+        """Attach official outcomes to all valid observations, not only paper entries."""
+
+        for market_id in self.journal.pending_evaluation_market_ids():
+            try:
+                settlement = await asyncio.to_thread(self.gamma.get_market_settlement, market_id)
+            except Exception as error:
+                self.event_sink("EVALUATION_SETTLEMENT_CHECK_FAILED", {"market_id": market_id, "error": str(error)})
+                continue
+            outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
+            if settlement.closed and outcome in {"UP", "DOWN"}:
+                self.journal.record_market_settlement(market_id, outcome, settlement.raw_payload)
+                self.journal.cancel_maker_shadow_quotes(market_id, "MARKET_SETTLED")
+                self.event_sink("EVALUATION_MARKET_SETTLED", {"market_id": market_id, "settlement_outcome": outcome})
+
+    async def settle_open_positions(self) -> None:
+        """Public one-shot settlement reconciliation used by the CLI and scheduler."""
+
+        await self._settle_open_positions()
+
+    async def _reconcile_streams(self) -> None:
+        token_ids = tuple(sorted(token for runtime in self.runtimes.values() for token in runtime.token_ids))
+        symbols = tuple(sorted({runtime.symbol for runtime in self.runtimes.values()}))
+        signature = (token_ids, symbols)
+        if signature == self._stream_signature:
+            return
+        await self._stop_streams()
+        self._stream_signature = signature
+        if not token_ids:
+            return
+        router = MultiMarketRouter(self.runtimes, self.spot_provider)
+
+        async def status_callback(payload: Mapping[str, object]) -> None:
+            self.event_sink(str(payload["event_type"]), payload)
+
+        if self.spot_provider == "finnhub":
+            if not self.finnhub_api_key:
+                raise ValueError("FINNHUB_API_KEY is required for supervisor streaming")
+            spot_stream = FinnhubStockStream(self.finnhub_api_key)
+        else:
+            spot_stream = AlpacaIexStockStream(self.alpaca_api_key, self.alpaca_api_secret)
+        spot_callback = router.on_spot_message
+        self._stream_tasks = [
+            asyncio.create_task(run_with_reconnect("POLYMARKET_MARKET", lambda: PolymarketMarketStream().run(token_ids, router.on_polymarket_message), status_callback)),
+            asyncio.create_task(run_with_reconnect(f"{self.spot_provider.upper()}_STOCK", lambda: spot_stream.run(symbols, spot_callback), status_callback)),
+        ]
+        self._stream_runtimes = dict(self.runtimes)
+
+    async def _stop_streams(self) -> None:
+        for task in self._stream_tasks:
+            task.cancel()
+        if self._stream_tasks:
+            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+        for runtime in self._stream_runtimes.values():
+            await runtime.coordinator.close()
+        self._stream_tasks = []
+        self._stream_runtimes = {}
+
+    async def _stop_paper_batch(self) -> None:
+        if self._paper_batch_task:
+            self._paper_batch_task.cancel()
+            await asyncio.gather(self._paper_batch_task, return_exceptions=True)
+        self._paper_batch_task = None
+        self._pending_paper_entries.clear()
+
+    async def run(self, scan_interval_seconds: float, duration_seconds: float = 0) -> None:
+        if scan_interval_seconds <= 0 or duration_seconds < 0:
+            raise ValueError("invalid supervisor timing")
+        started_at = datetime.now(UTC)
+        try:
+            while True:
+                await self.refresh()
+                if duration_seconds and (datetime.now(UTC) - started_at).total_seconds() >= duration_seconds:
+                    return
+                wait_seconds = scan_interval_seconds
+                if duration_seconds:
+                    remaining = duration_seconds - (datetime.now(UTC) - started_at).total_seconds()
+                    wait_seconds = min(wait_seconds, max(0.0, remaining))
+                if wait_seconds <= 0:
+                    return
+                await asyncio.sleep(wait_seconds)
+        finally:
+            await self._stop_paper_batch()
+            await self._stop_streams()
+
+
+def _age_seconds(now: datetime, observed_at: datetime | None) -> float | None:
+    return max(0.0, (now - observed_at).total_seconds()) if observed_at else None
+
+
+def _option_iv_age_seconds(surface: OptionIvSurface | None, now: datetime) -> float | None:
+    return _age_seconds(now, surface.observed_at) if surface else None
+
+
+def _current_option_quality_flags(
+    surface: OptionIvSurface | None, configured_flags: tuple[str, ...], now: datetime
+) -> tuple[str, ...]:
+    flags = list(configured_flags)
+    age = _option_iv_age_seconds(surface, now)
+    if surface and age is not None and age > MAX_OPTION_IV_AGE_SECONDS:
+        flags.append("OPTION_IV_STALE")
+    return tuple(sorted(set(flags)))
+
+
+def _usable_option_iv(surface: OptionIvSurface | None, now: datetime) -> float | None:
+    age = _option_iv_age_seconds(surface, now)
+    if surface and surface.usable and age is not None and age <= MAX_OPTION_IV_AGE_SECONDS:
+        return surface.atm_iv
+    return None
+
+
+def _maker_quote_payload(quote: object) -> Mapping[str, object]:
+    return {
+        "quote_id": getattr(quote, "quote_id"), "market_id": getattr(quote, "market_id"),
+        "symbol": getattr(quote, "symbol"), "outcome": getattr(quote, "outcome"),
+        "status": getattr(quote, "status"), "limit_price": getattr(quote, "limit_price"),
+        "fair_probability": getattr(quote, "fair_probability"), "theoretical_edge": getattr(quote, "theoretical_edge"),
+        "touch_count": getattr(quote, "touch_count"), "cancel_reason": getattr(quote, "cancel_reason"),
+    }

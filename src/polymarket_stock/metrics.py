@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import log
 
+from .fees import estimate_taker_fee_usdc
+
 
 @dataclass(frozen=True)
 class CalibrationMetrics:
@@ -28,8 +30,8 @@ def calibration_metrics(predictions: list[tuple[float, bool]]) -> CalibrationMet
     return CalibrationMetrics(sample_size=len(predictions), brier_score=brier, log_loss=log_loss)
 
 
-def paper_pnl(entry_price: float, won: bool, fee_rate: float, slippage: float) -> float:
-    if not 0 < entry_price < 1 or not 0 <= fee_rate <= 1 or not 0 <= slippage <= 1:
+def paper_pnl(entry_price: float, won: bool, fee_rate: float) -> float:
+    if not 0 < entry_price < 1 or not 0 <= fee_rate <= 1:
         raise ValueError("invalid paper PnL inputs")
-    cost = entry_price + entry_price * fee_rate + slippage
+    cost = entry_price + estimate_taker_fee_usdc(shares=1, price=entry_price, fee_rate=fee_rate)
     return (1.0 if won else 0.0) - cost

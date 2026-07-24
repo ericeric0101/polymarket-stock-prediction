@@ -45,7 +45,7 @@ class ResearchTests(unittest.TestCase):
             market_id="test", spot=101, prior_close=100, now=NOW, resolves_at=NOW + timedelta(hours=4),
             volatility_regime=VolatilityRegime(overnight_annual=0.60, regular_annual=0.30),
             overnight_seconds=3600, regular_seconds=3 * 3600, option_quotes=[quote],
-            up_ask=0.40, down_ask=0.60, fee_rate=0.01, slippage=0.001,
+            up_ask=0.40, down_ask=0.60, up_fee_rate=0.04, down_fee_rate=0.04,
             model_error_buffer=0.02, minimum_edge=0.01,
             events=[ScheduledRiskEvent("CPI", NOW + timedelta(hours=2), blocking=True)], halted=False,
         )

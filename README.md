@@ -122,6 +122,81 @@ option IV, so it is an observation and timing layer only, not a trading signal.
 - Shadow results must be evaluated over sufficient settled markets before a
   controlled live-pilot proposal can be considered.
 
+### Multi-Market Shadow Supervisor
+
+```zsh
+# Refresh active equity markets every 15 minutes, supervise up to 18 markets,
+# and create only idempotent hold-to-settlement paper positions.
+polymarket-stock supervise-shadow --duration-seconds 0
+
+# Inspect the paper lifecycle and realized calibration results.
+polymarket-stock paper-positions --status OPEN
+polymarket-stock paper-positions --status SETTLED
+polymarket-stock paper-performance
+polymarket-stock settle-paper-positions
+
+# Inspect research-only passive maker quotes. These are not orders or fills.
+polymarket-stock maker-shadow-quotes --status ACTIVE
+polymarket-stock maker-shadow-quotes --status CANCELLED
+
+# Review selected and rejected 30-second paper-entry batches.
+polymarket-stock portfolio-decisions --limit 100
+polymarket-stock calibrate-checkpoints
+```
+
+The supervisor shares one Polymarket stream and one stock-quote stream, restarts
+those subscriptions when the active universe changes, and uses Gamma's published
+closed/resolved market state for settlement reconciliation. It does not use stock
+prices to infer settlement.
+
+Daily equity contracts are eligible only on the New York calendar date of their
+published close. A next-day contract is never evaluated, quoted, or entered
+during the preceding trading day. Existing paper entries that predate their
+contract's New York trading date remain in the SQLite audit trail but are marked
+`PRECONTRACT_TRADE_DATE` and excluded from calibration and paper-performance reports.
+
+The supervisor also records maker shadow quotes. For each valid Fair Up/Down
+evaluation it proposes a passive `1c`-tick buy below fair value with a default
+`0.5c` theoretical edge. To prevent quote churn, it only reprices when the
+proposed limit changes by at least `2c` and the active quote has lived for at
+least 30 seconds. Both thresholds are configurable on `supervise-shadow` with
+`--maker-reprice-minimum-price-change` and
+`--maker-minimum-quote-lifetime-seconds`.
+`TOUCHED` means the published ask reached the quote; it is not treated as a fill,
+does not earn a rebate, and does not create a paper position.
+
+Realized-volatility fallback is observation-only. A paper entry requires an
+`IV_VALID` current near-ATM call/put surface. Eligible signals are collected for
+30 seconds, then selected with conservative defaults: three per day, one per
+static risk group, and two per direction. Every selected or rejected candidate
+is stored in `portfolio_decisions`.
+
+### Option-IV Provider Limits
+
+The supervisor uses `POLYGON_API_KEY` for Massive (formerly Polygon) when it is
+configured, otherwise it uses `TRADIER_API_TOKEN`. Massive Currencies Basic and
+Options Basic do not include U.S. option-chain snapshots. A 403 entitlement
+response is recorded once and disables further Massive requests for that process.
+The client also enforces a five-calls-per-minute ceiling. Massive's 15-minute
+delayed option plans remain observation-only: only fresh quotes explicitly
+labelled `REAL-TIME` can produce `IV_VALID` and enter a paper batch.
+
+### Offline Option-Pricing Validation
+
+`validate-option-pricing` is an isolated BSM/CRR-binomial cross-check inspired
+by open-source option calculators. It is useful for checking numerical inputs
+from a trusted quote source; it never fetches Yahoo/MarketWatch, writes a
+position, or changes supervisor signals.
+
+```zsh
+polymarket-stock validate-option-pricing \
+  --spot 100 --strike 100 --bid 10.40 --ask 10.50 \
+  --annual-volatility 0.20 --seconds-to-expiry 31557600 \
+  --option-type call --risk-free-rate 0.05 --style european
+```
+
+The JSON output is always `RESEARCH_ONLY_VALIDATED` with `entry_eligible: false`.
+
 ## 繁體中文
 
 ### 用途
@@ -209,9 +284,94 @@ polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --spot-provider
 此指令會連接 Polymarket 公開 Market WebSocket 與選定的美股報價 WebSocket。它以 500 ms debounce 合併短時間內的訂單簿與現貨更新，輸出並記錄 `REALTIME_BASELINE_EVALUATED`。每筆結果都包含 freshness gate 後的 spot、可成交 Up/Down ask、合理機率、raw net edge 與 skip reason，也會寫入本機 SQLite journal。`--duration-seconds 0` 代表持續運行至手動中斷。免費 Alpaca IEX 不是完整 SIP 整合報價；Finnhub 的覆蓋與延遲也應先和市場比較驗證。目前 stream 尚未取得即時期權 IV；它只負責觀察與觸發重新評估，並不是交易訊號。
 重複且相同的 stale-data 狀態最多每分鐘記錄一次；公開資料流因暫時網路中斷關閉時會自動重連。美股休市期間，沒有 Finnhub trade 時會顯示 `MISSING_SPOT`，這是預期的安全結果。
 
+每次 `stream-shadow` 與 supervisor 都會先重讀 journal 保存的 Gamma 原始條款，只接受目前已觀察到的 Pyth `Equity.US.<TICKER>/USD` 日收盤模板：`Up/Down` 順序、前一交易日比較、50-50 平手規則，以及 Pyth 未四捨五入收盤價都必須存在。實時評估也會輸出 `market_session`、bid/ask、資料年齡、`reference_spot` 與 `cross_source_difference`；以下狀態會被拒絕並記錄：非正常交易時段、缺少或 crossed 的任一 outcome order book、未就緒/過期 stream，以及當 Nasdaq reference quote 在 15 秒內仍和 streaming spot 相差超過 0.5%。
+
 ### 目前限制
 
 - 專案沒有實盤下單、錢包存取、私鑰或 execution adapter。
 - 公開掃描可能遺漏設定標籤以外的市場或特殊市場模板。
 - 結算文字、Pyth 參考價格、事件風險、流動性與費用，未來若要進入執行階段前都必須人工檢查。
 - 需要累積足夠數量的已結算 shadow 結果，證明扣除成本後仍有穩定優勢，才可提出受控實盤試行方案。
+
+### 多市場 Shadow Supervisor
+
+```zsh
+# 每 15 分鐘更新活躍美股市場，最多管理 18 個市場，並只建立可冪等、持有至結算的 paper position。
+polymarket-stock supervise-shadow --duration-seconds 0
+
+# 查看 paper lifecycle 與已結算的校準結果。
+polymarket-stock paper-positions --status OPEN
+polymarket-stock paper-positions --status SETTLED
+polymarket-stock paper-performance
+polymarket-stock settle-paper-positions
+```
+
+supervisor 共享一條 Polymarket stream 與一條股價 stream，active universe 改變時會重建訂閱集合，並依 Gamma 公布的 closed/resolved 狀態對帳結算；不會自行根據股價推斷市場結算。
+
+每日股票合約只會在其公布收盤價所屬的紐約日期啟用。隔日合約不會在前一個交易日被估值、掛 maker quote 或建立 paper position。既有的前一日 paper entry 會保留在 SQLite 稽核紀錄中，但會標記為 `PRECONTRACT_TRADE_DATE`，並排除於校準與 paper-performance 報表。
+
+supervisor 也會記錄 maker shadow quote。每個有效的 Fair Up/Down 評估都會提出一個低於 fair value、以 `1c` tick 對齊的被動買價，預設理論 edge 為至少 `0.5c`。為避免頻繁取消重掛，只有建議限價至少改變 `2c`，且現有 quote 已存在至少 30 秒，才會重掛；可用 `--maker-reprice-minimum-price-change` 與 `--maker-minimum-quote-lifetime-seconds` 調整。`TOUCHED` 只表示公開 ask 曾觸及該價位，不是成交、不會取得 rebate，也不會建立 paper position。
+
+realized-volatility fallback 現在只做 observation。建立 paper entry 必須具有新鮮、完整的近 ATM call/put `IV_VALID` surface。符合條件的訊號會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`。
+
+美國交易日判定使用紐約時區的週一至週五 `09:30-16:00`，並套用 NYSE 核心休市日。特殊臨時休市與提早收盤仍須由 event calendar 補入。
+
+### Phase 3 可驗證研究
+
+若要讓 fair probability 使用 option IV，請先確認資料商提供的是**即時**美股 option chain。
+目前支援 Massive（原 Polygon）與 Tradier；請在 `.env` 加入其中一種：
+
+```dotenv
+POLYGON_API_KEY=...
+TRADIER_API_TOKEN=...
+```
+
+supervisor 會優先使用 Massive，否則使用 Tradier，從 options chain 選擇到期日在市場結算日
+當天或之後、且 near-ATM 的 call/put，驗證 quote 年齡、bid/ask spread、IV 與資料時間框。
+Massive 的 Currencies Basic 與 Options Basic 免費層沒有美股 option snapshot 權限；Options
+Starter 的 15 分鐘延遲資料也會被拒絕為 `IV_VALID`。程式在 403 後不再重試，並把每程序
+呼叫限制為最多每 12 秒一次。只有新鮮即時 IV 才會用 `75% option IV + 25% realized
+volatility` 建立可進入 paper batch 的 fair probability；其餘狀態維持 observation-only。
+
+### 離線選擇權定價驗證
+
+`validate-option-pricing` 是獨立的 BSM/CRR binomial 交叉檢查工具，用於驗證來自可信報價來源
+的數學輸入。它不會讀取 Yahoo/MarketWatch、不會建立 position，也不會改變 supervisor 訊號：
+
+```zsh
+polymarket-stock validate-option-pricing \
+  --spot 100 --strike 100 --bid 10.40 --ask 10.50 \
+  --annual-volatility 0.20 --seconds-to-expiry 31557600 \
+  --option-type call --risk-free-rate 0.05 --style european
+```
+
+輸出永遠帶有 `RESEARCH_ONLY_VALIDATED` 與 `entry_eligible: false`。
+
+可選的 `data/event_calendar.json` 可加入 earnings、FOMC、CPI 等結構化風險事件；落在市場
+結算前的 blocking event 會阻擋 paper entry：
+
+```json
+[
+  {"kind": "FOMC", "starts_at": "2026-07-29T18:00:00Z", "symbols": ["*"], "blocking": true},
+  {"kind": "earnings", "starts_at": "2026-07-22T20:00:00Z", "symbols": ["TSLA"], "blocking": true}
+]
+```
+
+NYSE 核心休市日（含 Good Friday、Juneteenth 與聖誕節）已作為 hard gate；特殊臨時休市與提早收盤仍需由 event calendar 補入。
+
+已結算資料可用以下指令做不可變 entry replay 與保守校準：
+
+```zsh
+polymarket-stock replay-settled
+polymarket-stock replay-settled --output data/replay_report.json
+polymarket-stock calibrate-paper
+polymarket-stock calibrate-paper --write
+polymarket-stock replay-observations
+polymarket-stock calibrate-observations
+polymarket-stock dashboard
+```
+
+`calibrate-paper --write` 只會在至少 30 筆已結算 paper position 時寫入
+`data/model_calibration.json`。下一次 supervisor 啟動時只會提高、絕不降低 model-error buffer 與 minimum-edge floor。
+
+supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開；`dashboard --once` 會輸出單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。

@@ -12,15 +12,23 @@ import ssl
 
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_closes_csv
+from .calibration import calibrate_checkpoint_observations, calibrate_market_observations, calibrate_settled_positions, write_calibration_recommendation
 from .config import Settings
+from .equity_contracts import EquityContractParseError, parse_daily_equity_close_contract
+from .fees import PolymarketFeeRateClient
 from .http import PublicApiError
 from .journal import ShadowJournal
 from .logging import log_event
-from .market_discovery import GammaMarketClient
+from .market_discovery import GammaMarketClient, MarketCandidate
 from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, load_baseline_cache, save_baseline_cache
+from .option_pricing_validation import OptionPricingInputs, validate_option_quote
 from .polymarket_data import ClobMarketDataClient
+from .paper_reporting import paper_performance
+from .replay import replay_market_observations, replay_settled_positions
+from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .realtime import RealtimeBaselineEvaluator
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from .supervisor import MultiMarketShadowSupervisor
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -62,8 +70,53 @@ def build_parser() -> argparse.ArgumentParser:
     stream_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
     stream_parser.add_argument("--resolves-at", help="ISO-8601 resolution timestamp; defaults to the discovered market end date")
     stream_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
+    supervisor_parser = subparsers.add_parser("supervise-shadow", help="scheduled multi-market shadow observation and paper lifecycle")
+    supervisor_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
+    supervisor_parser.add_argument("--scan-interval-seconds", type=float, default=900)
+    supervisor_parser.add_argument("--max-markets", type=int, default=18)
+    supervisor_parser.add_argument("--minimum-seconds-to-resolution", type=float, default=900)
+    supervisor_parser.add_argument("--maker-minimum-edge", type=float, default=0.005, help="minimum unfilled maker edge, default 0.005")
+    supervisor_parser.add_argument("--maker-reprice-minimum-price-change", type=float, default=0.02, help="minimum maker limit-price change before reprice, default 0.02")
+    supervisor_parser.add_argument("--maker-minimum-quote-lifetime-seconds", type=float, default=30.0, help="minimum seconds an active maker quote remains before reprice, default 30")
+    supervisor_parser.add_argument("--paper-batch-seconds", type=float, default=30.0)
+    supervisor_parser.add_argument("--max-daily-paper-entries", type=int, default=3)
+    supervisor_parser.add_argument("--max-per-risk-group", type=int, default=1)
+    supervisor_parser.add_argument("--max-same-direction-paper-entries", type=int, default=2)
+    supervisor_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
+    supervisor_parser.add_argument("--output-format", choices=("human", "json"), default="human")
+    positions_parser = subparsers.add_parser("paper-positions", help="list open or settled hold-to-resolution paper positions")
+    positions_parser.add_argument("--status", choices=("OPEN", "SETTLED"))
+    maker_quotes_parser = subparsers.add_parser("maker-shadow-quotes", help="list active or cancelled maker shadow quotes")
+    maker_quotes_parser.add_argument("--status", choices=("ACTIVE", "CANCELLED"), default="ACTIVE")
+    portfolio_parser = subparsers.add_parser("portfolio-decisions", help="list batched paper-entry selections and rejections")
+    portfolio_parser.add_argument("--limit", type=int, default=100)
+    subparsers.add_parser("paper-performance", help="report realized paper PnL and calibration for settled positions")
+    replay_parser = subparsers.add_parser("replay-settled", help="replay immutable paper entries against official settled outcomes")
+    replay_parser.add_argument("--output", help="optional JSON report output path")
+    subparsers.add_parser("replay-observations", help="replay all valid market observations against official outcomes")
+    calibration_parser = subparsers.add_parser("calibrate-paper", help="derive conservative settings from settled paper positions")
+    calibration_parser.add_argument("--write", action="store_true", help="write a review-only recommendation to data/model_calibration.json")
+    subparsers.add_parser("calibrate-observations", help="calibrate from all settled market observations")
+    subparsers.add_parser("calibrate-checkpoints", help="report immutable checkpoint calibration against official settlements")
+    dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
+    dashboard_parser.add_argument("--limit", type=int, default=18)
+    dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
+    dashboard_parser.add_argument("--once", action="store_true", help="print one plain-text snapshot instead of opening the live dashboard")
+    subparsers.add_parser("settle-paper-positions", help="one-shot official settlement reconciliation for open paper positions")
     alpaca_parser = subparsers.add_parser("snapshot-alpaca-options", help="store free Alpaca indicative option quotes")
     alpaca_parser.add_argument("--symbols", required=True, help="comma-separated OCC option symbols, maximum 100")
+    validation_parser = subparsers.add_parser("validate-option-pricing", help="offline BSM/binomial option-pricing cross-check; never creates a signal")
+    validation_parser.add_argument("--spot", required=True, type=float)
+    validation_parser.add_argument("--strike", required=True, type=float)
+    validation_parser.add_argument("--bid", required=True, type=float)
+    validation_parser.add_argument("--ask", required=True, type=float)
+    validation_parser.add_argument("--annual-volatility", required=True, type=float)
+    validation_parser.add_argument("--seconds-to-expiry", required=True, type=float)
+    validation_parser.add_argument("--option-type", required=True, choices=("call", "put"))
+    validation_parser.add_argument("--style", choices=("european", "american"), default="american")
+    validation_parser.add_argument("--risk-free-rate", type=float, default=0.0)
+    validation_parser.add_argument("--dividend-yield", type=float, default=0.0)
+    validation_parser.add_argument("--binomial-steps", type=int, default=500)
     return parser
 
 
@@ -79,6 +132,16 @@ def main() -> None:
             {"journal_path": str(settings.journal_path), "shadow_mode": settings.shadow_mode},
         )
         print(f"Shadow journal initialized at {settings.journal_path}")
+    elif arguments.command == "validate-option-pricing":
+        inputs = OptionPricingInputs(
+            spot=arguments.spot, strike=arguments.strike, annual_volatility=arguments.annual_volatility,
+            seconds_to_expiry=arguments.seconds_to_expiry, option_type=arguments.option_type,
+            risk_free_rate=arguments.risk_free_rate, dividend_yield=arguments.dividend_yield,
+        )
+        result = validate_option_quote(
+            inputs, bid=arguments.bid, ask=arguments.ask, style=arguments.style, binomial_steps=arguments.binomial_steps,
+        )
+        print(json.dumps(result.as_payload(), sort_keys=True))
     elif arguments.command == "list-markets":
         candidates = journal.list_market_candidates(arguments.symbol)
         _print_market_candidates(candidates)
@@ -120,10 +183,14 @@ def main() -> None:
         resolves_at = datetime.fromisoformat(arguments.resolves_at.replace("Z", "+00:00"))
         closes = load_daily_closes_csv(Path(arguments.history_csv))
         up_ask, down_ask = journal.get_latest_outcome_asks(arguments.market_id)
+        outcomes = journal.get_market_outcome_tokens(arguments.market_id)
+        fee_client = PolymarketFeeRateClient()
+        up_fee_rate = fee_client.get_fee_rate(outcomes[0].token_id).fee_rate
+        down_fee_rate = fee_client.get_fee_rate(outcomes[1].token_id).fee_rate
         data_is_fresh = daily_close_data_is_fresh(closes, now)
         assessment = evaluate_realized_vol_baseline(
             spot=arguments.spot, closes=closes, seconds_to_resolution=(resolves_at - now).total_seconds(),
-            up_ask=up_ask, down_ask=down_ask, fee_rate=0.01, slippage=0.001,
+            up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
             base_model_error_buffer=0.02, fallback_buffer=0.05, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=arguments.lookback_days,
         )
@@ -137,6 +204,9 @@ def main() -> None:
             "data_is_fresh": assessment.data_is_fresh,
             "model_error_buffer": assessment.model_error_buffer,
             "paper_outcome": assessment.paper_outcome,
+            "up_fee_rate": up_fee_rate, "down_fee_rate": down_fee_rate,
+            "up_taker_fee": assessment.up_edge.estimated_taker_fee,
+            "down_taker_fee": assessment.down_edge.estimated_taker_fee,
             "signal_status": _signal_status(assessment.paper_outcome),
             "up_model_edge_before_costs": round(assessment.fair_up_probability - up_ask, 6),
             "down_model_edge_before_costs": round((1 - assessment.fair_up_probability) - down_ask, 6),
@@ -161,9 +231,13 @@ def main() -> None:
             [type(closes[-1])(quote.last_trade_at.date().isoformat(), quote.price)], now
         )
         up_ask, down_ask = journal.get_latest_outcome_asks(arguments.market_id)
+        outcomes = journal.get_market_outcome_tokens(arguments.market_id)
+        fee_client = PolymarketFeeRateClient()
+        up_fee_rate = fee_client.get_fee_rate(outcomes[0].token_id).fee_rate
+        down_fee_rate = fee_client.get_fee_rate(outcomes[1].token_id).fee_rate
         assessment = evaluate_realized_vol_baseline(
             spot=quote.price, closes=closes, seconds_to_resolution=(resolves_at - now).total_seconds(),
-            up_ask=up_ask, down_ask=down_ask, fee_rate=0.01, slippage=0.001,
+            up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
             base_model_error_buffer=0.02, fallback_buffer=0.05, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=20,
         )
@@ -175,6 +249,9 @@ def main() -> None:
             "realized_volatility": round(assessment.annualized_realized_volatility, 6),
             "data_is_fresh": assessment.data_is_fresh, "model_error_buffer": assessment.model_error_buffer,
             "paper_outcome": assessment.paper_outcome, "provider": provider,
+            "up_fee_rate": up_fee_rate, "down_fee_rate": down_fee_rate,
+            "up_taker_fee": assessment.up_edge.estimated_taker_fee,
+            "down_taker_fee": assessment.down_edge.estimated_taker_fee,
             "signal_status": _signal_status(assessment.paper_outcome),
             "up_model_edge_before_costs": round(assessment.fair_up_probability - up_ask, 6),
             "down_model_edge_before_costs": round((1 - assessment.fair_up_probability) - down_ask, 6),
@@ -195,11 +272,32 @@ def main() -> None:
             if not api_key or not api_secret:
                 raise SystemExit("stream-shadow --spot-provider alpaca requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in .env")
         try:
-            market = journal.get_market_candidate(arguments.market_id)
+            candidate = MarketCandidate.from_gamma_payload(journal.get_market_candidate_raw_payload(arguments.market_id))
             outcomes = journal.get_market_outcome_tokens(arguments.market_id)
         except KeyError as error:
             raise SystemExit(f"Unknown market id: {error}") from error
-        resolves_at = datetime.fromisoformat((arguments.resolves_at or market.end_date).replace("Z", "+00:00"))
+        try:
+            contract = parse_daily_equity_close_contract(candidate)
+        except EquityContractParseError as error:
+            journal.record_contract_review(arguments.market_id, accepted=False, reason=str(error))
+            raise SystemExit(f"stream-shadow rejected market contract: {error}") from error
+        journal.record_contract_review(
+            arguments.market_id, accepted=True, reason="PYTH_DAILY_CLOSE_TEMPLATE", contract=contract.as_payload()
+        )
+        if arguments.symbol.upper() != contract.symbol:
+            raise SystemExit(f"stream-shadow symbol {arguments.symbol.upper()} does not match contract ticker {contract.symbol}")
+        if arguments.resolves_at:
+            requested_resolution = datetime.fromisoformat(arguments.resolves_at.replace("Z", "+00:00"))
+            if requested_resolution != contract.resolves_at:
+                raise SystemExit("stream-shadow --resolves-at does not match the discovered contract end time")
+        resolves_at = contract.resolves_at
+        fee_client = PolymarketFeeRateClient()
+        try:
+            up_fee_rate = fee_client.get_fee_rate(outcomes[0].token_id).fee_rate
+            down_fee_rate = fee_client.get_fee_rate(outcomes[1].token_id).fee_rate
+        except PublicApiError:
+            up_fee_rate = None
+            down_fee_rate = None
         now = datetime.now(UTC)
         cache_path = Path("data") / "baseline_cache" / f"{arguments.symbol.upper()}.json"
         daily_provider = "NASDAQ_PUBLIC_NON_SETTLEMENT"
@@ -210,16 +308,17 @@ def main() -> None:
             save_baseline_cache(cache_path, cached_quote, closes)
         except (PublicApiError, NasdaqPayloadError):
             try:
-                _, closes = load_baseline_cache(cache_path)
+                cached_quote, closes = load_baseline_cache(cache_path)
                 daily_provider = "NASDAQ_LOCAL_CACHE_NON_SETTLEMENT"
             except NasdaqPayloadError as error:
                 raise SystemExit("stream-shadow requires fresh daily baseline data or a usable local cache") from error
         try:
-            asyncio.run(
+            _run_async(
                 _run_shadow_stream(
                     settings, arguments.market_id, tuple(item.token_id for item in outcomes), arguments.symbol.upper(),
                     arguments.spot_provider, api_key, api_secret, finnhub_api_key, resolves_at, closes,
-                    daily_provider, arguments.duration_seconds, journal,
+                    daily_provider, cached_quote.price, cached_quote.last_trade_at, contract.as_payload(),
+                    up_fee_rate, down_fee_rate, arguments.duration_seconds, journal,
                 )
             )
         except ssl.SSLCertVerificationError as error:
@@ -227,6 +326,65 @@ def main() -> None:
                 "WebSocket TLS verification failed. Set SSL_CERT_FILE in .env to the PEM file for your "
                 "VPN or proxy certificate authority; SSL verification remains enabled."
             ) from error
+    elif arguments.command == "supervise-shadow":
+        api_key, api_secret, finnhub_api_key = _stream_credentials(arguments.spot_provider)
+        supervisor = MultiMarketShadowSupervisor(
+            journal=journal, log_path=settings.log_path, spot_provider=arguments.spot_provider,
+            finnhub_api_key=finnhub_api_key, alpaca_api_key=api_key, alpaca_api_secret=api_secret,
+            max_markets=arguments.max_markets, minimum_seconds_to_resolution=arguments.minimum_seconds_to_resolution,
+            maker_minimum_edge=arguments.maker_minimum_edge,
+            maker_reprice_minimum_price_change=arguments.maker_reprice_minimum_price_change,
+            maker_minimum_quote_lifetime_seconds=arguments.maker_minimum_quote_lifetime_seconds,
+            paper_batch_seconds=arguments.paper_batch_seconds, max_daily_paper_entries=arguments.max_daily_paper_entries,
+            max_per_risk_group=arguments.max_per_risk_group,
+            max_same_direction_paper_entries=arguments.max_same_direction_paper_entries,
+            tradier_api_token=os.getenv("TRADIER_API_TOKEN", ""),
+            polygon_api_key=os.getenv("POLYGON_API_KEY", ""),
+            event_sink=make_event_sink(settings.log_path, arguments.output_format),
+        )
+        try:
+            _run_async(supervisor.run(arguments.scan_interval_seconds, arguments.duration_seconds))
+        except ssl.SSLCertVerificationError as error:
+            raise SystemExit(
+                "Supervisor TLS verification failed. Set SSL_CERT_FILE in .env to the PEM file for your "
+                "VPN or proxy certificate authority; SSL verification remains enabled."
+            ) from error
+    elif arguments.command == "paper-positions":
+        positions = journal.list_paper_positions(arguments.status)
+        print(json.dumps([_paper_position_payload(position) for position in positions], sort_keys=True))
+    elif arguments.command == "maker-shadow-quotes":
+        print(json.dumps([_maker_quote_payload(quote) for quote in journal.list_maker_shadow_quotes(arguments.status)], sort_keys=True))
+    elif arguments.command == "portfolio-decisions":
+        print(json.dumps(journal.list_portfolio_decisions(arguments.limit), sort_keys=True))
+    elif arguments.command == "paper-performance":
+        print(json.dumps(paper_performance(journal.list_paper_positions()).as_payload(), sort_keys=True))
+    elif arguments.command == "dashboard":
+        positions = journal.list_paper_positions()
+        if arguments.once:
+            print(render_dashboard(journal.dashboard_rows(arguments.limit), sum(item.status == "OPEN" for item in positions), sum(item.status == "SETTLED" for item in positions)))
+        else:
+            run_live_dashboard(journal, refresh_seconds=arguments.refresh_seconds, limit=arguments.limit)
+    elif arguments.command == "replay-settled":
+        report = replay_settled_positions(journal.list_paper_positions()).as_payload()
+        if arguments.output:
+            Path(arguments.output).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "calibrate-paper":
+        recommendation = calibrate_settled_positions(journal.list_paper_positions())
+        if arguments.write:
+            write_calibration_recommendation(Path("data/model_calibration.json"), recommendation)
+        print(json.dumps(recommendation.as_payload(), sort_keys=True))
+    elif arguments.command == "replay-observations":
+        print(json.dumps(replay_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
+    elif arguments.command == "calibrate-observations":
+        print(json.dumps(calibrate_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
+    elif arguments.command == "calibrate-checkpoints":
+        print(json.dumps(calibrate_checkpoint_observations(journal.list_checkpoint_observations()).as_payload(), sort_keys=True))
+    elif arguments.command == "settle-paper-positions":
+        supervisor = MultiMarketShadowSupervisor(
+            journal=journal, log_path=settings.log_path, spot_provider="finnhub", tradier_api_token=os.getenv("TRADIER_API_TOKEN", "")
+        )
+        _run_async(supervisor.settle_open_positions())
     elif arguments.command == "scan-event":
         symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
         try:
@@ -303,6 +461,58 @@ def _report_public_api_failure(settings: Settings, event_type: str, error: Publi
     raise SystemExit(f"Public API request failed: {message}")
 
 
+def _run_async(coroutine: object) -> None:
+    """Let coroutine finalizers close streams before returning a clean Ctrl+C result."""
+
+    try:
+        asyncio.run(coroutine)  # type: ignore[arg-type]
+    except KeyboardInterrupt:
+        print("\nStopped cleanly.")
+
+
+def _stream_credentials(spot_provider: str) -> tuple[str, str, str]:
+    if spot_provider == "finnhub":
+        finnhub_api_key = os.getenv("FINNHUB_API_KEY", "")
+        if not finnhub_api_key:
+            raise SystemExit("supervise-shadow --spot-provider finnhub requires FINNHUB_API_KEY in .env")
+        return "", "", finnhub_api_key
+    api_key = os.getenv("ALPACA_API_KEY_ID", "")
+    api_secret = os.getenv("ALPACA_API_SECRET_KEY", "")
+    if not api_key or not api_secret:
+        raise SystemExit("supervise-shadow --spot-provider alpaca requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY in .env")
+    return api_key, api_secret, ""
+
+
+def _paper_position_payload(position: object) -> dict[str, object]:
+    return {
+        "position_id": getattr(position, "position_id"), "market_id": getattr(position, "market_id"),
+        "symbol": getattr(position, "symbol"), "outcome": getattr(position, "outcome"),
+        "status": getattr(position, "status"), "contracts": getattr(position, "contracts"),
+        "entry_ask": getattr(position, "entry_ask"), "entry_fee": getattr(position, "entry_fee"),
+        "entry_slippage": getattr(position, "entry_slippage"), "fair_probability": getattr(position, "fair_probability"),
+        "opened_at": getattr(position, "opened_at").isoformat(),
+        "settled_at": getattr(position, "settled_at").isoformat() if getattr(position, "settled_at") else None,
+        "settlement_outcome": getattr(position, "settlement_outcome"), "payout": getattr(position, "payout"),
+        "realized_pnl": getattr(position, "realized_pnl"),
+        "included_in_calibration": getattr(position, "included_in_calibration"),
+        "exclusion_reason": getattr(position, "exclusion_reason"),
+    }
+
+
+def _maker_quote_payload(quote: object) -> dict[str, object]:
+    return {
+        "quote_id": getattr(quote, "quote_id"), "market_id": getattr(quote, "market_id"),
+        "symbol": getattr(quote, "symbol"), "outcome": getattr(quote, "outcome"),
+        "status": getattr(quote, "status"), "limit_price": getattr(quote, "limit_price"),
+        "fair_probability": getattr(quote, "fair_probability"), "theoretical_edge": getattr(quote, "theoretical_edge"),
+        "best_bid": getattr(quote, "best_bid"), "best_ask": getattr(quote, "best_ask"),
+        "touch_count": getattr(quote, "touch_count"),
+        "last_touched_at": getattr(quote, "last_touched_at").isoformat() if getattr(quote, "last_touched_at") else None,
+        "cancelled_at": getattr(quote, "cancelled_at").isoformat() if getattr(quote, "cancelled_at") else None,
+        "cancel_reason": getattr(quote, "cancel_reason"),
+    }
+
+
 def _signal_status(paper_outcome: str | None) -> str:
     return f"PAPER_{paper_outcome}" if paper_outcome else "NO_PAPER_TRADE"
 
@@ -346,6 +556,11 @@ async def _run_shadow_stream(
     resolves_at: datetime,
     closes: list[object],
     daily_provider: str,
+    reference_spot: float,
+    reference_spot_observed_at: datetime,
+    contract: object,
+    up_fee_rate: float | None,
+    down_fee_rate: float | None,
     duration_seconds: float,
     journal: ShadowJournal,
 ) -> None:
@@ -355,6 +570,8 @@ async def _run_shadow_stream(
         resolves_at=resolves_at,
         closes=closes,
         spot_provider=spot_provider.upper(),
+        up_fee_rate=up_fee_rate,
+        down_fee_rate=down_fee_rate,
     )
     coordinator: ShadowStreamCoordinator
     last_skip_reasons: tuple[str, ...] | None = None
@@ -372,12 +589,16 @@ async def _run_shadow_stream(
             spot=coordinator.latest_spots.get(symbol),
             up_ask=coordinator.latest_best_asks.get(token_ids[0]),
             down_ask=coordinator.latest_best_asks.get(token_ids[1]),
+            up_bid=coordinator.latest_best_bids.get(token_ids[0]),
+            down_bid=coordinator.latest_best_bids.get(token_ids[1]),
+            reference_spot=reference_spot,
+            reference_spot_age_seconds=_age_seconds(now, reference_spot_observed_at),
             spot_age_seconds=spot_age,
             book_age_seconds=book_age,
             stream_ready=coordinator.freshness.ready(now),
             trigger_reasons=tuple(str(reason) for reason in payload.get("reasons", ())),
         )
-        result = {**evaluation.as_payload(), "daily_provider": daily_provider}
+        result = {**evaluation.as_payload(), "daily_provider": daily_provider, "contract": contract}
         if evaluation.skip_reasons:
             skip_reasons = evaluation.skip_reasons
             should_record_skip = (

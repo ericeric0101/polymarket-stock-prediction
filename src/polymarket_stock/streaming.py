@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 ALPACA_IEX_WS = "wss://stream.data.alpaca.markets/v2/iex"
 FINNHUB_WS = "wss://ws.finnhub.io"
+FINNHUB_MAX_SILENCE_SECONDS = 60.0
 EventCallback = Callable[[Mapping[str, object]], Awaitable[None] | None]
 StreamRunner = Callable[[], Awaitable[None]]
 
@@ -261,14 +262,25 @@ class FinnhubStockStream:
             raise ValueError("Finnhub API key is required for stock streaming")
         self._api_key = api_key
 
-    async def run(self, symbols: tuple[str, ...], callback: EventCallback) -> None:
+    async def run(
+        self,
+        symbols: tuple[str, ...],
+        callback: EventCallback,
+        *,
+        maximum_silence_seconds: float = FINNHUB_MAX_SILENCE_SECONDS,
+    ) -> None:
         if not symbols:
             raise ValueError("at least one Finnhub symbol is required")
+        if maximum_silence_seconds <= 0:
+            raise ValueError("maximum_silence_seconds must be positive")
         websocket_url = f"{FINNHUB_WS}?{urlencode({'token': self._api_key})}"
         async with connect(websocket_url) as websocket:
             for symbol in symbols:
                 await websocket.send(json.dumps({"type": "subscribe", "symbol": symbol}))
-            async for raw_message in websocket:
+            while True:
+                # A connected Finnhub socket can silently stop delivering trades.
+                # Let run_with_reconnect rebuild the subscription after a bounded silence.
+                raw_message = await asyncio.wait_for(websocket.recv(), timeout=maximum_silence_seconds)
                 payload = json.loads(raw_message)
                 if isinstance(payload, dict):
                     await _emit(callback, payload)

@@ -82,26 +82,33 @@ def evaluate_realized_vol_baseline(
     seconds_to_resolution: float,
     up_ask: float,
     down_ask: float,
-    fee_rate: float,
-    slippage: float,
+    up_fee_rate: float,
+    down_fee_rate: float,
     base_model_error_buffer: float,
     fallback_buffer: float,
     minimum_edge: float,
     data_is_fresh: bool,
     lookback_days: int = 20,
+    annualized_volatility_override: float | None = None,
+    additional_model_error_buffer: float = 0.0,
 ) -> BaselineAssessment:
     if spot <= 0 or seconds_to_resolution <= 0:
         raise ValueError("spot and seconds_to_resolution must be positive")
-    volatility = annualized_realized_volatility(closes, lookback_days)
+    if additional_model_error_buffer < 0:
+        raise ValueError("additional_model_error_buffer cannot be negative")
+    realized_volatility = annualized_realized_volatility(closes, lookback_days)
+    volatility = annualized_volatility_override if annualized_volatility_override is not None else realized_volatility
+    if volatility <= 0:
+        raise ValueError("annualized_volatility_override must be positive")
     prior_close = closes[-1].close
     fair_up = digital_up_probability(spot, prior_close, volatility, seconds_to_resolution)
-    model_error_buffer = base_model_error_buffer + fallback_buffer
+    model_error_buffer = base_model_error_buffer + fallback_buffer + additional_model_error_buffer
     return BaselineAssessment(
         fair_up_probability=fair_up,
         annualized_realized_volatility=volatility,
         prior_close=prior_close,
-        up_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="YES", executable_ask=up_ask, fee_rate=fee_rate, slippage=slippage, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
-        down_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="NO", executable_ask=down_ask, fee_rate=fee_rate, slippage=slippage, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
+        up_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="YES", executable_ask=up_ask, fee_rate=up_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
+        down_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="NO", executable_ask=down_ask, fee_rate=down_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
         data_is_fresh=data_is_fresh,
         model_error_buffer=model_error_buffer,
     )

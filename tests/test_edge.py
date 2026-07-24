@@ -11,14 +11,13 @@ class EdgeTests(unittest.TestCase):
             fair_yes_probability=0.70,
             outcome="YES",
             executable_ask=0.60,
-            fee_rate=0.02,
-            slippage=0.01,
+            fee_rate=0.04,
             model_error_buffer=0.03,
             minimum_edge=0.01,
         )
         self.assertAlmostEqual(assessment.conservative_fair_probability, 0.67)
-        self.assertAlmostEqual(assessment.estimated_cost, 0.022)
-        self.assertAlmostEqual(assessment.edge, 0.048)
+        self.assertAlmostEqual(assessment.estimated_taker_fee, 0.0096)
+        self.assertAlmostEqual(assessment.edge, 0.0604)
         self.assertTrue(assessment.should_record_paper_trade)
 
     def test_no_edge_inverts_yes_probability(self) -> None:
@@ -27,7 +26,6 @@ class EdgeTests(unittest.TestCase):
             outcome="NO",
             executable_ask=0.60,
             fee_rate=0.00,
-            slippage=0.00,
             model_error_buffer=0.05,
             minimum_edge=0.05,
         )

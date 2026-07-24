@@ -64,3 +64,11 @@ class MarketDiscoveryTests(unittest.TestCase):
         self.assertEqual(report.events_scanned, 2)
         self.assertEqual(report.pages_scanned, 3)
         self.assertEqual(observed_params[1]["after_cursor"], "next")
+
+    def test_market_settlement_uses_published_winning_outcome(self) -> None:
+        client = GammaMarketClient(
+            get_json_fn=lambda _url, _params: {"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["0", "1"]'}
+        )
+        settlement = client.get_market_settlement("market-1")
+        self.assertTrue(settlement.closed)
+        self.assertEqual(settlement.winning_outcome, "Down")
