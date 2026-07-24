@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, time
 import json
 from pathlib import Path
+import time as clock
 
 from .research import ScheduledRiskEvent
 from .http import PublicApiError, get_json
@@ -14,23 +15,33 @@ class EventCalendarError(ValueError):
     pass
 
 
+class EventCalendarUnavailable(EventCalendarError):
+    """The remote calendar could not be fetched; entries must remain gated."""
+
+
 class FinnhubEarningsCalendarClient:
     """Read-only earnings calendar; macro events remain versioned local data."""
 
     def __init__(self, api_key: str, get_json_fn=get_json) -> None:
         self.api_key = api_key.strip()
         self._get_json = get_json_fn
+        self._unavailable_until = 0.0
+        self._unavailable_message = "Finnhub earnings calendar is unavailable"
 
     def events(self, symbol: str, now: datetime, resolves_at: datetime) -> tuple[ScheduledRiskEvent, ...]:
         if not self.api_key:
             return ()
+        if clock.monotonic() < self._unavailable_until:
+            raise EventCalendarUnavailable(self._unavailable_message)
         try:
             payload = self._get_json(
                 "https://finnhub.io/api/v1/calendar/earnings",
                 {"from": now.date().isoformat(), "to": resolves_at.date().isoformat(), "symbol": symbol.upper(), "token": self.api_key},
+                timeout_seconds=5.0,
             )
         except PublicApiError as error:
-            raise EventCalendarError("Finnhub earnings calendar is unavailable") from error
+            self._unavailable_until = clock.monotonic() + 60.0
+            raise EventCalendarUnavailable(self._unavailable_message) from error
         rows = payload.get("earningsCalendar", []) if isinstance(payload, dict) else []
         if not isinstance(rows, list):
             raise EventCalendarError("Finnhub earnings calendar is invalid")
@@ -51,10 +62,15 @@ class FinnhubEarningsCalendarClient:
 
 
 def combined_risk_events(
-    path: Path, symbol: str, now: datetime, resolves_at: datetime, finnhub_api_key: str
+    path: Path,
+    symbol: str,
+    now: datetime,
+    resolves_at: datetime,
+    finnhub_api_key: str,
+    earnings_client: FinnhubEarningsCalendarClient | None = None,
 ) -> tuple[ScheduledRiskEvent, ...]:
     local = load_risk_events(path, symbol, now, resolves_at)
-    earnings = FinnhubEarningsCalendarClient(finnhub_api_key).events(symbol, now, resolves_at)
+    earnings = (earnings_client or FinnhubEarningsCalendarClient(finnhub_api_key)).events(symbol, now, resolves_at)
     return tuple({(event.kind, event.starts_at, event.blocking): event for event in (*local, *earnings)}.values())
 
 

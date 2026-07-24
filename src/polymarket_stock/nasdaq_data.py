@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 from .baseline import DailyClose
 from .http import get_json
@@ -14,6 +15,7 @@ from .http import get_json
 
 NASDAQ_URL = "https://api.nasdaq.com/api/quote"
 NASDAQ_HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json, text/plain, */*"}
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 class NasdaqPayloadError(ValueError):
@@ -37,7 +39,7 @@ class NasdaqBaselineClient:
         try:
             primary = payload["data"]["primaryData"]
             price = float(str(primary["lastSalePrice"]).replace("$", "").replace(",", ""))
-            last_trade_at = datetime.strptime(primary["lastTradeTimestamp"], "%b %d, %Y").replace(tzinfo=UTC)
+            last_trade_at = _parse_last_trade_timestamp(str(primary["lastTradeTimestamp"]))
             is_real_time = bool(primary["isRealTime"])
         except (KeyError, TypeError, ValueError) as error:
             raise NasdaqPayloadError("Nasdaq quote response is missing a usable last price") from error
@@ -98,3 +100,22 @@ def load_baseline_cache(path: Path) -> tuple[NasdaqQuote, list[DailyClose]]:
     if len(closes) < 21 or quote.last_trade_at.tzinfo is None:
         raise NasdaqPayloadError("cached Nasdaq baseline data is incomplete")
     return quote, closes
+
+
+def _parse_last_trade_timestamp(value: str) -> datetime:
+    """Accept Nasdaq's current `Jul 24, 2026 9:39 AM ET` quote timestamp."""
+
+    timestamp = value.strip()
+    for suffix in (" ET", " EDT", " EST"):
+        if timestamp.endswith(suffix):
+            timestamp = timestamp[: -len(suffix)]
+            try:
+                return datetime.strptime(timestamp, "%b %d, %Y %I:%M %p").replace(tzinfo=NEW_YORK).astimezone(UTC)
+            except ValueError as error:
+                raise NasdaqPayloadError("Nasdaq quote timestamp is invalid") from error
+    try:
+        # Older payloads only include a date; retain the previous conservative
+        # UTC-midnight fallback so they fail the freshness gate when appropriate.
+        return datetime.strptime(timestamp, "%b %d, %Y").replace(tzinfo=UTC)
+    except ValueError as error:
+        raise NasdaqPayloadError("Nasdaq quote timestamp is invalid") from error

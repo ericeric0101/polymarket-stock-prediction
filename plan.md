@@ -164,6 +164,7 @@ order submission, or an intraday exit strategy.
 | 3.16 IV-valid research gate | Complete: realized-vol fallback remains observation-only; paper entries require a fresh, complete near-ATM option-IV surface. | Immutable 10:00/12:00/14:00/15:30 New York checkpoints support walk-forward calibration. |
 | 3.17 Portfolio-aware paper batches | Complete: IV-valid paper candidates are selected in 30-second batches with daily, risk-group, and direction limits. | Every selection/rejection is recorded in `portfolio_decisions`; no live execution is introduced. |
 | 3.18 Independent option-pricing validation | Complete: local Black-Scholes-Merton and CRR binomial calculations cross-check quote inputs and recover midpoint IV. | No provider, scrape, journal write, supervisor dependency, or entry path exists; every result is explicitly research-only. |
+| 3.19 Remote calendar resilience | Complete: Finnhub calendar timeouts are converted to an explicit unavailable data gate, with a 60-second per-process cooldown. | A failed remote calendar never terminates the supervisor or silently permits a paper entry. |
 | 3.14 Test and rollout | In progress: deterministic unit coverage is added for core lifecycle behavior and contract/data-quality gates. | Run the supervisor through multiple market sessions before relying on paper-entry results. |
 
 ### Phase 3: Verifiable Research
@@ -250,3 +251,4 @@ order submission, or an intraday exit strategy.
 | 2026-07-22 | Made realized-vol fallback observation-only, added immutable New York checkpoint observations, gated paper entries on fresh option IV, and added diversified batch selection with decision journaling. | Complete |
 | 2026-07-22 | Added a Massive (formerly Polygon) option-IV adapter. Verified the configured Currencies Basic key returns `403 NOT_AUTHORIZED` for U.S. option snapshots; the adapter now makes at most five requests per minute, stops after an entitlement failure, and rejects delayed quotes from IV-valid paper entry. | Complete |
 | 2026-07-22 | Added independent BSM/CRR binomial option-pricing validation after reviewing Norn-Finance-API-Server. It validates trusted quote inputs locally, but deliberately does not use its Yahoo Finance/MarketWatch data path or public deployment. | Complete |
+| 2026-07-24 | Fixed Nasdaq quote parsing for its current `Jul 24, 2026 9:39 AM ET` timestamp format and normalize it to UTC. This prevents valid real-time spot quotes from being rejected as missing and restores active-market construction. | Complete |

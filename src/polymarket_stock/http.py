@@ -33,6 +33,10 @@ def get_json(
         raise PublicApiError(f"GET {request_url} returned HTTP {error.code}") from error
     except URLError as error:
         raise PublicApiError(f"GET {request_url} failed: {error.reason}") from error
+    except (TimeoutError, OSError) as error:
+        # socket/SSL timeouts can bypass URLError and previously terminated the
+        # supervisor instead of becoming a visible data-quality failure.
+        raise PublicApiError(f"GET {request_url} failed: {error}") from error
 
     try:
         return json.loads(body)

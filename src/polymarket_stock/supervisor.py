@@ -15,7 +15,7 @@ from .baseline import DailyClose, daily_close_data_is_fresh
 from .calibration import CalibrationRecommendation, load_calibration_recommendation
 from .checkpoints import latest_checkpoint
 from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
-from .event_risk import EventCalendarError, combined_risk_events
+from .event_risk import EventCalendarError, EventCalendarUnavailable, FinnhubEarningsCalendarClient, combined_risk_events
 from .fees import PolymarketFeeRateClient
 from .journal import ShadowJournal
 from .logging import log_event
@@ -203,6 +203,7 @@ class MultiMarketShadowSupervisor:
         self.gamma = gamma_client or GammaMarketClient()
         self.daily_client = daily_client or NasdaqBaselineClient()
         self.fee_client = fee_client or PolymarketFeeRateClient()
+        self.earnings_client = FinnhubEarningsCalendarClient(finnhub_api_key)
         # Polygon/Massive is preferred when configured because it is a data-only
         # provider; its adapter rejects free/15-minute-delayed data for entries.
         self.option_client = PolygonOptionIvClient(polygon_api_key) if polygon_api_key.strip() else TradierOptionIvClient(tradier_api_token)
@@ -262,8 +263,19 @@ class MultiMarketShadowSupervisor:
                     self._option_surface, symbol, existing.reference_spot, now, contract.resolves_at
                 )
                 try:
-                    events = combined_risk_events(self.event_calendar_path, symbol, now, contract.resolves_at, self.finnhub_api_key)
+                    events = await asyncio.to_thread(
+                        combined_risk_events,
+                        self.event_calendar_path,
+                        symbol,
+                        now,
+                        contract.resolves_at,
+                        self.finnhub_api_key,
+                        self.earnings_client,
+                    )
                     existing.risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
+                except EventCalendarUnavailable as error:
+                    existing.risk_reasons = ("EVENT_CALENDAR_UNAVAILABLE",)
+                    self.event_sink("SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE", {"market_id": candidate.market_id, "error": str(error)})
                 except EventCalendarError:
                     existing.risk_reasons = ("EVENT_CALENDAR_INVALID",)
                 runtimes[candidate.market_id] = existing
@@ -278,8 +290,19 @@ class MultiMarketShadowSupervisor:
                 self._option_surface, symbol, reference_quote.price, now, contract.resolves_at
             )
             try:
-                events = combined_risk_events(self.event_calendar_path, symbol, now, contract.resolves_at, self.finnhub_api_key)
+                events = await asyncio.to_thread(
+                    combined_risk_events,
+                    self.event_calendar_path,
+                    symbol,
+                    now,
+                    contract.resolves_at,
+                    self.finnhub_api_key,
+                    self.earnings_client,
+                )
                 risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
+            except EventCalendarUnavailable as error:
+                risk_reasons = ("EVENT_CALENDAR_UNAVAILABLE",)
+                self.event_sink("SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE", {"market_id": candidate.market_id, "error": str(error)})
             except EventCalendarError as error:
                 risk_reasons = ("EVENT_CALENDAR_INVALID",)
                 self.event_sink("SUPERVISOR_EVENT_CALENDAR_ERROR", {"market_id": candidate.market_id, "error": str(error)})

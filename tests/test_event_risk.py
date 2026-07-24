@@ -5,7 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from polymarket_stock.event_risk import FinnhubEarningsCalendarClient, load_risk_events
+from polymarket_stock.event_risk import EventCalendarUnavailable, FinnhubEarningsCalendarClient, load_risk_events
+from polymarket_stock.http import PublicApiError
 from polymarket_stock.quality import us_equity_session
 
 
@@ -27,3 +28,15 @@ class EventRiskTests(unittest.TestCase):
         })
         events = client.events("TSLA", datetime(2026, 7, 20, 12, tzinfo=UTC), datetime(2026, 7, 20, 20, tzinfo=UTC))
         self.assertEqual([event.kind for event in events], ["EARNINGS"])
+
+    def test_finnhub_unavailable_calendar_is_a_distinct_hard_gate(self) -> None:
+        def unavailable(*_args, **_kwargs):
+            raise PublicApiError("GET request timed out")
+
+        client = FinnhubEarningsCalendarClient("key", get_json_fn=unavailable)
+        now = datetime(2026, 7, 20, 12, tzinfo=UTC)
+        with self.assertRaises(EventCalendarUnavailable):
+            client.events("TSLA", now, now + timedelta(hours=8))
+        # The cooldown prevents each remaining market from waiting for another timeout.
+        with self.assertRaises(EventCalendarUnavailable):
+            client.events("AAPL", now, now + timedelta(hours=8))

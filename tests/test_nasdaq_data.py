@@ -34,3 +34,14 @@ class NasdaqDataTests(unittest.TestCase):
             cached_quote, cached_closes = load_baseline_cache(path)
         self.assertEqual(cached_quote, quote)
         self.assertEqual(cached_closes, closes)
+
+    def test_parses_current_nasdaq_et_quote_timestamp(self) -> None:
+        def fake_get_json(_url, _params, headers=None):
+            self.assertIn("Mozilla", headers["User-Agent"])
+            return {"data": {"primaryData": {
+                "lastSalePrice": "$156.98", "lastTradeTimestamp": "Jul 24, 2026 9:39 AM ET", "isRealTime": True,
+            }}}
+
+        quote = NasdaqBaselineClient(fake_get_json).latest_quote("COIN")
+        self.assertEqual(quote.last_trade_at, datetime(2026, 7, 24, 13, 39, tzinfo=UTC))
+        self.assertTrue(quote.is_real_time)

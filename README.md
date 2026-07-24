@@ -127,7 +127,7 @@ option IV, so it is an observation and timing layer only, not a trading signal.
 ```zsh
 # Refresh active equity markets every 15 minutes, supervise up to 18 markets,
 # and create only idempotent hold-to-settlement paper positions.
-polymarket-stock supervise-shadow --duration-seconds 0
+polymarket-stock supervise-shadow --spot-provider finnhub --duration-seconds 0
 
 # Inspect the paper lifecycle and realized calibration results.
 polymarket-stock paper-positions --status OPEN
@@ -148,6 +148,12 @@ The supervisor shares one Polymarket stream and one stock-quote stream, restarts
 those subscriptions when the active universe changes, and uses Gamma's published
 closed/resolved market state for settlement reconciliation. It does not use stock
 prices to infer settlement.
+
+If Finnhub's earnings-calendar request times out, the supervisor remains running
+and reports `SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE`. Affected markets receive the
+hard risk gate `EVENT_CALENDAR_UNAVAILABLE`, so observation continues but no paper
+entry is created without a usable calendar. The client waits at most five seconds
+per request and applies a 60-second retry cooldown to avoid stalling once per market.
 
 Daily equity contracts are eligible only on the New York calendar date of their
 published close. A next-day contract is never evaluated, quoted, or entered
@@ -297,7 +303,7 @@ polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --spot-provider
 
 ```zsh
 # 每 15 分鐘更新活躍美股市場，最多管理 18 個市場，並只建立可冪等、持有至結算的 paper position。
-polymarket-stock supervise-shadow --duration-seconds 0
+polymarket-stock supervise-shadow --spot-provider finnhub --duration-seconds 0
 
 # 查看 paper lifecycle 與已結算的校準結果。
 polymarket-stock paper-positions --status OPEN
@@ -307,6 +313,10 @@ polymarket-stock settle-paper-positions
 ```
 
 supervisor 共享一條 Polymarket stream 與一條股價 stream，active universe 改變時會重建訂閱集合，並依 Gamma 公布的 closed/resolved 狀態對帳結算；不會自行根據股價推斷市場結算。
+
+若 Finnhub 財報日曆請求逾時，supervisor 不會終止，而會輸出
+`SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE`。受影響市場會加上
+`EVENT_CALENDAR_UNAVAILABLE` hard risk gate：觀察和資料記錄會繼續，但在日曆資料可用前不會建立 paper entry。每次請求最多等待 5 秒，失敗後會有 60 秒 retry cooldown，避免每個市場各自卡住一次。
 
 每日股票合約只會在其公布收盤價所屬的紐約日期啟用。隔日合約不會在前一個交易日被估值、掛 maker quote 或建立 paper position。既有的前一日 paper entry 會保留在 SQLite 稽核紀錄中，但會標記為 `PRECONTRACT_TRADE_DATE`，並排除於校準與 paper-performance 報表。
 
