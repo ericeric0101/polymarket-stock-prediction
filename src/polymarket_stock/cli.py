@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import json
 import os
 from pathlib import Path
@@ -12,10 +12,14 @@ import ssl
 
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_closes_csv
+from .buffer_sweep import buffer_values, run_buffer_sweep, walk_forward_buffer_sweep
+from .checkpoints import CHECKPOINTS
 from .calibration import calibrate_checkpoint_observations, calibrate_market_observations, calibrate_settled_positions, write_calibration_recommendation
+from .clob_history import ClobPriceHistoryClient
 from .config import Settings
 from .equity_contracts import EquityContractParseError, parse_daily_equity_close_contract
 from .fees import PolymarketFeeRateClient
+from .historical_backtest import load_intraday_spots_csv, replay_daily_up_down_market
 from .http import PublicApiError
 from .journal import ShadowJournal
 from .logging import log_event
@@ -29,6 +33,7 @@ from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .realtime import RealtimeBaselineEvaluator
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 from .supervisor import MultiMarketShadowSupervisor
+from .yahoo_data import YahooChartClient, YahooPayloadError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -60,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_parser.add_argument("--spot", required=True, type=float)
     baseline_parser.add_argument("--resolves-at", required=True, help="ISO-8601 timestamp, e.g. 2026-07-20T20:00:00Z")
     baseline_parser.add_argument("--lookback-days", type=int, default=20)
+    yahoo_parser = subparsers.add_parser("download-yahoo-closes", help="download non-settlement Yahoo daily closes to Date,Close CSV")
+    yahoo_parser.add_argument("--symbol", required=True)
+    yahoo_parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
+    yahoo_parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
+    yahoo_parser.add_argument("--output", required=True)
     nasdaq_baseline_parser = subparsers.add_parser("evaluate-nasdaq-baseline", help="automatic free Nasdaq realized-vol baseline")
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
@@ -93,11 +103,39 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("paper-performance", help="report realized paper PnL and calibration for settled positions")
     replay_parser = subparsers.add_parser("replay-settled", help="replay immutable paper entries against official settled outcomes")
     replay_parser.add_argument("--output", help="optional JSON report output path")
+    historical_parser = subparsers.add_parser("historical-backtest", help="offline replay of one daily Up/Down market from CLOB price history")
+    historical_parser.add_argument("--market-id", required=True)
+    historical_parser.add_argument("--symbol", required=True)
+    historical_parser.add_argument("--history-csv", required=True, help="Date,Close CSV ending with prior close and final close")
+    historical_parser.add_argument("--spot-csv", help="optional DateTime,Spot intraday CSV; required for simulated trades")
+    historical_parser.add_argument("--start-at", required=True, help="ISO-8601 history start timestamp")
+    historical_parser.add_argument("--end-at", help="ISO-8601 history end timestamp; defaults to market resolution")
+    historical_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    historical_parser.add_argument("--model-error-buffer", type=float, default=0.07)
+    historical_parser.add_argument("--lookback-days", type=int, default=20)
+    historical_parser.add_argument("--output", help="optional JSON report output path")
     subparsers.add_parser("replay-observations", help="replay all valid market observations against official outcomes")
     calibration_parser = subparsers.add_parser("calibrate-paper", help="derive conservative settings from settled paper positions")
     calibration_parser.add_argument("--write", action="store_true", help="write a review-only recommendation to data/model_calibration.json")
     subparsers.add_parser("calibrate-observations", help="calibrate from all settled market observations")
     subparsers.add_parser("calibrate-checkpoints", help="report immutable checkpoint calibration against official settlements")
+    buffer_parser = subparsers.add_parser("buffer-sweep", help="replay one-entry-per-market checkpoint policies across probability buffers")
+    buffer_parser.add_argument("--minimum-buffer", type=float, default=0.0)
+    buffer_parser.add_argument("--maximum-buffer", type=float, default=0.20)
+    buffer_parser.add_argument("--buffer-step", type=float, default=0.01)
+    buffer_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    buffer_parser.add_argument("--checkpoint", choices=tuple(item[2] for item in CHECKPOINTS))
+    buffer_parser.add_argument("--output", help="optional JSON report output path")
+    walk_forward_parser = subparsers.add_parser("walk-forward-buffer-sweep", help="select buffers on earlier trading days and evaluate only later days")
+    walk_forward_parser.add_argument("--minimum-buffer", type=float, default=0.0)
+    walk_forward_parser.add_argument("--maximum-buffer", type=float, default=0.20)
+    walk_forward_parser.add_argument("--buffer-step", type=float, default=0.01)
+    walk_forward_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    walk_forward_parser.add_argument("--checkpoint", choices=tuple(item[2] for item in CHECKPOINTS))
+    walk_forward_parser.add_argument("--training-days", type=int, default=20)
+    walk_forward_parser.add_argument("--validation-days", type=int, default=5)
+    walk_forward_parser.add_argument("--minimum-training-trades", type=int, default=10)
+    walk_forward_parser.add_argument("--output", help="optional JSON report output path")
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
@@ -178,6 +216,21 @@ def main() -> None:
             raise SystemExit(f"Unknown market id: {error}") from error
         stored_count = _snapshot_market_books(journal, arguments.market_id, outcomes)
         print(f"Stored {stored_count} order-book snapshot(s) for market {arguments.market_id}")
+    elif arguments.command == "download-yahoo-closes":
+        try:
+            series = YahooChartClient().daily_closes(
+                arguments.symbol,
+                start_date=date.fromisoformat(arguments.start_date),
+                end_date=date.fromisoformat(arguments.end_date),
+            )
+        except (PublicApiError, YahooPayloadError, ValueError) as error:
+            raise SystemExit(f"download-yahoo-closes failed: {error}") from error
+        output = Path(arguments.output)
+        series.write_csv(output)
+        print(json.dumps({
+            "symbol": series.symbol, "provider": series.provider, "rows": len(series.closes),
+            "output": str(output), "settlement_source": False,
+        }, sort_keys=True))
     elif arguments.command == "evaluate-baseline":
         now = datetime.now(UTC)
         resolves_at = datetime.fromisoformat(arguments.resolves_at.replace("Z", "+00:00"))
@@ -369,6 +422,42 @@ def main() -> None:
         if arguments.output:
             Path(arguments.output).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "historical-backtest":
+        try:
+            candidate = MarketCandidate.from_gamma_payload(journal.get_market_candidate_raw_payload(arguments.market_id))
+            outcomes = journal.get_market_outcome_tokens(arguments.market_id)
+        except KeyError as error:
+            raise SystemExit(f"Unknown market id: {error}") from error
+        try:
+            contract = parse_daily_equity_close_contract(candidate)
+        except EquityContractParseError as error:
+            raise SystemExit(f"historical-backtest rejected market contract: {error}") from error
+        if arguments.symbol.upper() != contract.symbol:
+            raise SystemExit(f"historical-backtest symbol {arguments.symbol.upper()} does not match contract ticker {contract.symbol}")
+        closes = load_daily_closes_csv(Path(arguments.history_csv))
+        if len(closes) < arguments.lookback_days + 2:
+            raise SystemExit("history CSV must contain lookback closes plus one final close row")
+        final_close = closes[-1]
+        closes_before_market = closes[:-1]
+        spot_history = load_intraday_spots_csv(Path(arguments.spot_csv)) if arguments.spot_csv else ()
+        start_at = datetime.fromisoformat(arguments.start_at.replace("Z", "+00:00"))
+        end_at = datetime.fromisoformat(arguments.end_at.replace("Z", "+00:00")) if arguments.end_at else contract.resolves_at
+        history_client = ClobPriceHistoryClient()
+        try:
+            up_history = history_client.prices_history(outcomes[0].token_id, start_at=start_at, end_at=end_at)
+            down_history = history_client.prices_history(outcomes[1].token_id, start_at=start_at, end_at=end_at)
+            settlement = GammaMarketClient().get_market_settlement(arguments.market_id)
+        except PublicApiError as error:
+            _report_public_api_failure(settings, "HISTORICAL_BACKTEST_DATA_FAILED", error)
+        report = replay_daily_up_down_market(
+            candidate=candidate, symbol=arguments.symbol, resolves_at=contract.resolves_at,
+            closes_before_market=closes_before_market, final_close=final_close,
+            up_history=up_history, down_history=down_history, settlement=settlement, spot_history=spot_history,
+            minimum_edge=arguments.minimum_edge, model_error_buffer=arguments.model_error_buffer,
+            lookback_days=arguments.lookback_days,
+        ).as_payload()
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
     elif arguments.command == "calibrate-paper":
         recommendation = calibrate_settled_positions(journal.list_paper_positions())
         if arguments.write:
@@ -380,6 +469,24 @@ def main() -> None:
         print(json.dumps(calibrate_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
     elif arguments.command == "calibrate-checkpoints":
         print(json.dumps(calibrate_checkpoint_observations(journal.list_checkpoint_observations()).as_payload(), sort_keys=True))
+    elif arguments.command == "buffer-sweep":
+        report = run_buffer_sweep(
+            journal.list_buffer_sweep_observations(),
+            buffers=buffer_values(arguments.minimum_buffer, arguments.maximum_buffer, arguments.buffer_step),
+            minimum_edge=arguments.minimum_edge, checkpoint_name=arguments.checkpoint,
+        ).as_payload()
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "walk-forward-buffer-sweep":
+        report = walk_forward_buffer_sweep(
+            journal.list_buffer_sweep_observations(),
+            buffers=buffer_values(arguments.minimum_buffer, arguments.maximum_buffer, arguments.buffer_step),
+            minimum_edge=arguments.minimum_edge, checkpoint_name=arguments.checkpoint,
+            training_days=arguments.training_days, validation_days=arguments.validation_days,
+            minimum_training_trades=arguments.minimum_training_trades,
+        ).as_payload()
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
     elif arguments.command == "settle-paper-positions":
         supervisor = MultiMarketShadowSupervisor(
             journal=journal, log_path=settings.log_path, spot_provider="finnhub", tradier_api_token=os.getenv("TRADIER_API_TOKEN", "")
@@ -448,6 +555,11 @@ def main() -> None:
             {"requested_symbol_count": len(symbols), "returned_quote_count": len(quotes), "feed": "indicative"},
         )
         print(f"Stored {len(quotes)} Alpaca indicative option quote(s)")
+
+
+def _write_optional_json(output: str | None, payload: object) -> None:
+    if output:
+        Path(output).write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def _report_public_api_failure(settings: Settings, event_type: str, error: PublicApiError) -> None:

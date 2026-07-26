@@ -14,6 +14,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from .fees import estimate_taker_fee_usdc
+from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 
 
 SCHEMA = """
@@ -97,6 +98,9 @@ CREATE TABLE IF NOT EXISTS checkpoint_observations (
     model_version TEXT NOT NULL,
     option_iv REAL,
     payload_json TEXT NOT NULL,
+    checkpoint_target_at TEXT,
+    checkpoint_delay_seconds REAL,
+    eligible_for_calibration INTEGER NOT NULL DEFAULT 1 CHECK (eligible_for_calibration IN (0, 1)),
     UNIQUE (market_id, checkpoint_date, checkpoint_name)
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoint_observations_market_checkpoint
@@ -263,6 +267,24 @@ class CheckpointObservation:
     model_version: str
     option_iv: float | None
     winning_outcome: str
+    checkpoint_target_at: datetime
+    checkpoint_delay_seconds: float
+    eligible_for_calibration: bool
+
+
+@dataclass(frozen=True)
+class BufferSweepObservation:
+    market_id: str
+    symbol: str
+    checkpoint_date: str
+    checkpoint_name: str
+    evaluated_at: datetime
+    fair_up_probability: float
+    up_ask: float | None
+    down_ask: float | None
+    up_taker_fee: float | None
+    down_taker_fee: float | None
+    winning_outcome: str
 
 
 @contextmanager
@@ -285,7 +307,32 @@ class ShadowJournal:
             connection.executescript(SCHEMA)
             self._migrate_market_candidate_columns(connection)
             self._migrate_paper_position_columns(connection)
+            self._migrate_checkpoint_observation_columns(connection)
             self._exclude_precontract_day_paper_positions(connection)
+
+    @staticmethod
+    def _migrate_checkpoint_observation_columns(connection: sqlite3.Connection) -> None:
+        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(checkpoint_observations)")}
+        if "checkpoint_target_at" not in columns:
+            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN checkpoint_target_at TEXT")
+        if "checkpoint_delay_seconds" not in columns:
+            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN checkpoint_delay_seconds REAL")
+        if "eligible_for_calibration" not in columns:
+            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN eligible_for_calibration INTEGER NOT NULL DEFAULT 1")
+        rows = connection.execute(
+            """SELECT id, checkpoint_date, checkpoint_name, evaluated_at
+            FROM checkpoint_observations WHERE checkpoint_target_at IS NULL OR checkpoint_delay_seconds IS NULL"""
+        ).fetchall()
+        for row in rows:
+            target_at = checkpoint_target_at(str(row[1]), str(row[2]))
+            evaluated_at = datetime.fromisoformat(str(row[3]))
+            delay_seconds = max(0.0, (evaluated_at - target_at).total_seconds())
+            connection.execute(
+                """UPDATE checkpoint_observations
+                SET checkpoint_target_at = ?, checkpoint_delay_seconds = ?, eligible_for_calibration = ?
+                WHERE id = ?""",
+                (target_at.isoformat(), delay_seconds, int(delay_seconds <= DEFAULT_MAXIMUM_DELAY_SECONDS), int(row[0])),
+            )
 
     @staticmethod
     def _migrate_market_candidate_columns(connection: sqlite3.Connection) -> None:
@@ -563,7 +610,8 @@ class ShadowJournal:
             )
 
     def record_checkpoint_observation(
-        self, *, checkpoint_date: str, checkpoint_name: str, payload: Mapping[str, object]
+        self, *, checkpoint_date: str, checkpoint_name: str, payload: Mapping[str, object],
+        maximum_delay_seconds: float = DEFAULT_MAXIMUM_DELAY_SECONDS,
     ) -> bool:
         """Store the first valid observation after a fixed daily research checkpoint."""
 
@@ -571,17 +619,23 @@ class ShadowJournal:
         missing = required.difference(payload)
         if missing:
             raise ValueError(f"checkpoint observation is missing: {', '.join(sorted(missing))}")
+        evaluated_at = datetime.fromisoformat(str(payload["evaluated_at"]))
+        target_at = checkpoint_target_at(checkpoint_date, checkpoint_name)
+        delay_seconds = max(0.0, (evaluated_at - target_at).total_seconds())
+        eligible = delay_seconds <= maximum_delay_seconds
         with _database_connection(self.path) as connection:
             return connection.execute(
                 """INSERT OR IGNORE INTO checkpoint_observations (
                     market_id, symbol, checkpoint_date, checkpoint_name, evaluated_at,
-                    fair_up_probability, up_ask, down_ask, model_version, option_iv, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    fair_up_probability, up_ask, down_ask, model_version, option_iv, payload_json,
+                    checkpoint_target_at, checkpoint_delay_seconds, eligible_for_calibration
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(payload["market_id"]), str(payload["symbol"]), checkpoint_date, checkpoint_name,
                     str(payload["evaluated_at"]), float(payload["fair_up_probability"]), payload.get("up_ask"),
                     payload.get("down_ask"), str(payload["model_version"]), payload.get("option_iv"),
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                    target_at.isoformat(), delay_seconds, int(eligible),
                 ),
             ).rowcount == 1
 
@@ -618,23 +672,52 @@ class ShadowJournal:
             "reason": str(row[8]), "payload": json.loads(str(row[9])),
         } for row in rows)
 
-    def list_checkpoint_observations(self) -> tuple[CheckpointObservation, ...]:
+    def list_checkpoint_observations(self, *, eligible_only: bool = True) -> tuple[CheckpointObservation, ...]:
         query = """SELECT checkpoint.market_id, checkpoint.symbol, checkpoint.checkpoint_date,
             checkpoint.checkpoint_name, checkpoint.evaluated_at, checkpoint.fair_up_probability,
             checkpoint.up_ask, checkpoint.down_ask, checkpoint.model_version, checkpoint.option_iv,
-            settlement.winning_outcome
+            settlement.winning_outcome, checkpoint.checkpoint_target_at, checkpoint.checkpoint_delay_seconds,
+            checkpoint.eligible_for_calibration
           FROM checkpoint_observations AS checkpoint
           JOIN market_settlements AS settlement ON settlement.market_id = checkpoint.market_id
+          WHERE (? = 0 OR checkpoint.eligible_for_calibration = 1)
           ORDER BY checkpoint.checkpoint_date, checkpoint.checkpoint_name, checkpoint.market_id"""
         with _database_connection(self.path) as connection:
-            rows = connection.execute(query).fetchall()
+            rows = connection.execute(query, (int(eligible_only),)).fetchall()
         return tuple(CheckpointObservation(
             market_id=str(row[0]), symbol=str(row[1]), checkpoint_date=str(row[2]), checkpoint_name=str(row[3]),
             evaluated_at=datetime.fromisoformat(str(row[4])), fair_up_probability=float(row[5]),
             up_ask=float(row[6]) if row[6] is not None else None,
             down_ask=float(row[7]) if row[7] is not None else None, model_version=str(row[8]),
             option_iv=float(row[9]) if row[9] is not None else None, winning_outcome=str(row[10]),
+            checkpoint_target_at=datetime.fromisoformat(str(row[11])), checkpoint_delay_seconds=float(row[12]),
+            eligible_for_calibration=bool(row[13]),
         ) for row in rows)
+
+    def list_buffer_sweep_observations(self) -> tuple[BufferSweepObservation, ...]:
+        """Return immutable, on-time checkpoints with their original executable costs."""
+
+        query = """SELECT checkpoint.market_id, checkpoint.symbol, checkpoint.checkpoint_date,
+            checkpoint.checkpoint_name, checkpoint.evaluated_at, checkpoint.fair_up_probability,
+            checkpoint.up_ask, checkpoint.down_ask, checkpoint.payload_json, settlement.winning_outcome
+          FROM checkpoint_observations AS checkpoint
+          JOIN market_settlements AS settlement ON settlement.market_id = checkpoint.market_id
+          WHERE checkpoint.eligible_for_calibration = 1
+          ORDER BY checkpoint.checkpoint_date, checkpoint.evaluated_at, checkpoint.market_id"""
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query).fetchall()
+        observations = []
+        for row in rows:
+            payload = json.loads(str(row[8]))
+            observations.append(BufferSweepObservation(
+                market_id=str(row[0]), symbol=str(row[1]), checkpoint_date=str(row[2]), checkpoint_name=str(row[3]),
+                evaluated_at=datetime.fromisoformat(str(row[4])), fair_up_probability=float(row[5]),
+                up_ask=float(row[6]) if row[6] is not None else None,
+                down_ask=float(row[7]) if row[7] is not None else None,
+                up_taker_fee=_payload_execution_fee(payload, "up"),
+                down_taker_fee=_payload_execution_fee(payload, "down"), winning_outcome=str(row[9]),
+            ))
+        return tuple(observations)
 
     def record_contract_review(
         self, market_id: str, *, accepted: bool, reason: str, contract: Mapping[str, object] | None = None
@@ -988,6 +1071,19 @@ class ShadowJournal:
         if row is None:
             raise RuntimeError("paper position settlement did not return a row")
         return _paper_position_from_row(row)
+
+
+def _payload_execution_fee(payload: Mapping[str, object], outcome_prefix: str) -> float | None:
+    """Use the fee frozen with the checkpoint, never a recalculated current fee."""
+
+    value = payload.get(f"{outcome_prefix}_taker_fee")
+    if value is None:
+        return None
+    try:
+        fee = float(value)
+    except (TypeError, ValueError):
+        return None
+    return fee if fee >= 0 else None
 
 
 def _paper_position_from_row(row: tuple[object, ...]) -> PaperPosition:

@@ -164,6 +164,8 @@ class RealtimeBaselineEvaluator:
             "OPTION_IV_UNAVAILABLE" in flag or "OPTION_IV_PROVIDER_UNCONFIGURED" in flag for flag in quality_flags
         ):
             option_iv_status = "IV_UNAVAILABLE"
+        active_fallback_buffer = 0.0 if option_iv_status == "IV_VALID" else self._fallback_buffer
+        active_model_error_buffer = self._base_model_error_buffer + active_fallback_buffer + additional_model_error_buffer
         if reference_spot is not None and reference_spot_age_seconds is not None and reference_spot_age_seconds <= 15 and spot is not None:
             cross_source_difference = relative_price_difference(spot, reference_spot)
             if cross_source_difference > maximum_cross_source_difference:
@@ -196,7 +198,7 @@ class RealtimeBaselineEvaluator:
             "stream_ready": stream_ready,
             "market_session": market_session,
             "daily_data_is_fresh": daily_data_is_fresh,
-            "model_error_buffer": self._base_model_error_buffer + self._fallback_buffer,
+            "model_error_buffer": active_model_error_buffer,
         }
         if skip_reasons:
             return RealtimeEvaluation(
@@ -229,7 +231,7 @@ class RealtimeBaselineEvaluator:
             up_fee_rate=self._up_fee_rate,
             down_fee_rate=self._down_fee_rate,
             base_model_error_buffer=self._base_model_error_buffer,
-            fallback_buffer=self._fallback_buffer,
+            fallback_buffer=active_fallback_buffer,
             minimum_edge=self._minimum_edge,
             data_is_fresh=daily_data_is_fresh,
             lookback_days=20,
