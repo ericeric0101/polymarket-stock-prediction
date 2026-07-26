@@ -24,6 +24,8 @@ from .maker_shadow import MakerQuoteProposal, propose_maker_buy_quote
 from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, NasdaqQuote, load_baseline_cache, save_baseline_cache
 from .option_iv import OptionIvSurface, OptionSurfaceError, PolygonOptionIvClient, TradierOptionIvClient
 from .portfolio_risk import PaperEntryCandidate, select_diversified_entries
+from .pyth_benchmarks import PythBenchmarksClient
+from .trading_calendar import previous_nyse_trading_day
 from .realtime import RealtimeBaselineEvaluator
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 
@@ -75,6 +77,8 @@ class ActiveMarket:
     down_fee_rate: float | None
     reference_spot: float
     reference_spot_observed_at: datetime
+    price_to_beat: float
+    pyth_reference: Mapping[str, object]
     option_surface: OptionIvSurface | None
     option_quality_flags: tuple[str, ...]
     risk_reasons: tuple[str, ...]
@@ -169,6 +173,7 @@ class MultiMarketShadowSupervisor:
         gamma_client: GammaMarketClient | None = None,
         daily_client: NasdaqBaselineClient | None = None,
         fee_client: PolymarketFeeRateClient | None = None,
+        pyth_client: PythBenchmarksClient | None = None,
         tradier_api_token: str = "",
         polygon_api_key: str = "",
         event_calendar_path: Path = Path("data/event_calendar.json"),
@@ -203,6 +208,8 @@ class MultiMarketShadowSupervisor:
         self.gamma = gamma_client or GammaMarketClient()
         self.daily_client = daily_client or NasdaqBaselineClient()
         self.fee_client = fee_client or PolymarketFeeRateClient()
+        self.pyth_client = pyth_client or PythBenchmarksClient()
+        self._pyth_feed_ids: dict[str, str] = {}
         self.earnings_client = FinnhubEarningsCalendarClient(finnhub_api_key)
         # Polygon/Massive is preferred when configured because it is a data-only
         # provider; its adapter rejects free/15-minute-delayed data for entries.
@@ -220,6 +227,7 @@ class MultiMarketShadowSupervisor:
         self._stream_signature: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         self._pending_paper_entries: dict[str, PendingPaperEntry] = {}
         self._paper_batch_task: asyncio.Task[None] | None = None
+        self._markout_tasks: set[asyncio.Task[None]] = set()
 
     def _default_event_sink(self, event_type: str, payload: Mapping[str, object]) -> None:
         log_event(self.log_path, event_type, payload)
@@ -285,6 +293,13 @@ class MultiMarketShadowSupervisor:
             except (NasdaqPayloadError, OSError) as error:
                 self.event_sink("SUPERVISOR_MARKET_SKIPPED", {"market_id": candidate.market_id, "symbol": symbol, "reason": str(error)})
                 continue
+            try:
+                price_to_beat, pyth_reference = await asyncio.to_thread(self._pyth_price_to_beat, contract)
+            except Exception as error:
+                self.event_sink("SUPERVISOR_MARKET_SKIPPED", {
+                    "market_id": candidate.market_id, "symbol": symbol, "reason": "PYTH_REFERENCE_UNAVAILABLE", "error": str(error),
+                })
+                continue
             up_fee_rate, down_fee_rate = await asyncio.to_thread(self._fee_rates, candidate)
             option_surface, option_flags = await asyncio.to_thread(
                 self._option_surface, symbol, reference_quote.price, now, contract.resolves_at
@@ -307,7 +322,7 @@ class MultiMarketShadowSupervisor:
                 risk_reasons = ("EVENT_CALENDAR_INVALID",)
                 self.event_sink("SUPERVISOR_EVENT_CALENDAR_ERROR", {"market_id": candidate.market_id, "error": str(error)})
             runtimes[candidate.market_id] = self._make_runtime(
-                candidate, contract, closes, provider, reference_quote, up_fee_rate, down_fee_rate,
+                candidate, contract, closes, provider, reference_quote, price_to_beat, pyth_reference, up_fee_rate, down_fee_rate,
                 option_surface, option_flags, risk_reasons
             )
         self.runtimes = runtimes
@@ -319,6 +334,19 @@ class MultiMarketShadowSupervisor:
             },
         )
         await self._reconcile_streams()
+
+    def _pyth_price_to_beat(self, contract: DailyEquityCloseContract) -> tuple[float, Mapping[str, object]]:
+        market_day = contract.resolves_at.astimezone(NEW_YORK).date()
+        prior_day = previous_nyse_trading_day(market_day)
+        requested_at = datetime.combine(prior_day, datetime.min.time(), tzinfo=NEW_YORK).replace(hour=16).astimezone(UTC)
+        feed_id = self._pyth_feed_ids.get(contract.symbol)
+        if feed_id is None:
+            feed_id = self.pyth_client.equity_feed_id(contract.symbol)
+            self._pyth_feed_ids[contract.symbol] = feed_id
+        reference = self.pyth_client.price_at(
+            symbol=contract.symbol, feed_id=feed_id, observed_at=requested_at, maximum_delay_seconds=300,
+        )
+        return reference.price, reference.as_payload()
 
     def _daily_closes(self, symbol: str, now: datetime) -> tuple[list[DailyClose], str, NasdaqQuote]:
         cache_path = Path("data") / "baseline_cache" / f"{symbol}.json"
@@ -356,13 +384,13 @@ class MultiMarketShadowSupervisor:
             return None, None
         return up_rate, down_rate
 
-    def _make_runtime(self, candidate: MarketCandidate, contract: DailyEquityCloseContract, closes: list[DailyClose], daily_provider: str, reference_quote: NasdaqQuote, up_fee_rate: float | None, down_fee_rate: float | None, option_surface: OptionIvSurface | None, option_quality_flags: tuple[str, ...], risk_reasons: tuple[str, ...]) -> ActiveMarket:
+    def _make_runtime(self, candidate: MarketCandidate, contract: DailyEquityCloseContract, closes: list[DailyClose], daily_provider: str, reference_quote: NasdaqQuote, price_to_beat: float, pyth_reference: Mapping[str, object], up_fee_rate: float | None, down_fee_rate: float | None, option_surface: OptionIvSurface | None, option_quality_flags: tuple[str, ...], risk_reasons: tuple[str, ...]) -> ActiveMarket:
         calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
             closes=closes, spot_provider=self.spot_provider.upper(), up_fee_rate=up_fee_rate,
             down_fee_rate=down_fee_rate, base_model_error_buffer=0.02, fallback_buffer=0.0,
-            minimum_edge=calibrated_minimum_edge,
+            minimum_edge=calibrated_minimum_edge, price_to_beat=price_to_beat,
         )
         runtime: ActiveMarket
 
@@ -372,7 +400,7 @@ class MultiMarketShadowSupervisor:
         coordinator = ShadowStreamCoordinator(callback=evaluate_callback)
         runtime = ActiveMarket(
             candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,
-            reference_quote.last_trade_at, option_surface, option_quality_flags, risk_reasons,
+            reference_quote.last_trade_at, price_to_beat, pyth_reference, option_surface, option_quality_flags, risk_reasons,
             0.0, coordinator,
         )
         return runtime
@@ -405,6 +433,7 @@ class MultiMarketShadowSupervisor:
         model_version = IV_MODEL_VERSION if evaluation.option_iv_status == "IV_VALID" else MODEL_VERSION
         result = {
             **evaluation.as_payload(), "daily_provider": runtime.daily_provider, "model_version": model_version,
+            "price_to_beat": runtime.price_to_beat, "pyth_reference": runtime.pyth_reference,
             "contract": runtime.contract.as_payload(),
             "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
         }
@@ -429,6 +458,7 @@ class MultiMarketShadowSupervisor:
             if self.journal.record_checkpoint_observation(
                 checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result
             ):
+                self._record_execution_books(runtime, evaluation, result, now, "CHECKPOINT", None)
                 self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
                     "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
                     "checkpoint_date": checkpoint.checkpoint_date, "checkpoint_name": checkpoint.checkpoint_name,
@@ -438,13 +468,44 @@ class MultiMarketShadowSupervisor:
         if evaluation.paper_outcome and evaluation.fair_up_probability is not None:
             await self._queue_paper_entry(runtime, evaluation, result, now)
 
+    def _record_execution_books(
+        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], observed_at: datetime,
+        observation_kind: str, signal_id: str | None,
+    ) -> None:
+        fair_up = _evaluation_value(evaluation, "fair_up_probability")
+        for outcome, token_id, fee_rate, fair_probability in (
+            ("UP", runtime.token_ids[0], runtime.up_fee_rate, fair_up),
+            ("DOWN", runtime.token_ids[1], runtime.down_fee_rate, 1 - fair_up if fair_up is not None else None),
+        ):
+            book = runtime.coordinator.latest_books.get(token_id, {})
+            self.journal.record_execution_observation(
+                observed_at=observed_at, signal_id=signal_id, observation_kind=observation_kind,
+                market_id=runtime.candidate.market_id, symbol=runtime.symbol, outcome=outcome, token_id=token_id,
+                spot=_evaluation_value(evaluation, "spot"), price_to_beat=runtime.price_to_beat,
+                fair_probability=fair_probability, best_bid=runtime.coordinator.latest_best_bids.get(token_id),
+                best_ask=runtime.coordinator.latest_best_asks.get(token_id), fee_rate=fee_rate,
+                book_payload=book, evaluation_payload=payload,
+            )
+
+    def _schedule_markouts(self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], signal_id: str) -> None:
+        for delay_seconds in (60, 300, 900, 1800):
+            task = asyncio.create_task(self._record_markout_after_delay(runtime, evaluation, payload, signal_id, delay_seconds))
+            self._markout_tasks.add(task)
+            task.add_done_callback(self._markout_tasks.discard)
+
+    async def _record_markout_after_delay(
+        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], signal_id: str, delay_seconds: int,
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
+        self._record_execution_books(runtime, evaluation, payload, datetime.now(UTC), f"MARKOUT_{delay_seconds}S", signal_id)
+
     async def _queue_paper_entry(
         self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
     ) -> None:
         outcome = getattr(evaluation, "paper_outcome")
         entry_ask = getattr(evaluation, "up_ask") if outcome == "UP" else getattr(evaluation, "down_ask")
         edge = getattr(evaluation, "up_edge") if outcome == "UP" else getattr(evaluation, "down_edge")
-        fair_up = getattr(evaluation, "fair_up_probability")
+        fair_up = _evaluation_value(evaluation, "fair_up_probability")
         if outcome not in {"UP", "DOWN"} or entry_ask is None or edge is None or fair_up is None:
             return
         fair_probability = float(fair_up) if outcome == "UP" else 1 - float(fair_up)
@@ -503,6 +564,8 @@ class MultiMarketShadowSupervisor:
                 model_version=str(item.payload["model_version"]), payload=item.payload, fee_rate=fee_rate,
             )
             if created:
+                self._record_execution_books(item.runtime, item.payload, item.payload, now, "PAPER_ENTRY", position.position_id)
+                self._schedule_markouts(item.runtime, item.payload, item.payload, position.position_id)
                 self.event_sink("PAPER_POSITION_OPENED", {
                     "batch_id": batch_id, "position_id": position.position_id, "market_id": position.market_id,
                     "symbol": position.symbol, "outcome": position.outcome, "entry_ask": position.entry_ask,
@@ -514,7 +577,7 @@ class MultiMarketShadowSupervisor:
         """Maintain research-only passive quotes; touches never become assumed fills."""
 
         quotes: list[Mapping[str, object]] = []
-        fair_up = getattr(evaluation, "fair_up_probability")
+        fair_up = _evaluation_value(evaluation, "fair_up_probability")
         proposals: tuple[MakerQuoteProposal | None, MakerQuoteProposal | None]
         if fair_up is None or getattr(evaluation, "skip_reasons"):
             proposals = (None, None)
@@ -632,6 +695,11 @@ class MultiMarketShadowSupervisor:
         self._stream_runtimes = {}
 
     async def _stop_paper_batch(self) -> None:
+        for task in tuple(self._markout_tasks):
+            task.cancel()
+        if self._markout_tasks:
+            await asyncio.gather(*self._markout_tasks, return_exceptions=True)
+        self._markout_tasks.clear()
         if self._paper_batch_task:
             self._paper_batch_task.cancel()
             await asyncio.gather(self._paper_batch_task, return_exceptions=True)
@@ -657,6 +725,10 @@ class MultiMarketShadowSupervisor:
         finally:
             await self._stop_paper_batch()
             await self._stop_streams()
+
+
+def _evaluation_value(evaluation: object, name: str) -> object:
+    return evaluation.get(name) if isinstance(evaluation, Mapping) else getattr(evaluation, name)
 
 
 def _age_seconds(now: datetime, observed_at: datetime | None) -> float | None:

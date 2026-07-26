@@ -56,7 +56,7 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         coordinator = ShadowStreamCoordinator(callback=lambda _payload: None, debounce_seconds=0.01)
         runtime = ActiveMarket(
             candidate, parse_daily_equity_close_contract(candidate), "TSLA", evaluator, "TEST", 0.04, 0.04, 100.0,
-            self.now, None, ("OPTION_IV_PROVIDER_UNCONFIGURED",), (), 0.0, coordinator,
+            self.now, 100.0, {"provider": "TEST_PYTH"}, None, ("OPTION_IV_PROVIDER_UNCONFIGURED",), (), 0.0, coordinator,
         )
         router = MultiMarketRouter({"one": runtime}, "finnhub")
         await router.on_spot_message({"type": "trade", "data": [{"s": "TSLA", "p": 101.0}]})

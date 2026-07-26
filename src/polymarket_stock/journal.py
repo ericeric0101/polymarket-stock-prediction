@@ -59,6 +59,26 @@ CREATE TABLE IF NOT EXISTS order_book_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_order_book_snapshots_market_observed
     ON order_book_snapshots (market_id, observed_at);
+CREATE TABLE IF NOT EXISTS execution_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    signal_id TEXT,
+    observation_kind TEXT NOT NULL,
+    market_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('UP', 'DOWN')),
+    token_id TEXT NOT NULL,
+    spot REAL,
+    price_to_beat REAL,
+    fair_probability REAL,
+    best_bid REAL,
+    best_ask REAL,
+    fee_rate REAL,
+    book_payload_json TEXT NOT NULL,
+    evaluation_payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_observations_signal_observed
+    ON execution_observations (signal_id, observed_at);
 CREATE TABLE IF NOT EXISTS alpaca_indicative_option_quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
@@ -491,6 +511,29 @@ class ShadowJournal:
                     getattr(snapshot, "best_ask"),
                     getattr(snapshot, "midpoint"),
                     json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+
+    def record_execution_observation(
+        self, *, observed_at: datetime, signal_id: str | None, observation_kind: str, market_id: str,
+        symbol: str, outcome: str, token_id: str, spot: float | None, price_to_beat: float | None,
+        fair_probability: float | None, best_bid: float | None, best_ask: float | None,
+        fee_rate: float | None, book_payload: Mapping[str, object], evaluation_payload: Mapping[str, object],
+    ) -> None:
+        if outcome not in {"UP", "DOWN"}:
+            raise ValueError("execution observation outcome must be UP or DOWN")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT INTO execution_observations (
+                    observed_at, signal_id, observation_kind, market_id, symbol, outcome, token_id,
+                    spot, price_to_beat, fair_probability, best_bid, best_ask, fee_rate,
+                    book_payload_json, evaluation_payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    observed_at.isoformat(), signal_id, observation_kind, market_id, symbol, outcome, token_id,
+                    spot, price_to_beat, fair_probability, best_bid, best_ask, fee_rate,
+                    json.dumps(book_payload, sort_keys=True, separators=(",", ":"), default=str),
+                    json.dumps(evaluation_payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
 

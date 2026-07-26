@@ -91,16 +91,19 @@ def evaluate_realized_vol_baseline(
     lookback_days: int = 20,
     annualized_volatility_override: float | None = None,
     additional_model_error_buffer: float = 0.0,
+    price_to_beat_override: float | None = None,
 ) -> BaselineAssessment:
     if spot <= 0 or seconds_to_resolution <= 0:
         raise ValueError("spot and seconds_to_resolution must be positive")
     if additional_model_error_buffer < 0:
         raise ValueError("additional_model_error_buffer cannot be negative")
+    if price_to_beat_override is not None and price_to_beat_override <= 0:
+        raise ValueError("price_to_beat_override must be positive")
     realized_volatility = annualized_realized_volatility(closes, lookback_days)
     volatility = annualized_volatility_override if annualized_volatility_override is not None else realized_volatility
     if volatility <= 0:
         raise ValueError("annualized_volatility_override must be positive")
-    prior_close = closes[-1].close
+    prior_close = price_to_beat_override if price_to_beat_override is not None else closes[-1].close
     fair_up = digital_up_probability(spot, prior_close, volatility, seconds_to_resolution)
     model_error_buffer = base_model_error_buffer + fallback_buffer + additional_model_error_buffer
     return BaselineAssessment(

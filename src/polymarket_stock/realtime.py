@@ -84,6 +84,7 @@ class RealtimeBaselineEvaluator:
         base_model_error_buffer: float = 0.02,
         fallback_buffer: float = 0.0,
         minimum_edge: float = 0.02,
+        price_to_beat: float | None = None,
     ) -> None:
         if resolves_at.tzinfo is None:
             raise ValueError("resolves_at must be timezone-aware")
@@ -97,6 +98,9 @@ class RealtimeBaselineEvaluator:
         self._base_model_error_buffer = base_model_error_buffer
         self._fallback_buffer = fallback_buffer
         self._minimum_edge = minimum_edge
+        if price_to_beat is not None and price_to_beat <= 0:
+            raise ValueError("price_to_beat must be positive")
+        self._price_to_beat = price_to_beat
 
     def evaluate(
         self,
@@ -239,6 +243,7 @@ class RealtimeBaselineEvaluator:
             lookback_days=20,
             annualized_volatility_override=combined_volatility,
             additional_model_error_buffer=additional_model_error_buffer,
+            price_to_beat_override=self._price_to_beat,
         )
         model_outcome = assessment.paper_outcome
         entry_block_reasons: list[str] = []
