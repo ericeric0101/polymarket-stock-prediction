@@ -4,10 +4,11 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .coverage
+.DS_Store
+Screenshot *.png
 .env
 certs/*.pem
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/baseline_cache/
-logs/*.jsonl
+
+# Local runtime state and offline research/backtest artifacts.
+data/
+logs/
