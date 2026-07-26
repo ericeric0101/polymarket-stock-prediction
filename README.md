@@ -203,6 +203,37 @@ polymarket-stock validate-option-pricing \
 
 The JSON output is always `RESEARCH_ONLY_VALIDATED` with `entry_eligible: false`.
 
+### Checkpoint Buffer Research
+
+These reports replay immutable, on-time checkpoints only. They never alter the
+supervisor, paper positions, or future live-trading settings. A checkpoint is
+eligible only when its first valid observation arrives within five minutes of
+the scheduled New York time.
+
+```zsh
+polymarket-stock buffer-sweep \
+  --minimum-buffer 0.00 \
+  --maximum-buffer 0.20 \
+  --buffer-step 0.01 \
+  --minimum-edge 0.02 \
+  --output data/buffer_sweep.json
+
+polymarket-stock walk-forward-buffer-sweep \
+  --training-days 20 \
+  --validation-days 5 \
+  --minimum-training-trades 10 \
+  --output data/walk_forward_buffer_sweep.json
+```
+
+Each replay selects at most one first eligible hold-to-settlement entry per
+market-day. Compare coverage, trade count, net PnL, Brier/log loss, and later-day
+performance together. A large buffer can appear perfect simply because it makes
+no trades.
+
+The live evaluator keeps a 2% base uncertainty buffer for `IV_VALID` inputs.
+The additional 5% fallback buffer applies only when the option-IV surface is
+unavailable, and that fallback remains observation-only.
+
 ## 繁體中文
 
 ### 用途
@@ -383,5 +414,28 @@ polymarket-stock dashboard
 
 `calibrate-paper --write` 只會在至少 30 筆已結算 paper position 時寫入
 `data/model_calibration.json`。下一次 supervisor 啟動時只會提高、絕不降低 model-error buffer 與 minimum-edge floor。
+
+### Checkpoint Buffer 研究
+
+這些報表只重播不可變、且準時取得的 checkpoint；不會改變 supervisor、paper position 或任何未來實盤設定。固定 checkpoint 的第一筆有效資料必須在預定紐約時間後 5 分鐘內抵達，才可用於正式校準。
+
+```zsh
+polymarket-stock buffer-sweep \
+  --minimum-buffer 0.00 \
+  --maximum-buffer 0.20 \
+  --buffer-step 0.01 \
+  --minimum-edge 0.02 \
+  --output data/buffer_sweep.json
+
+polymarket-stock walk-forward-buffer-sweep \
+  --training-days 20 \
+  --validation-days 5 \
+  --minimum-training-trades 10 \
+  --output data/walk_forward_buffer_sweep.json
+```
+
+每次重播每市場每日最多選擇一筆、第一個合格並持有至結算的 entry。必須一起比較 coverage、交易數、淨 PnL、Brier/log loss 與後續交易日表現；過大的 buffer 可能因為完全沒有交易而看似完美。
+
+即時 evaluator 對 `IV_VALID` 輸入只保留 2% 基礎不確定性 buffer；額外 5% fallback buffer 只在 option-IV surface 不可用時套用，而 fallback 仍只做 observation。
 
 supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開；`dashboard --once` 會輸出單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。

@@ -44,8 +44,8 @@ class CalibrationReplayTests(unittest.TestCase):
 
     def test_checkpoint_calibration_reports_probability_bands(self) -> None:
         observations = [
-            CheckpointObservation("one", "TSLA", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.72, 0.60, 0.30, "iv-blend-v1", 0.3, "UP"),
-            CheckpointObservation("two", "AAPL", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.78, 0.70, 0.20, "iv-blend-v1", 0.3, "DOWN"),
+            CheckpointObservation("one", "TSLA", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.72, 0.60, 0.30, "iv-blend-v1", 0.3, "UP", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.0, True),
+            CheckpointObservation("two", "AAPL", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.78, 0.70, 0.20, "iv-blend-v1", 0.3, "DOWN", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.0, True),
         ]
         report = calibrate_checkpoint_observations(observations)
         self.assertEqual(report.sample_size, 2)

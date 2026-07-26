@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from .baseline import DailyClose, daily_close_data_is_fresh
 from .calibration import CalibrationRecommendation, load_calibration_recommendation
-from .checkpoints import latest_checkpoint
+from .checkpoints import checkpoint_window
 from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
 from .event_risk import EventCalendarError, EventCalendarUnavailable, FinnhubEarningsCalendarClient, combined_risk_events
 from .fees import PolymarketFeeRateClient
@@ -358,7 +358,7 @@ class MultiMarketShadowSupervisor:
 
     def _make_runtime(self, candidate: MarketCandidate, contract: DailyEquityCloseContract, closes: list[DailyClose], daily_provider: str, reference_quote: NasdaqQuote, up_fee_rate: float | None, down_fee_rate: float | None, option_surface: OptionIvSurface | None, option_quality_flags: tuple[str, ...], risk_reasons: tuple[str, ...]) -> ActiveMarket:
         calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
-        calibrated_buffer = self.calibration.recommended_model_error_buffer if self.calibration else 0.07
+        calibrated_buffer = self.calibration.recommended_model_error_buffer if self.calibration else None
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
             closes=closes, spot_provider=self.spot_provider.upper(), up_fee_rate=up_fee_rate,
@@ -373,7 +373,7 @@ class MultiMarketShadowSupervisor:
         runtime = ActiveMarket(
             candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,
             reference_quote.last_trade_at, option_surface, option_quality_flags, risk_reasons,
-            max(0.0, calibrated_buffer - 0.07), coordinator,
+            max(0.0, calibrated_buffer - 0.02) if calibrated_buffer is not None else 0.0, coordinator,
         )
         return runtime
 
@@ -424,15 +424,15 @@ class MultiMarketShadowSupervisor:
             runtime.last_skip_reasons = None
             runtime.last_skip_logged_at = None
         self.journal.record_realtime_evaluation(result)
-        checkpoint = latest_checkpoint(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
+        checkpoint = checkpoint_window(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
         if checkpoint:
-            checkpoint_date, checkpoint_name = checkpoint
             if self.journal.record_checkpoint_observation(
-                checkpoint_date=checkpoint_date, checkpoint_name=checkpoint_name, payload=result
+                checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result
             ):
                 self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
                     "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
-                    "checkpoint_date": checkpoint_date, "checkpoint_name": checkpoint_name,
+                    "checkpoint_date": checkpoint.checkpoint_date, "checkpoint_name": checkpoint.checkpoint_name,
+                    "checkpoint_delay_seconds": round(checkpoint.delay_seconds, 3),
                 })
         self.event_sink("REALTIME_BASELINE_EVALUATED", result)
         if evaluation.paper_outcome and evaluation.fair_up_probability is not None:
