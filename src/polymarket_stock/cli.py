@@ -30,6 +30,7 @@ from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, load_baseline
 from .option_pricing_validation import OptionPricingInputs, validate_option_quote
 from .polymarket_data import ClobMarketDataClient
 from .paper_reporting import paper_performance
+from .pyth_clob_backtest import run_pyth_clob_backtest
 from .replay import replay_market_observations, replay_settled_positions
 from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .realtime import RealtimeBaselineEvaluator
@@ -89,6 +90,18 @@ def build_parser() -> argparse.ArgumentParser:
     pyth_intraday_parser.add_argument("--output-dir", default="data/historical/90d")
     pyth_intraday_parser.add_argument("--symbols", default="NVDA,TSLA")
     pyth_intraday_parser.add_argument("--pause-seconds", type=float, default=0.25)
+    pyth_clob_parser = subparsers.add_parser("backtest-pyth-clob", help="non-leaking Pyth minute-spot and CLOB-history batch replay")
+    pyth_clob_parser.add_argument("--data-dir", default="data/historical/90d")
+    pyth_clob_parser.add_argument("--minimum-buffer", type=float, default=0.01)
+    pyth_clob_parser.add_argument("--maximum-buffer", type=float, default=0.02)
+    pyth_clob_parser.add_argument("--buffer-step", type=float, default=0.01)
+    pyth_clob_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    pyth_clob_parser.add_argument("--lookback-days", type=int, default=20)
+    pyth_clob_parser.add_argument("--training-days", type=int, default=20)
+    pyth_clob_parser.add_argument("--validation-days", type=int, default=5)
+    pyth_clob_parser.add_argument("--minimum-training-trades", type=int, default=10)
+    pyth_clob_parser.add_argument("--fee-rate", type=float, default=0.0, help="historical fee-rate assumption; 0 reports pre-fee PnL")
+    pyth_clob_parser.add_argument("--output", help="optional JSON report output path")
     nasdaq_baseline_parser = subparsers.add_parser("evaluate-nasdaq-baseline", help="automatic free Nasdaq realized-vol baseline")
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
@@ -273,6 +286,19 @@ def main() -> None:
         except (OSError, ValueError, PublicApiError) as error:
             raise SystemExit(f"backfill-pyth-intraday-spots failed: {error}") from error
         print(json.dumps(report.as_payload(), sort_keys=True))
+    elif arguments.command == "backtest-pyth-clob":
+        try:
+            report = run_pyth_clob_backtest(
+                data_dir=Path(arguments.data_dir), buffers=buffer_values(
+                    arguments.minimum_buffer, arguments.maximum_buffer, arguments.buffer_step,
+                ), minimum_edge=arguments.minimum_edge, lookback_days=arguments.lookback_days,
+                training_days=arguments.training_days, validation_days=arguments.validation_days,
+                minimum_training_trades=arguments.minimum_training_trades, fee_rate=arguments.fee_rate,
+            ).as_payload()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(f"backtest-pyth-clob failed: {error}") from error
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
     elif arguments.command == "backfill-settled-market-data":
         try:
             candidate = MarketCandidate.from_gamma_payload(journal.get_market_candidate_raw_payload(arguments.market_id))
