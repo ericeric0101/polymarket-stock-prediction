@@ -111,6 +111,7 @@ class ShadowStreamCoordinator:
     freshness: StreamFreshness = field(init=False)
     latest_spots: dict[str, float] = field(default_factory=dict)
     latest_books: dict[str, Mapping[str, object]] = field(default_factory=dict)
+    latest_book_levels: dict[str, dict[str, dict[float, float]]] = field(default_factory=dict)
     latest_best_asks: dict[str, float] = field(default_factory=dict)
     latest_best_bids: dict[str, float] = field(default_factory=dict)
     _debouncer: DebouncedReevaluation = field(init=False)
@@ -144,13 +145,35 @@ class ShadowStreamCoordinator:
         if event_type == "book":
             best_bid = _best_level_price(payload.get("bids"), maximum=True)
             best_ask = _best_level_price(payload.get("asks"), maximum=False)
-        self.latest_books[asset_id] = dict(payload)
+        self._update_depth(asset_id, payload, event_type)
         if best_bid is not None:
             self.latest_best_bids[asset_id] = best_bid
         if best_ask is not None:
             self.latest_best_asks[asset_id] = best_ask
         self.freshness.last_book_at = datetime.now(UTC)
         return True
+
+    def _update_depth(self, asset_id: str, payload: Mapping[str, object], event_type: str) -> None:
+        levels = self.latest_book_levels.setdefault(asset_id, {"bids": {}, "asks": {}})
+        if event_type == "book":
+            levels["bids"] = _levels_from_payload(payload.get("bids"))
+            levels["asks"] = _levels_from_payload(payload.get("asks"))
+        elif event_type == "price_change":
+            side = str(payload.get("side", "")).upper()
+            price = _as_probability(payload.get("price"))
+            size = _as_nonnegative(payload.get("size"))
+            book_side = "bids" if side in {"BUY", "BID"} else "asks" if side in {"SELL", "ASK"} else None
+            if book_side is not None and price is not None and size is not None:
+                if size == 0:
+                    levels[book_side].pop(price, None)
+                else:
+                    levels[book_side][price] = size
+        self.latest_books[asset_id] = {
+            "event_type": "RECONSTRUCTED_L2", "source_event": event_type,
+            "bids": _top_levels(levels["bids"], maximum=True),
+            "asks": _top_levels(levels["asks"], maximum=False),
+            "last_event": dict(payload),
+        }
 
     async def on_alpaca_message(self, payload: Mapping[str, object]) -> None:
         message_type = str(payload.get("T", ""))
@@ -192,6 +215,32 @@ def _as_probability(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if 0 <= parsed <= 1 else None
+
+
+def _as_nonnegative(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _levels_from_payload(levels: object) -> dict[float, float]:
+    if not isinstance(levels, list):
+        return {}
+    parsed = {}
+    for level in levels:
+        if not isinstance(level, Mapping):
+            continue
+        price = _as_probability(level.get("price"))
+        size = _as_nonnegative(level.get("size"))
+        if price is not None and size is not None and size > 0:
+            parsed[price] = size
+    return parsed
+
+
+def _top_levels(levels: Mapping[float, float], *, maximum: bool) -> list[Mapping[str, float]]:
+    return [{"price": price, "size": levels[price]} for price in sorted(levels, reverse=maximum)[:5]]
 
 
 def _best_level_price(levels: object, *, maximum: bool) -> float | None:

@@ -38,6 +38,23 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         await coordinator.close()
         self.assertEqual(coordinator.latest_best_asks, {"up-token": 0.52, "down-token": 0.49})
 
+    async def test_coordinator_reconstructs_top_five_depth_after_price_changes(self) -> None:
+        coordinator = ShadowStreamCoordinator(callback=lambda _payload: None, debounce_seconds=0.01)
+        await coordinator.on_polymarket_message({
+            "event_type": "book", "asset_id": "up-token",
+            "bids": [{"price": "0.49", "size": "10"}, {"price": "0.48", "size": "8"}],
+            "asks": [{"price": "0.52", "size": "5"}],
+        })
+        await coordinator.on_polymarket_message({
+            "event_type": "price_change", "price_changes": [
+                {"asset_id": "up-token", "side": "BUY", "price": "0.50", "size": "7", "best_bid": "0.50", "best_ask": "0.52"}
+            ],
+        })
+        await coordinator.close()
+        snapshot = coordinator.latest_books["up-token"]
+        self.assertEqual(snapshot["bids"][0], {"price": 0.5, "size": 7.0})
+        self.assertEqual(snapshot["asks"], [{"price": 0.52, "size": 5.0}])
+
     async def test_coordinator_accepts_finnhub_trade_batch(self) -> None:
         events = []
 
