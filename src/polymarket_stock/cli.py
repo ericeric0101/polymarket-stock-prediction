@@ -12,6 +12,7 @@ import ssl
 
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_closes_csv
+from .batch_backfill import backfill_discovered_markets
 from .buffer_sweep import buffer_values, run_buffer_sweep, walk_forward_buffer_sweep
 from .checkpoints import CHECKPOINTS
 from .calibration import calibrate_checkpoint_observations, calibrate_market_observations, calibrate_settled_positions, write_calibration_recommendation
@@ -21,6 +22,7 @@ from .equity_contracts import EquityContractParseError, parse_daily_equity_close
 from .fees import PolymarketFeeRateClient
 from .historical_backtest import load_intraday_spots_csv, replay_daily_up_down_market
 from .http import PublicApiError
+from .intraday_spot_backfill import backfill_pyth_intraday_spots
 from .journal import ShadowJournal
 from .logging import log_event
 from .market_discovery import GammaMarketClient, MarketCandidate
@@ -75,6 +77,18 @@ def build_parser() -> argparse.ArgumentParser:
     settled_data_parser.add_argument("--market-id", required=True)
     settled_data_parser.add_argument("--output-dir", default="data/historical")
     settled_data_parser.add_argument("--lookback-calendar-days", type=int, default=45)
+    batch_backfill_parser = subparsers.add_parser("batch-backfill-settled-markets", help="resumable Pyth, CLOB, and Gamma settlement backfill from discovery JSON")
+    batch_backfill_parser.add_argument("--discovery-json", required=True)
+    batch_backfill_parser.add_argument("--output-dir", default="data/historical")
+    batch_backfill_parser.add_argument("--start-offset", type=int, default=0)
+    batch_backfill_parser.add_argument("--max-markets", type=int)
+    batch_backfill_parser.add_argument("--pause-seconds", type=float, default=0.2)
+    batch_backfill_parser.add_argument("--pyth-pause-seconds", type=float, default=2.0)
+    pyth_intraday_parser = subparsers.add_parser("backfill-pyth-intraday-spots", help="resumable Pyth Pro one-minute underlying spots for settled markets")
+    pyth_intraday_parser.add_argument("--discovery-json", required=True)
+    pyth_intraday_parser.add_argument("--output-dir", default="data/historical/90d")
+    pyth_intraday_parser.add_argument("--symbols", default="NVDA,TSLA")
+    pyth_intraday_parser.add_argument("--pause-seconds", type=float, default=0.25)
     nasdaq_baseline_parser = subparsers.add_parser("evaluate-nasdaq-baseline", help="automatic free Nasdaq realized-vol baseline")
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
@@ -236,6 +250,29 @@ def main() -> None:
             "symbol": series.symbol, "provider": series.provider, "rows": len(series.closes),
             "output": str(output), "settlement_source": False,
         }, sort_keys=True))
+    elif arguments.command == "batch-backfill-settled-markets":
+        try:
+            report = backfill_discovered_markets(
+                discovery_path=Path(arguments.discovery_json), output_dir=Path(arguments.output_dir),
+                start_offset=arguments.start_offset, maximum_markets=arguments.max_markets,
+                pause_seconds=arguments.pause_seconds, pyth_pause_seconds=arguments.pyth_pause_seconds,
+            )
+        except (OSError, ValueError, PublicApiError) as error:
+            raise SystemExit(f"batch-backfill-settled-markets failed: {error}") from error
+        print(json.dumps(report.as_payload(), sort_keys=True))
+    elif arguments.command == "backfill-pyth-intraday-spots":
+        api_key = os.getenv("PYTH_PRO_API_KEY", "")
+        if not api_key:
+            raise SystemExit("backfill-pyth-intraday-spots requires PYTH_PRO_API_KEY in .env")
+        symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
+        try:
+            report = backfill_pyth_intraday_spots(
+                discovery_path=Path(arguments.discovery_json), output_dir=Path(arguments.output_dir), api_key=api_key,
+                symbols=symbols, pause_seconds=arguments.pause_seconds,
+            )
+        except (OSError, ValueError, PublicApiError) as error:
+            raise SystemExit(f"backfill-pyth-intraday-spots failed: {error}") from error
+        print(json.dumps(report.as_payload(), sort_keys=True))
     elif arguments.command == "backfill-settled-market-data":
         try:
             candidate = MarketCandidate.from_gamma_payload(journal.get_market_candidate_raw_payload(arguments.market_id))
