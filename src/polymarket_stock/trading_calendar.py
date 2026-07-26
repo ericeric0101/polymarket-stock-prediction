@@ -26,6 +26,15 @@ def is_nyse_regular_session(now: datetime) -> bool:
     return nyse_holiday_name(now.date()) is None
 
 
+def previous_nyse_trading_day(day: date) -> date:
+    """Return the prior full NYSE trading day for daily-close contracts."""
+
+    candidate = day - timedelta(days=1)
+    while candidate.weekday() >= 5 or nyse_holiday_name(candidate):
+        candidate -= timedelta(days=1)
+    return candidate
+
+
 def _observed(day: date) -> date:
     return day - timedelta(days=1) if day.weekday() == 5 else day + timedelta(days=1) if day.weekday() == 6 else day
 

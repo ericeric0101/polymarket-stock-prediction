@@ -7,6 +7,7 @@ import unittest
 
 from polymarket_stock.checkpoints import checkpoint_window, latest_checkpoint
 from polymarket_stock.journal import ShadowJournal
+from polymarket_stock.trading_calendar import previous_nyse_trading_day
 
 
 class CheckpointTests(unittest.TestCase):
@@ -22,6 +23,10 @@ class CheckpointTests(unittest.TestCase):
         assert window is not None
         self.assertEqual(window.checkpoint_name, "1000_EDT")
         self.assertEqual(window.delay_seconds, 299.0)
+
+    def test_previous_nyse_trading_day_skips_weekend_and_holiday(self) -> None:
+        self.assertEqual(previous_nyse_trading_day(datetime(2026, 7, 20).date()).isoformat(), "2026-07-17")
+        self.assertEqual(previous_nyse_trading_day(datetime(2026, 7, 6).date()).isoformat(), "2026-07-02")
 
     def test_checkpoint_is_immutable_per_market_and_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

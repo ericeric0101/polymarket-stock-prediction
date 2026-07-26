@@ -38,6 +38,21 @@ class YahooDailyCloseSeries:
                 writer.writerow({"Date": close.date, "Close": close.close})
 
 
+@dataclass(frozen=True)
+class YahooIntradaySpotSeries:
+    symbol: str
+    points: tuple[tuple[datetime, float], ...]
+    provider: str = "YAHOO_CHART_NON_SETTLEMENT"
+
+    def write_csv(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("DateTime", "Spot"))
+            writer.writeheader()
+            for observed_at, spot in self.points:
+                writer.writerow({"DateTime": observed_at.isoformat(), "Spot": spot})
+
+
 class YahooChartClient:
     def __init__(self, get_json_fn: Callable[..., object] = get_json) -> None:
         self._get_json = get_json_fn
@@ -62,6 +77,24 @@ class YahooChartClient:
         )
         return YahooDailyCloseSeries(symbol.upper(), _parse_chart_response(response))
 
+    def intraday_spots(self, symbol: str, *, start_at: datetime, end_at: datetime) -> YahooIntradaySpotSeries:
+        if not symbol.strip():
+            raise ValueError("symbol is required")
+        if start_at.tzinfo is None or end_at.tzinfo is None:
+            raise ValueError("intraday timestamps must be timezone-aware")
+        if end_at <= start_at:
+            raise ValueError("end_at must be after start_at")
+        if end_at - start_at > timedelta(days=8):
+            raise ValueError("Yahoo intraday request must cover at most eight days")
+        response = self._get_json(
+            f"{YAHOO_CHART_URL}/{symbol.upper()}",
+            {
+                "period1": int(start_at.timestamp()), "period2": int(end_at.timestamp()),
+                "interval": "1m", "events": "history", "includePrePost": "false",
+            },
+        )
+        return YahooIntradaySpotSeries(symbol.upper(), _parse_intraday_chart_response(response, start_at, end_at))
+
 
 def _parse_chart_response(payload: object) -> tuple[DailyClose, ...]:
     try:
@@ -80,3 +113,24 @@ def _parse_chart_response(payload: object) -> tuple[DailyClose, ...]:
     if not values:
         raise YahooPayloadError("Yahoo chart response has no usable closes")
     return tuple(values)
+
+
+def _parse_intraday_chart_response(payload: object, start_at: datetime, end_at: datetime) -> tuple[tuple[datetime, float], ...]:
+    try:
+        result = payload["chart"]["result"][0]  # type: ignore[index]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise YahooPayloadError("Yahoo intraday chart response is invalid") from error
+    if not isinstance(timestamps, list) or not isinstance(closes, list) or len(timestamps) != len(closes):
+        raise YahooPayloadError("Yahoo intraday timestamps and closes must be same-length arrays")
+    points = []
+    for timestamp, close in zip(timestamps, closes):
+        if not isinstance(timestamp, (int, float)) or not isinstance(close, (int, float)) or close <= 0:
+            continue
+        observed_at = datetime.fromtimestamp(float(timestamp), tz=UTC)
+        if start_at <= observed_at <= end_at:
+            points.append((observed_at, float(close)))
+    if not points:
+        raise YahooPayloadError("Yahoo intraday chart response has no usable closes")
+    return tuple(points)

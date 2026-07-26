@@ -31,6 +31,7 @@ from .paper_reporting import paper_performance
 from .replay import replay_market_observations, replay_settled_positions
 from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .realtime import RealtimeBaselineEvaluator
+from .settled_market_data import backfill_settled_market_data
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 from .supervisor import MultiMarketShadowSupervisor
 from .yahoo_data import YahooChartClient, YahooPayloadError
@@ -70,6 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
     yahoo_parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
     yahoo_parser.add_argument("--end-date", required=True, help="YYYY-MM-DD")
     yahoo_parser.add_argument("--output", required=True)
+    settled_data_parser = subparsers.add_parser("backfill-settled-market-data", help="download Pyth references and Yahoo intraday inputs for one settled market")
+    settled_data_parser.add_argument("--market-id", required=True)
+    settled_data_parser.add_argument("--output-dir", default="data/historical")
+    settled_data_parser.add_argument("--lookback-calendar-days", type=int, default=45)
     nasdaq_baseline_parser = subparsers.add_parser("evaluate-nasdaq-baseline", help="automatic free Nasdaq realized-vol baseline")
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
@@ -231,6 +236,18 @@ def main() -> None:
             "symbol": series.symbol, "provider": series.provider, "rows": len(series.closes),
             "output": str(output), "settlement_source": False,
         }, sort_keys=True))
+    elif arguments.command == "backfill-settled-market-data":
+        try:
+            candidate = MarketCandidate.from_gamma_payload(journal.get_market_candidate_raw_payload(arguments.market_id))
+            contract = parse_daily_equity_close_contract(candidate)
+            winning_outcome = journal.get_market_settlement_outcome(arguments.market_id)
+            result = backfill_settled_market_data(
+                candidate=candidate, contract=contract, output_dir=Path(arguments.output_dir),
+                lookback_calendar_days=arguments.lookback_calendar_days,
+            )
+        except (KeyError, EquityContractParseError, PublicApiError, ValueError) as error:
+            raise SystemExit(f"backfill-settled-market-data failed: {error}") from error
+        print(json.dumps({**result.as_payload(), "winning_outcome": winning_outcome}, sort_keys=True))
     elif arguments.command == "evaluate-baseline":
         now = datetime.now(UTC)
         resolves_at = datetime.fromisoformat(arguments.resolves_at.replace("Z", "+00:00"))

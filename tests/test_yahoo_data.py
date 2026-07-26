@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -34,6 +34,21 @@ class YahooDataTests(unittest.TestCase):
             output = Path(directory) / "TSLA.csv"
             series.write_csv(output)
             self.assertIn("Date,Close", output.read_text(encoding="utf-8"))
+
+    def test_intraday_spots_write_required_csv_shape(self) -> None:
+        client = YahooChartClient(lambda _url, _params: {
+            "chart": {"result": [{
+                "timestamp": [1784554200, 1784554260],
+                "indicators": {"quote": [{"close": [370.0, 370.25]}]},
+            }]}
+        })
+        start_at = datetime(2026, 7, 20, 13, 30, tzinfo=UTC)
+        series = client.intraday_spots("TSLA", start_at=start_at, end_at=datetime(2026, 7, 20, 20, tzinfo=UTC))
+        self.assertEqual(len(series.points), 2)
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "TSLA_intraday.csv"
+            series.write_csv(output)
+            self.assertIn("DateTime,Spot", output.read_text(encoding="utf-8"))
 
     def test_invalid_payload_is_rejected(self) -> None:
         client = YahooChartClient(lambda _url, _params: {"chart": {"result": []}})

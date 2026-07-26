@@ -734,6 +734,17 @@ class ShadowJournal:
                 ),
             )
 
+    def get_market_settlement_outcome(self, market_id: str) -> str:
+        """Return the previously reconciled official market outcome."""
+
+        with _database_connection(self.path) as connection:
+            row = connection.execute(
+                "SELECT winning_outcome FROM market_settlements WHERE market_id = ?", (market_id,)
+            ).fetchone()
+        if row is None:
+            raise KeyError(market_id)
+        return str(row[0])
+
     def record_market_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object]) -> None:
         if winning_outcome not in {"UP", "DOWN"}:
             raise ValueError("winning_outcome must be UP or DOWN")
