@@ -67,6 +67,84 @@ Evaluate these paths before any live execution:
 We will validate actual API responses, timestamps, quote quality, and permissions
 with the user's own account before marking any source as live-grade.
 
+## Current Research State (2026-07-26)
+
+### Strategy and evidence
+
+- The supervisor remains shadow-only. It can record paper entries but has no
+  wallet, private key, order-submission, or live-execution path.
+- The active model-error buffer is fixed at **2%** for all real-time
+  observations and IV-valid paper-entry evaluations. The former 5% fallback
+  uplift is disabled; unavailable IV remains an observation-only entry gate.
+- A 90-calendar-day discovery found 121 settled NVDA/TSLA markets across 61
+  trading days. Local research data contains Pyth one-minute spot, CLOB Up/Down
+  history, Pyth reference prices, and Gamma settlements for all 121 markets.
+- The first non-leaking replay has 79 market-days with a complete 21-close
+  volatility lookback. It compares 1% and 2% buffers at 12:00, 14:00, and
+  15:30 New York checkpoints. The 2% variant had fewer trades and better
+  all-sample pre-fee proxy PnL, while four walk-forward windows selected
+  2%, 1%, 1%, and 2%. This is evidence to keep 2% for shadow collection, not
+  evidence to enable live trading or to claim a stable optimum.
+- Historical CLOB `prices-history` stores a single price, not historical
+  executable ask/bid/depth. Any historical PnL based on it is explicitly an
+  execution-price proxy and pre-fee unless a recorded fee assumption is stated.
+
+### Live collection contract
+
+- Every accepted daily equity contract is parsed as a Pyth close-versus-prior
+  Pyth close contract. At runtime, `price_to_beat` is fetched once from Pyth
+  Benchmarks for the prior NYSE close; Nasdaq data is retained only for
+  realized-volatility history and is labelled non-settlement.
+- Pyth Pro History was used only for the one-time 61-day one-minute backfill.
+  The local key was removed after completion. Routine shadow collection does
+  not require Pyth Pro History.
+- At each accepted checkpoint, the journal now stores Pyth threshold, spot,
+  fair probability, official fee rate, and reconstructed CLOB top-five bid/ask
+  levels for both outcomes. A paper entry stores the same data and schedules
+  1/5/15/30-minute markouts. These records are the required input for the next
+  executable-ask, fee-aware replay.
+- The CLOB collector reconstructs level-2 depth from the full `book` snapshot
+  plus subsequent `price_change` events. Snapshot storage is deliberately
+  limited to checkpoints, actual paper entries, and markouts rather than every
+  WebSocket update.
+
+### Next research gates
+
+1. Collect at least 60 further trading days or 100 executable paper entries
+   before changing the 2% buffer or considering a live pilot.
+2. Run nested walk-forward selection across buffer, minimum edge, and entry
+   checkpoint using recorded executable asks, fees, depth, and markouts.
+3. Research an exit only when the current executable bid, fees, and observed
+   post-entry markouts support it. The default remains buy-and-hold to official
+   settlement; a near-threshold late-day filter blocks new entries, not exits
+   for existing positions.
+4. Keep up to 18 active markets for shadow collection. Storage is not expected
+   to be a constraint because depth is stored only at bounded research events;
+   portfolio selection remains capped separately.
+
+## Repository and CWD SOP
+
+The canonical and only repository root is:
+
+```text
+/Users/cheng-kaihuang/Polymarket-stock
+```
+
+Before any edit, test, migration, data collection, staging, or push, verify:
+
+```zsh
+ROOT=/Users/cheng-kaihuang/Polymarket-stock
+test "$(git -C "$ROOT" rev-parse --show-toplevel)" = "$ROOT"
+```
+
+Use absolute paths or `git -C "$ROOT"`; do not rely on a tool or editor's
+implicit current directory. A Codex session may retain obsolete workspace
+metadata. In particular, never create or write
+`/Users/cheng-kaihuang/Documents/Polymarket-stock`: that path was an accidental
+non-Git directory created by a misdirected patch tool on 2026-07-26 and was
+removed. If a tool reports that path as its CWD, stop using implicit file-edit
+operations and reopen the task against the canonical root.
+
 ## Architecture
 
 ```text
@@ -165,7 +243,7 @@ order submission, or an intraday exit strategy.
 | 3.17 Portfolio-aware paper batches | Complete: IV-valid paper candidates are selected in 30-second batches with daily, risk-group, and direction limits. | Every selection/rejection is recorded in `portfolio_decisions`; no live execution is introduced. |
 | 3.18 Independent option-pricing validation | Complete: local Black-Scholes-Merton and CRR binomial calculations cross-check quote inputs and recover midpoint IV. | No provider, scrape, journal write, supervisor dependency, or entry path exists; every result is explicitly research-only. |
 | 3.19 Remote calendar resilience | Complete: Finnhub calendar timeouts are converted to an explicit unavailable data gate, with a 60-second per-process cooldown. | A failed remote calendar never terminates the supervisor or silently permits a paper entry. |
-| 3.20 Checkpoint buffer calibration research | Complete: only checkpoints captured within five minutes of their scheduled New York time are calibration-eligible; `buffer-sweep` replays one hold-to-settlement entry per market-day and `walk-forward-buffer-sweep` selects only on earlier dates. `IV_VALID` inputs retain only the 2% base buffer while realized-vol fallback keeps its additional 5% observation-only buffer. | Research reports never alter supervisor thresholds. Buffer selection requires independent later-day validation, not same-day tick count or historical win-rate maximization. |
+| 3.20 Checkpoint buffer calibration research | Complete: only checkpoints captured within five minutes of their scheduled New York time are calibration-eligible; `buffer-sweep` replays one hold-to-settlement entry per market-day and `walk-forward-buffer-sweep` selects only on earlier dates. The supervisor now uses a fixed 2% buffer for both IV-valid and observation-only evaluations; unavailable IV remains a paper-entry gate. | Research reports never alter supervisor thresholds automatically. Buffer selection requires independent later-day validation, not same-day tick count or historical win-rate maximization. |
 | 3.14 Test and rollout | In progress: deterministic unit coverage is added for core lifecycle behavior and contract/data-quality gates. | Run the supervisor through multiple market sessions before relying on paper-entry results. |
 
 ### Phase 3: Verifiable Research
@@ -254,3 +332,6 @@ order submission, or an intraday exit strategy.
 | 2026-07-22 | Added independent BSM/CRR binomial option-pricing validation after reviewing Norn-Finance-API-Server. It validates trusted quote inputs locally, but deliberately does not use its Yahoo Finance/MarketWatch data path or public deployment. | Complete |
 | 2026-07-24 | Fixed Nasdaq quote parsing for its current `Jul 24, 2026 9:39 AM ET` timestamp format and normalize it to UTC. This prevents valid real-time spot quotes from being rejected as missing and restores active-market construction. | Complete |
 | 2026-07-25 | Added non-leaking checkpoint buffer research. Late checkpoint captures are preserved but excluded; buffer sweeps use original asks and frozen official fees, select at most one first eligible entry per market-day, and walk-forward reports require distinct earlier and later trading dates. | Complete |
+| 2026-07-26 | Backfilled 121 settled NVDA/TSLA markets across 61 trading days with Pyth one-minute spot, Pyth references, CLOB history, and Gamma settlement. Added local Pyth/CLOB batch replay and 1%/2% walk-forward comparison; retain 2% for shadow collection only. | Complete |
+| 2026-07-26 | Aligned daily contract `price_to_beat` to Pyth Benchmarks prior-close reference. Added bounded checkpoint/paper-entry execution observations, top-five reconstructed CLOB depth, fee capture, and 1/5/15/30-minute paper-entry markouts. | Complete |
+| 2026-07-26 | Identified and removed an accidental non-Git directory at `/Users/cheng-kaihuang/Documents/Polymarket-stock` caused by stale Codex CWD metadata. Added canonical-root SOP to this plan and `AGENTS.md`. | Complete |
