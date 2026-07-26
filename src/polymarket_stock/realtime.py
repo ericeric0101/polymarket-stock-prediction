@@ -82,7 +82,7 @@ class RealtimeBaselineEvaluator:
         up_fee_rate: float | None = None,
         down_fee_rate: float | None = None,
         base_model_error_buffer: float = 0.02,
-        fallback_buffer: float = 0.05,
+        fallback_buffer: float = 0.0,
         minimum_edge: float = 0.02,
     ) -> None:
         if resolves_at.tzinfo is None:
@@ -164,7 +164,9 @@ class RealtimeBaselineEvaluator:
             "OPTION_IV_UNAVAILABLE" in flag or "OPTION_IV_PROVIDER_UNCONFIGURED" in flag for flag in quality_flags
         ):
             option_iv_status = "IV_UNAVAILABLE"
-        active_fallback_buffer = 0.0 if option_iv_status == "IV_VALID" else self._fallback_buffer
+        # Shadow collection uses the reviewed 2% buffer consistently. Missing or stale IV
+        # remains an entry gate; it does not silently widen the probability haircut.
+        active_fallback_buffer = self._fallback_buffer
         active_model_error_buffer = self._base_model_error_buffer + active_fallback_buffer + additional_model_error_buffer
         if reference_spot is not None and reference_spot_age_seconds is not None and reference_spot_age_seconds <= 15 and spot is not None:
             cross_source_difference = relative_price_difference(spot, reference_spot)

@@ -28,8 +28,8 @@ from .realtime import RealtimeBaselineEvaluator
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
 
 
-MODEL_VERSION = "realized-vol-observation-v1"
-IV_MODEL_VERSION = "iv-blend-v1"
+MODEL_VERSION = "realized-vol-observation-v1-buffer-2pct"
+IV_MODEL_VERSION = "iv-blend-v1-buffer-2pct"
 MAX_OPTION_IV_AGE_SECONDS = 900.0
 EventSink = Callable[[str, Mapping[str, object]], None]
 NEW_YORK = ZoneInfo("America/New_York")
@@ -358,11 +358,11 @@ class MultiMarketShadowSupervisor:
 
     def _make_runtime(self, candidate: MarketCandidate, contract: DailyEquityCloseContract, closes: list[DailyClose], daily_provider: str, reference_quote: NasdaqQuote, up_fee_rate: float | None, down_fee_rate: float | None, option_surface: OptionIvSurface | None, option_quality_flags: tuple[str, ...], risk_reasons: tuple[str, ...]) -> ActiveMarket:
         calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
-        calibrated_buffer = self.calibration.recommended_model_error_buffer if self.calibration else None
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
             closes=closes, spot_provider=self.spot_provider.upper(), up_fee_rate=up_fee_rate,
-            down_fee_rate=down_fee_rate, minimum_edge=calibrated_minimum_edge,
+            down_fee_rate=down_fee_rate, base_model_error_buffer=0.02, fallback_buffer=0.0,
+            minimum_edge=calibrated_minimum_edge,
         )
         runtime: ActiveMarket
 
@@ -373,7 +373,7 @@ class MultiMarketShadowSupervisor:
         runtime = ActiveMarket(
             candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,
             reference_quote.last_trade_at, option_surface, option_quality_flags, risk_reasons,
-            max(0.0, calibrated_buffer - 0.02) if calibrated_buffer is not None else 0.0, coordinator,
+            0.0, coordinator,
         )
         return runtime
 

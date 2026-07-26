@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
     historical_parser.add_argument("--start-at", required=True, help="ISO-8601 history start timestamp")
     historical_parser.add_argument("--end-at", help="ISO-8601 history end timestamp; defaults to market resolution")
     historical_parser.add_argument("--minimum-edge", type=float, default=0.02)
-    historical_parser.add_argument("--model-error-buffer", type=float, default=0.07)
+    historical_parser.add_argument("--model-error-buffer", type=float, default=0.02)
     historical_parser.add_argument("--lookback-days", type=int, default=20)
     historical_parser.add_argument("--output", help="optional JSON report output path")
     subparsers.add_parser("replay-observations", help="replay all valid market observations against official outcomes")
@@ -324,7 +324,7 @@ def main() -> None:
         assessment = evaluate_realized_vol_baseline(
             spot=arguments.spot, closes=closes, seconds_to_resolution=(resolves_at - now).total_seconds(),
             up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
-            base_model_error_buffer=0.02, fallback_buffer=0.05, minimum_edge=0.02,
+            base_model_error_buffer=0.02, fallback_buffer=0.0, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=arguments.lookback_days,
         )
         result = {
@@ -371,7 +371,7 @@ def main() -> None:
         assessment = evaluate_realized_vol_baseline(
             spot=quote.price, closes=closes, seconds_to_resolution=(resolves_at - now).total_seconds(),
             up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
-            base_model_error_buffer=0.02, fallback_buffer=0.05, minimum_edge=0.02,
+            base_model_error_buffer=0.02, fallback_buffer=0.0, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=20,
         )
         result = {

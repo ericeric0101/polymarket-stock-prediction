@@ -150,7 +150,7 @@ def replay_daily_up_down_market(
     settlement: MarketSettlement,
     spot_history: Iterable[UnderlyingSpotPoint] = (),
     minimum_edge: float = 0.02,
-    model_error_buffer: float = 0.07,
+    model_error_buffer: float = 0.02,
     lookback_days: int = 20,
     close_risk_windows_minutes: tuple[int, ...] = (60, 30, 15, 5, 1),
 ) -> HistoricalReplayReport:

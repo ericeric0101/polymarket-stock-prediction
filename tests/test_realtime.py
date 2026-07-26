@@ -27,7 +27,7 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertIn(result.as_payload()["signal_status"], {"NO_PAPER_TRADE", "OBSERVATION_ONLY_UP", "OBSERVATION_ONLY_DOWN"})
         self.assertFalse(result.paper_entry_eligible)
         self.assertIn("OPTION_IV_REQUIRED_FOR_PAPER_ENTRY", result.paper_entry_block_reasons)
-        self.assertAlmostEqual(result.model_error_buffer, 0.07)
+        self.assertAlmostEqual(result.model_error_buffer, 0.02)
 
     def test_stale_or_incomplete_state_is_recorded_without_signal(self) -> None:
         result = self.evaluator.evaluate(
