@@ -4,7 +4,10 @@ import asyncio
 from datetime import UTC, datetime
 import unittest
 
-from polymarket_stock.streaming import FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from polymarket_stock.streaming import (
+    FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, SpotQuote,
+    _has_finnhub_trade, _has_pyth_price, run_with_reconnect,
+)
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
@@ -83,6 +86,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         coordinator = ShadowStreamCoordinator(
             callback=lambda _payload: None, primary_spot_source="FINNHUB",
             spot_observation_callback=record_spot, spot_comparison_callback=record_comparison,
+            session_classifier=lambda _now: "REGULAR",
         )
         await coordinator.on_finnhub_message({"type": "trade", "data": [{"s": "TSLA", "p": 100.0, "t": 1_784_000_000_000}]})
         await coordinator.on_pyth_message(
@@ -94,6 +98,49 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["source"] for item in spots], ["FINNHUB", "PYTH_HERMES"])
         self.assertEqual(len(comparisons), 1)
         self.assertAlmostEqual(comparisons[0]["difference_bps"], -24.9376558603)
+
+
+    async def test_coordinator_persists_only_regular_session_and_reports_source_gap(self) -> None:
+        spots = []
+        gaps = []
+
+        async def record_spot(payload):
+            spots.append(payload)
+
+        async def record_gap(payload):
+            gaps.append(payload)
+
+        regular = ShadowStreamCoordinator(
+            callback=lambda _payload: None, spot_observation_callback=record_spot,
+            source_gap_callback=record_gap, session_classifier=lambda _now: "REGULAR", max_age_seconds=15,
+        )
+        start = datetime(2026, 7, 27, 15, 0, tzinfo=UTC)
+        await regular._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
+        await regular._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.1, start.replace(second=20)), "TEST")
+        await regular.close()
+        self.assertEqual(len(spots), 2)
+        self.assertEqual(gaps[0]["event_type"], "SOURCE_SPOT_GAP_DETECTED")
+        self.assertEqual(gaps[0]["gap_seconds"], 20)
+
+        after_hours_spots = []
+        after_hours = ShadowStreamCoordinator(
+            callback=lambda _payload: None, spot_observation_callback=after_hours_spots.append,
+            session_classifier=lambda _now: "AFTER_HOURS",
+        )
+        await after_hours._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
+        await after_hours.close()
+        self.assertEqual(after_hours_spots, [])
+
+    def test_liveness_helpers_require_actual_price_messages(self) -> None:
+        self.assertTrue(_has_finnhub_trade({"type": "trade", "data": [{"s": "TSLA", "p": 100.0}]}))
+        self.assertFalse(_has_finnhub_trade({"type": "ping", "data": []}))
+        self.assertTrue(_has_pyth_price({"parsed": [{"price": {"price": "100"}}]}))
+        self.assertFalse(_has_pyth_price({"parsed": [{"price": {}}]}))
+
+    async def test_pyth_stream_rejects_non_positive_silence_timeout(self) -> None:
+        stream = PythHermesStockStream()
+        with self.assertRaises(ValueError):
+            await stream.run({"feed": "TSLA"}, lambda _payload: None, maximum_silence_seconds=0)
 
     def test_polymarket_text_heartbeat_is_ignored(self) -> None:
         self.assertIsNone(PolymarketMarketStream._decode_message("PONG"))

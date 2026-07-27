@@ -11,6 +11,8 @@ import ssl
 from typing import Awaitable, Callable, Mapping
 from urllib.parse import urlencode
 
+from .quality import us_equity_session
+
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -133,6 +135,8 @@ class ShadowStreamCoordinator:
     primary_spot_source: str | None = None
     spot_observation_callback: EventCallback | None = None
     spot_comparison_callback: EventCallback | None = None
+    source_gap_callback: EventCallback | None = None
+    session_classifier: Callable[[datetime], str] = us_equity_session
     debounce_seconds: float = 0.5
     max_age_seconds: float = 15.0
     freshness: StreamFreshness = field(init=False)
@@ -259,11 +263,25 @@ class ShadowStreamCoordinator:
 
     async def _accept_spot(self, quote: SpotQuote, reason: str) -> None:
         source_quotes = self.latest_source_quotes.setdefault(quote.source, {})
+        previous = source_quotes.get(quote.symbol)
         source_quotes[quote.symbol] = quote
         if self.primary_spot_source is None or quote.source == self.primary_spot_source:
             self.latest_spots[quote.symbol] = quote.price
             self.freshness.last_spot_at = quote.observed_at
         self._debouncer.notify(reason)
+        if self.session_classifier(quote.observed_at) != "REGULAR":
+            return
+        if previous is not None:
+            gap_seconds = (quote.observed_at - previous.observed_at).total_seconds()
+            if gap_seconds > self.max_age_seconds and self.source_gap_callback is not None:
+                await _emit(self.source_gap_callback, {
+                    "event_type": "SOURCE_SPOT_GAP_DETECTED",
+                    "source": quote.source,
+                    "symbol": quote.symbol,
+                    "gap_seconds": gap_seconds,
+                    "previous_observed_at": previous.observed_at.isoformat(),
+                    "observed_at": quote.observed_at.isoformat(),
+                })
         await self._record_spot_if_due(quote)
         await self._record_comparison_if_due(quote.symbol, quote.observed_at)
 
@@ -397,6 +415,38 @@ class AlpacaIexStockStream:
                         await _emit(callback, payload)
 
 
+def _is_regular_equity_session() -> bool:
+    return us_equity_session(datetime.now(UTC)) == "REGULAR"
+
+
+def _has_finnhub_trade(payload: Mapping[str, object]) -> bool:
+    trades = payload.get("data")
+    return (
+        payload.get("type") == "trade"
+        and isinstance(trades, list)
+        and any(
+            isinstance(trade, Mapping)
+            and isinstance(trade.get("s"), str)
+            and isinstance(trade.get("p"), (int, float))
+            and float(trade["p"]) > 0
+            for trade in trades
+        )
+    )
+
+
+def _has_pyth_price(payload: Mapping[str, object]) -> bool:
+    parsed = payload.get("parsed")
+    return (
+        isinstance(parsed, list)
+        and any(
+            isinstance(item, Mapping)
+            and isinstance(item.get("price"), Mapping)
+            and item["price"].get("price") is not None
+            for item in parsed
+        )
+    )
+
+
 class FinnhubStockStream:
     """Read-only US equity trade stream; no brokerage account is involved."""
 
@@ -420,13 +470,25 @@ class FinnhubStockStream:
         async with connect(websocket_url) as websocket:
             for symbol in symbols:
                 await websocket.send(json.dumps({"type": "subscribe", "symbol": symbol}))
+            last_trade_at = asyncio.get_running_loop().time()
             while True:
-                # A connected Finnhub socket can silently stop delivering trades.
-                # Let run_with_reconnect rebuild the subscription after a bounded silence.
-                raw_message = await asyncio.wait_for(websocket.recv(), timeout=maximum_silence_seconds)
+                # Finnhub sends non-trade traffic too. Only actual subscribed trades prove
+                # that the primary spot feed remains live during the regular session.
+                elapsed = asyncio.get_running_loop().time() - last_trade_at
+                timeout = max(0.01, maximum_silence_seconds - elapsed) if _is_regular_equity_session() else maximum_silence_seconds
+                try:
+                    raw_message = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+                except TimeoutError:
+                    if _is_regular_equity_session():
+                        raise TimeoutError("Finnhub produced no usable trades during the liveness window")
+                    continue
                 payload = json.loads(raw_message)
                 if isinstance(payload, dict):
+                    if _has_finnhub_trade(payload):
+                        last_trade_at = asyncio.get_running_loop().time()
                     await _emit(callback, payload)
+                if _is_regular_equity_session() and asyncio.get_running_loop().time() - last_trade_at >= maximum_silence_seconds:
+                    raise TimeoutError("Finnhub produced no usable trades during the liveness window")
 
 
 class PythHermesStockStream:
@@ -435,9 +497,13 @@ class PythHermesStockStream:
     def __init__(self, api_key: str = "") -> None:
         self._api_key = api_key.strip()
 
-    async def run(self, feed_ids: Mapping[str, str], callback: EventCallback) -> None:
+    async def run(
+        self, feed_ids: Mapping[str, str], callback: EventCallback, *, maximum_silence_seconds: float = FINNHUB_MAX_SILENCE_SECONDS
+    ) -> None:
         if not feed_ids:
             raise ValueError("at least one Pyth feed id is required")
+        if maximum_silence_seconds <= 0:
+            raise ValueError("maximum_silence_seconds must be positive")
         query = urlencode([("ids[]", f"0x{_normalize_feed_id(feed_id)}") for feed_id in feed_ids], doseq=True)
         reader, writer = await asyncio.open_connection(
             PYTH_HERMES_HOST, 443, ssl=ssl.create_default_context(), server_hostname=PYTH_HERMES_HOST,
@@ -462,7 +528,19 @@ class PythHermesStockStream:
                 name, _, value = line.decode("iso-8859-1").partition(":")
                 headers[name.lower()] = value.strip()
             buffer = ""
-            async for chunk in _http_response_body(reader, headers):
+            last_price_at = asyncio.get_running_loop().time()
+            body = _http_response_body(reader, headers).__aiter__()
+            while True:
+                timeout = (
+                    max(0.01, maximum_silence_seconds - (asyncio.get_running_loop().time() - last_price_at))
+                    if _is_regular_equity_session() else None
+                )
+                try:
+                    chunk = await anext(body) if timeout is None else await asyncio.wait_for(anext(body), timeout=timeout)
+                except StopAsyncIteration:
+                    return
+                except TimeoutError:
+                    raise TimeoutError("Pyth Hermes produced no parsed price updates during the liveness window")
                 buffer += chunk.decode("utf-8")
                 while "\n\n" in buffer:
                     event, buffer = buffer.split("\n\n", 1)
@@ -474,7 +552,11 @@ class PythHermesStockStream:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(payload, Mapping):
+                        if _has_pyth_price(payload):
+                            last_price_at = asyncio.get_running_loop().time()
                         await _emit(callback, payload)
+                if _is_regular_equity_session() and asyncio.get_running_loop().time() - last_price_at >= maximum_silence_seconds:
+                    raise TimeoutError("Pyth Hermes produced no parsed price updates during the liveness window")
         finally:
             writer.close()
             await writer.wait_closed()

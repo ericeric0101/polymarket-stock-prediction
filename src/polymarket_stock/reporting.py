@@ -147,6 +147,10 @@ def _iv_text(value: object) -> Text:
 def _status_text(row: Mapping[str, object]) -> Text:
     if row.get("paper_outcome"):
         return Text(f"PAPER {row['paper_outcome']}", style="bold green")
+    model_outcome = row.get("model_outcome")
+    entry_blocks = row.get("paper_entry_block_reasons") or []
+    if model_outcome and entry_blocks:
+        return Text(f"OBSERVE {model_outcome}: {entry_blocks[0]}", style="yellow")
     maker_quotes = row.get("maker_shadow_quotes") or []
     if isinstance(maker_quotes, list) and maker_quotes:
         summary = "  ".join(

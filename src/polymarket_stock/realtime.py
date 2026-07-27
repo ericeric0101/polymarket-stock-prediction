@@ -260,7 +260,8 @@ class RealtimeBaselineEvaluator:
             down_taker_fee=assessment.down_edge.estimated_taker_fee,
             model_outcome=model_outcome,
             paper_outcome=model_outcome if not entry_block_reasons else None,
-            paper_entry_eligible=not entry_block_reasons,
+            # Eligibility means an actionable paper entry, not merely that IV was valid.
+            paper_entry_eligible=model_outcome is not None and not entry_block_reasons,
             paper_entry_block_reasons=tuple(entry_block_reasons),
             quality_flags=tuple(sorted(set(quality_flags))),
             trigger_reasons=trigger_reasons,
