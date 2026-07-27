@@ -86,6 +86,8 @@ class ActiveMarket:
     coordinator: ShadowStreamCoordinator
     last_skip_reasons: tuple[str, ...] | None = None
     last_skip_logged_at: datetime | None = None
+    last_evaluation_recorded_at: datetime | None = None
+    recorded_checkpoint_keys: set[tuple[str, str]] = field(default_factory=set)
 
     @property
     def token_ids(self) -> tuple[str, str]:
@@ -439,33 +441,47 @@ class MultiMarketShadowSupervisor:
         }
         maker_quotes = self._sync_maker_shadow_quotes(runtime, evaluation, result, now)
         result["maker_shadow_quotes"] = maker_quotes
+        checkpoint = checkpoint_window(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
+        checkpoint_recorded = False
+        if checkpoint:
+            checkpoint_key = (checkpoint.checkpoint_date, checkpoint.checkpoint_name)
+            if checkpoint_key not in runtime.recorded_checkpoint_keys:
+                checkpoint_recorded = self.journal.record_checkpoint_observation(
+                    checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result
+                )
+                runtime.recorded_checkpoint_keys.add(checkpoint_key)
+                if checkpoint_recorded:
+                    self._record_execution_books(runtime, evaluation, result, now, "CHECKPOINT", None)
+                    self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
+                        "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
+                        "checkpoint_date": checkpoint.checkpoint_date, "checkpoint_name": checkpoint.checkpoint_name,
+                        "checkpoint_delay_seconds": round(checkpoint.delay_seconds, 3),
+                    })
+
+        paper_signal = evaluation.paper_outcome is not None and evaluation.fair_up_probability is not None
         if evaluation.skip_reasons:
             should_record = (
                 runtime.last_skip_reasons != evaluation.skip_reasons
                 or runtime.last_skip_logged_at is None
                 or (now - runtime.last_skip_logged_at).total_seconds() >= 60
             )
-            if not should_record:
-                return
-            runtime.last_skip_reasons = evaluation.skip_reasons
-            runtime.last_skip_logged_at = now
+            if should_record:
+                runtime.last_skip_reasons = evaluation.skip_reasons
+                runtime.last_skip_logged_at = now
         else:
             runtime.last_skip_reasons = None
             runtime.last_skip_logged_at = None
-        self.journal.record_realtime_evaluation(result)
-        checkpoint = checkpoint_window(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
-        if checkpoint:
-            if self.journal.record_checkpoint_observation(
-                checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result
-            ):
-                self._record_execution_books(runtime, evaluation, result, now, "CHECKPOINT", None)
-                self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
-                    "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
-                    "checkpoint_date": checkpoint.checkpoint_date, "checkpoint_name": checkpoint.checkpoint_name,
-                    "checkpoint_delay_seconds": round(checkpoint.delay_seconds, 3),
-                })
-        self.event_sink("REALTIME_BASELINE_EVALUATED", result)
-        if evaluation.paper_outcome and evaluation.fair_up_probability is not None:
+            should_record = (
+                checkpoint_recorded
+                or paper_signal
+                or runtime.last_evaluation_recorded_at is None
+                or (now - runtime.last_evaluation_recorded_at).total_seconds() >= 60
+            )
+        if should_record:
+            self.journal.record_realtime_evaluation(result)
+            runtime.last_evaluation_recorded_at = now
+            self.event_sink("REALTIME_BASELINE_EVALUATED", result)
+        if paper_signal:
             await self._queue_paper_entry(runtime, evaluation, result, now)
 
     def _record_execution_books(

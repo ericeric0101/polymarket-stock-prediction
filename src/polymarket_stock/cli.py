@@ -768,9 +768,10 @@ async def _run_shadow_stream(
     coordinator: ShadowStreamCoordinator
     last_skip_reasons: tuple[str, ...] | None = None
     last_skip_logged_at: datetime | None = None
+    last_evaluation_recorded_at: datetime | None = None
 
     async def evaluate_realtime(payload: dict[str, object]) -> None:
-        nonlocal last_skip_reasons, last_skip_logged_at
+        nonlocal last_skip_reasons, last_skip_logged_at, last_evaluation_recorded_at
         now = datetime.now(UTC)
         spot_updated_at = coordinator.freshness.last_spot_at
         book_updated_at = coordinator.freshness.last_book_at
@@ -793,19 +794,25 @@ async def _run_shadow_stream(
         result = {**evaluation.as_payload(), "daily_provider": daily_provider, "contract": contract}
         if evaluation.skip_reasons:
             skip_reasons = evaluation.skip_reasons
-            should_record_skip = (
+            should_record = (
                 skip_reasons != last_skip_reasons
                 or last_skip_logged_at is None
                 or (now - last_skip_logged_at).total_seconds() >= 60
             )
-            if not should_record_skip:
-                return
-            last_skip_reasons = skip_reasons
-            last_skip_logged_at = now
+            if should_record:
+                last_skip_reasons = skip_reasons
+                last_skip_logged_at = now
         else:
             last_skip_reasons = None
             last_skip_logged_at = None
+            should_record = (
+                last_evaluation_recorded_at is None
+                or (now - last_evaluation_recorded_at).total_seconds() >= 60
+            )
+        if not should_record:
+            return
         journal.record_realtime_evaluation(result)
+        last_evaluation_recorded_at = now
         log_event(settings.log_path, "REALTIME_BASELINE_EVALUATED", result)
         print(json.dumps(result, sort_keys=True))
 
