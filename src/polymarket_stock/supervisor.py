@@ -17,6 +17,7 @@ from .checkpoints import checkpoint_window
 from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
 from .event_risk import EventCalendarError, EventCalendarUnavailable, FinnhubEarningsCalendarClient, combined_risk_events
 from .fees import PolymarketFeeRateClient
+from .http import PublicApiError
 from .journal import ShadowJournal
 from .logging import log_event
 from .market_discovery import GammaMarketClient, MarketCandidate
@@ -301,7 +302,7 @@ class MultiMarketShadowSupervisor:
                 continue
             try:
                 closes, provider, reference_quote = await asyncio.to_thread(self._daily_closes, symbol, now)
-            except (NasdaqPayloadError, OSError) as error:
+            except (NasdaqPayloadError, PublicApiError, OSError) as error:
                 self.event_sink("SUPERVISOR_MARKET_SKIPPED", {"market_id": candidate.market_id, "symbol": symbol, "reason": str(error)})
                 continue
             try:
