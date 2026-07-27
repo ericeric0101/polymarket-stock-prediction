@@ -147,7 +147,11 @@ polymarket-stock calibrate-checkpoints
 The supervisor shares one Polymarket stream and one stock-quote stream, restarts
 those subscriptions when the active universe changes, and uses Gamma's published
 closed/resolved market state for settlement reconciliation. It does not use stock
-prices to infer settlement.
+prices to infer settlement. It also subscribes read-only to matching Pyth Hermes
+equity feeds: at most one source observation and one Pyth-versus-primary
+comparison per symbol per second are stored. Pyth missing/stale data, or a fresh
+Pyth/primary difference above 0.5%, blocks paper entry while retaining the
+observation for calibration.
 
 If Finnhub's earnings-calendar request times out, the supervisor remains running
 and reports `SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE`. Affected markets receive the

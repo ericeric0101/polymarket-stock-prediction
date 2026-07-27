@@ -107,6 +107,13 @@ with the user's own account before marking any source as live-grade.
   plus subsequent `price_change` events. Snapshot storage is deliberately
   limited to checkpoints, actual paper entries, and markouts rather than every
   WebSocket update.
+- The supervisor now also subscribes read-only to Pyth Hermes using the same
+  equity feed IDs used for `price_to_beat`. It stores no more than one Pyth or
+  primary-source spot observation and one comparison per symbol per second.
+  Missing/stale Pyth or primary data, or a fresh difference above 0.5%, blocks
+  paper entry while preserving the observation for calibration. `PYTH_API_KEY`
+  is optional before the 2026-08-18 authentication change and is used for both
+  Hermes and Pyth Benchmarks afterwards.
 
 ### Next research gates
 
@@ -335,3 +342,4 @@ order submission, or an intraday exit strategy.
 | 2026-07-26 | Backfilled 121 settled NVDA/TSLA markets across 61 trading days with Pyth one-minute spot, Pyth references, CLOB history, and Gamma settlement. Added local Pyth/CLOB batch replay and 1%/2% walk-forward comparison; retain 2% for shadow collection only. | Complete |
 | 2026-07-26 | Aligned daily contract `price_to_beat` to Pyth Benchmarks prior-close reference. Added bounded checkpoint/paper-entry execution observations, top-five reconstructed CLOB depth, fee capture, and 1/5/15/30-minute paper-entry markouts. | Complete |
 | 2026-07-26 | Identified and removed an accidental non-Git directory at `/Users/cheng-kaihuang/Documents/Polymarket-stock` caused by stale Codex CWD metadata. Added canonical-root SOP to this plan and `AGENTS.md`. | Complete |
+| 2026-07-27 | Added Pyth Hermes dual-source spot collection, bounded SQLite observations/comparisons, source freshness/divergence paper gate, and optional API-key authentication for Hermes and Benchmarks. | Complete |

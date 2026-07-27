@@ -51,6 +51,30 @@ class JournalTests(unittest.TestCase):
                 ).fetchone()
         self.assertEqual(row, ("market-1", "TSLA", 0.51, "NO_PAPER_TRADE"))
 
+    def test_bounded_spot_observations_and_comparisons_are_persisted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            journal = ShadowJournal(path)
+            journal.initialize()
+            observed_at = "2026-07-27T14:00:00.500000+00:00"
+            journal.record_spot_observation({
+                "observed_at": observed_at, "source": "PYTH_HERMES", "symbol": "TSLA", "price": 100.25,
+                "published_at": "2026-07-27T14:00:00+00:00", "confidence": 0.02, "feed_id": "feed",
+            })
+            journal.record_spot_observation({
+                "observed_at": "2026-07-27T14:00:00.900000+00:00", "source": "PYTH_HERMES", "symbol": "TSLA", "price": 100.30,
+            })
+            journal.record_spot_source_comparison({
+                "observed_at": observed_at, "symbol": "TSLA", "primary_source": "FINNHUB", "primary_price": 100.0,
+                "pyth_price": 100.25, "difference_bps": -24.9376558603, "pyth_feed_id": "feed",
+            })
+            with sqlite3.connect(path) as connection:
+                spot_count = connection.execute("SELECT COUNT(*) FROM spot_observations").fetchone()[0]
+                comparison = connection.execute("SELECT primary_source, difference_bps FROM spot_source_comparisons").fetchone()
+        self.assertEqual(spot_count, 1)
+        self.assertEqual(comparison[0], "FINNHUB")
+        self.assertAlmostEqual(comparison[1], -24.9376558603)
+
     def test_contract_review_is_upserted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.db"

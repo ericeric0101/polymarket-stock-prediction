@@ -105,6 +105,37 @@ CREATE TABLE IF NOT EXISTS realtime_evaluations (
 );
 CREATE INDEX IF NOT EXISTS idx_realtime_evaluations_market_evaluated
     ON realtime_evaluations (market_id, evaluated_at);
+CREATE TABLE IF NOT EXISTS spot_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    observed_second TEXT NOT NULL,
+    source TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    price REAL NOT NULL CHECK (price > 0),
+    published_at TEXT,
+    confidence REAL,
+    feed_id TEXT,
+    UNIQUE (source, symbol, observed_second)
+);
+CREATE INDEX IF NOT EXISTS idx_spot_observations_symbol_observed
+    ON spot_observations (symbol, observed_at);
+CREATE TABLE IF NOT EXISTS spot_source_comparisons (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    observed_at TEXT NOT NULL,
+    observed_second TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    primary_source TEXT NOT NULL,
+    primary_price REAL NOT NULL CHECK (primary_price > 0),
+    primary_published_at TEXT,
+    pyth_price REAL NOT NULL CHECK (pyth_price > 0),
+    pyth_published_at TEXT,
+    pyth_confidence REAL,
+    pyth_feed_id TEXT,
+    difference_bps REAL NOT NULL,
+    UNIQUE (symbol, primary_source, observed_second)
+);
+CREATE INDEX IF NOT EXISTS idx_spot_source_comparisons_symbol_observed
+    ON spot_source_comparisons (symbol, observed_at);
 CREATE TABLE IF NOT EXISTS checkpoint_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
@@ -511,6 +542,61 @@ class ShadowJournal:
                     getattr(snapshot, "best_ask"),
                     getattr(snapshot, "midpoint"),
                     json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+
+    def record_spot_observation(self, payload: Mapping[str, object]) -> None:
+        """Persist at most one received source quote per source/symbol/second."""
+
+        try:
+            observed_at = datetime.fromisoformat(str(payload["observed_at"]))
+            source = str(payload["source"]).upper()
+            symbol = str(payload["symbol"]).upper()
+            price = float(payload["price"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("spot observation is invalid") from error
+        if observed_at.tzinfo is None or not source or not symbol or price <= 0:
+            raise ValueError("spot observation is invalid")
+        published_at = payload.get("published_at")
+        confidence = payload.get("confidence")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO spot_observations (
+                    observed_at, observed_second, source, symbol, price, published_at, confidence, feed_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    observed_at.isoformat(), observed_at.replace(microsecond=0).isoformat(), source, symbol, price,
+                    str(published_at) if published_at else None,
+                    float(confidence) if confidence is not None else None,
+                    str(payload["feed_id"]) if payload.get("feed_id") else None,
+                ),
+            )
+
+    def record_spot_source_comparison(self, payload: Mapping[str, object]) -> None:
+        """Persist bounded Pyth-versus-primary source divergence diagnostics."""
+
+        try:
+            observed_at = datetime.fromisoformat(str(payload["observed_at"]))
+            symbol = str(payload["symbol"]).upper()
+            primary_source = str(payload["primary_source"]).upper()
+            primary_price = float(payload["primary_price"])
+            pyth_price = float(payload["pyth_price"])
+            difference_bps = float(payload["difference_bps"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("spot source comparison is invalid") from error
+        if observed_at.tzinfo is None or not symbol or not primary_source or min(primary_price, pyth_price) <= 0:
+            raise ValueError("spot source comparison is invalid")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO spot_source_comparisons (
+                    observed_at, observed_second, symbol, primary_source, primary_price, primary_published_at,
+                    pyth_price, pyth_published_at, pyth_confidence, pyth_feed_id, difference_bps
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    observed_at.isoformat(), observed_at.replace(microsecond=0).isoformat(), symbol, primary_source,
+                    primary_price, payload.get("primary_published_at"), pyth_price, payload.get("pyth_published_at"),
+                    float(payload["pyth_confidence"]) if payload.get("pyth_confidence") is not None else None,
+                    payload.get("pyth_feed_id"), difference_bps,
                 ),
             )
 

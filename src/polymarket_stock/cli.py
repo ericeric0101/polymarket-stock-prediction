@@ -471,6 +471,7 @@ def main() -> None:
             paper_batch_seconds=arguments.paper_batch_seconds, max_daily_paper_entries=arguments.max_daily_paper_entries,
             max_per_risk_group=arguments.max_per_risk_group,
             max_same_direction_paper_entries=arguments.max_same_direction_paper_entries,
+            pyth_api_key=os.getenv("PYTH_API_KEY", ""),
             tradier_api_token=os.getenv("TRADIER_API_TOKEN", ""),
             polygon_api_key=os.getenv("POLYGON_API_KEY", ""),
             event_sink=make_event_sink(settings.log_path, arguments.output_format),

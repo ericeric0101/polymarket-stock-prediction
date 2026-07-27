@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 import inspect
 import json
+import ssl
 from typing import Awaitable, Callable, Mapping
 from urllib.parse import urlencode
 
@@ -18,6 +19,8 @@ POLYMARKET_MARKET_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 ALPACA_IEX_WS = "wss://stream.data.alpaca.markets/v2/iex"
 FINNHUB_WS = "wss://ws.finnhub.io"
 FINNHUB_MAX_SILENCE_SECONDS = 60.0
+PYTH_HERMES_HOST = "hermes.pyth.network"
+PYTH_HERMES_STREAM_PATH = "/v2/updates/price/stream"
 EventCallback = Callable[[Mapping[str, object]], Awaitable[None] | None]
 StreamRunner = Callable[[], Awaitable[None]]
 
@@ -45,7 +48,7 @@ async def run_with_reconnect(
             error_message = "stream ended without an explicit close reason"
         except asyncio.CancelledError:
             raise
-        except (ConnectionClosed, OSError, TimeoutError) as error:
+        except (ConnectionClosed, OSError, TimeoutError, asyncio.IncompleteReadError) as error:
             error_message = str(error)
         await _emit(
             status_callback,
@@ -90,6 +93,27 @@ class DebouncedReevaluation:
             await self._task
 
 
+@dataclass(frozen=True)
+class SpotQuote:
+    """A source-stamped underlying price retained for cross-source research."""
+
+    source: str
+    symbol: str
+    price: float
+    observed_at: datetime
+    published_at: datetime | None = None
+    confidence: float | None = None
+    feed_id: str | None = None
+
+    def as_payload(self) -> Mapping[str, object]:
+        return {
+            "source": self.source, "symbol": self.symbol, "price": self.price,
+            "observed_at": self.observed_at.isoformat(),
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "confidence": self.confidence, "feed_id": self.feed_id,
+        }
+
+
 @dataclass
 class StreamFreshness:
     max_age_seconds: float
@@ -106,19 +130,29 @@ class StreamFreshness:
 @dataclass
 class ShadowStreamCoordinator:
     callback: EventCallback
+    primary_spot_source: str | None = None
+    spot_observation_callback: EventCallback | None = None
+    spot_comparison_callback: EventCallback | None = None
     debounce_seconds: float = 0.5
     max_age_seconds: float = 15.0
     freshness: StreamFreshness = field(init=False)
     latest_spots: dict[str, float] = field(default_factory=dict)
+    latest_source_quotes: dict[str, dict[str, SpotQuote]] = field(default_factory=dict)
     latest_books: dict[str, Mapping[str, object]] = field(default_factory=dict)
     latest_book_levels: dict[str, dict[str, dict[float, float]]] = field(default_factory=dict)
     latest_best_asks: dict[str, float] = field(default_factory=dict)
     latest_best_bids: dict[str, float] = field(default_factory=dict)
     _debouncer: DebouncedReevaluation = field(init=False)
+    _persisted_spot_seconds: dict[tuple[str, str], str] = field(default_factory=dict)
+    _persisted_comparison_seconds: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        self.primary_spot_source = self.primary_spot_source.upper() if self.primary_spot_source else None
         self.freshness = StreamFreshness(self.max_age_seconds)
         self._debouncer = DebouncedReevaluation(self.debounce_seconds, self.callback)
+
+    def latest_quote(self, source: str, symbol: str) -> SpotQuote | None:
+        return self.latest_source_quotes.get(source.upper(), {}).get(symbol.upper())
 
     async def on_polymarket_message(self, payload: Mapping[str, object]) -> None:
         event_type = str(payload.get("event_type", ""))
@@ -180,34 +214,94 @@ class ShadowStreamCoordinator:
         symbol = payload.get("S")
         price = payload.get("p") if message_type == "t" else payload.get("ap")
         if isinstance(symbol, str) and isinstance(price, (int, float)) and price > 0:
-            self.latest_spots[symbol] = float(price)
-            self.freshness.last_spot_at = datetime.now(UTC)
-            self._debouncer.notify(f"ALPACA_{message_type.upper()}")
+            await self._accept_spot(SpotQuote("ALPACA", symbol.upper(), float(price), datetime.now(UTC)), f"ALPACA_{message_type.upper()}")
 
     async def on_finnhub_message(self, payload: Mapping[str, object]) -> None:
-        """Accept Finnhub's trade batches in the same spot-update pipeline."""
+        """Accept Finnhub trade batches in the same spot-update pipeline."""
 
         if payload.get("type") != "trade":
             return
         trades = payload.get("data")
         if not isinstance(trades, list):
             return
-        received_spot = False
         for trade in trades:
             if not isinstance(trade, Mapping):
                 continue
             symbol = trade.get("s")
             price = trade.get("p")
             if isinstance(symbol, str) and isinstance(price, (int, float)) and price > 0:
-                self.latest_spots[symbol] = float(price)
-                received_spot = True
-        if received_spot:
-            self.freshness.last_spot_at = datetime.now(UTC)
-            self._debouncer.notify("FINNHUB_TRADE")
+                observed_at = datetime.now(UTC)
+                published_at = _unix_timestamp(trade.get("t"), milliseconds=True)
+                await self._accept_spot(SpotQuote("FINNHUB", symbol.upper(), float(price), observed_at, published_at), "FINNHUB_TRADE")
+
+    async def on_pyth_message(self, payload: Mapping[str, object], feed_symbols: Mapping[str, str]) -> None:
+        parsed = payload.get("parsed")
+        if not isinstance(parsed, list):
+            return
+        normalized_symbols = {_normalize_feed_id(feed_id): symbol.upper() for feed_id, symbol in feed_symbols.items()}
+        for item in parsed:
+            if not isinstance(item, Mapping):
+                continue
+            feed_id = _normalize_feed_id(str(item.get("id", "")))
+            symbol = normalized_symbols.get(feed_id)
+            quote = item.get("price")
+            if symbol is None or not isinstance(quote, Mapping):
+                continue
+            try:
+                exponent = int(quote["expo"])
+                price = int(quote["price"]) * (10 ** exponent)
+                confidence = int(quote["conf"]) * (10 ** exponent)
+                published_at = datetime.fromtimestamp(int(quote["publish_time"]), tz=UTC)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if price > 0 and confidence >= 0:
+                await self._accept_spot(SpotQuote("PYTH_HERMES", symbol, price, datetime.now(UTC), published_at, confidence, feed_id), "PYTH_HERMES_SPOT")
+
+    async def _accept_spot(self, quote: SpotQuote, reason: str) -> None:
+        source_quotes = self.latest_source_quotes.setdefault(quote.source, {})
+        source_quotes[quote.symbol] = quote
+        if self.primary_spot_source is None or quote.source == self.primary_spot_source:
+            self.latest_spots[quote.symbol] = quote.price
+            self.freshness.last_spot_at = quote.observed_at
+        self._debouncer.notify(reason)
+        await self._record_spot_if_due(quote)
+        await self._record_comparison_if_due(quote.symbol, quote.observed_at)
+
+    async def _record_spot_if_due(self, quote: SpotQuote) -> None:
+        if self.spot_observation_callback is None:
+            return
+        second = quote.observed_at.replace(microsecond=0).isoformat()
+        key = (quote.source, quote.symbol)
+        if self._persisted_spot_seconds.get(key) == second:
+            return
+        self._persisted_spot_seconds[key] = second
+        await _emit(self.spot_observation_callback, quote.as_payload())
+
+    async def _record_comparison_if_due(self, symbol: str, observed_at: datetime) -> None:
+        if self.spot_comparison_callback is None:
+            return
+        if self.primary_spot_source is None:
+            return
+        primary = self.latest_quote(self.primary_spot_source, symbol)
+        pyth = self.latest_quote("PYTH_HERMES", symbol)
+        if primary is None or pyth is None:
+            return
+        second = observed_at.replace(microsecond=0).isoformat()
+        if self._persisted_comparison_seconds.get(symbol) == second:
+            return
+        self._persisted_comparison_seconds[symbol] = second
+        difference_bps = (primary.price - pyth.price) / pyth.price * 10_000
+        await _emit(self.spot_comparison_callback, {
+            "observed_at": observed_at.isoformat(), "symbol": symbol,
+            "primary_source": primary.source, "primary_price": primary.price,
+            "primary_published_at": primary.published_at.isoformat() if primary.published_at else None,
+            "pyth_price": pyth.price, "pyth_published_at": pyth.published_at.isoformat() if pyth.published_at else None,
+            "pyth_confidence": pyth.confidence, "pyth_feed_id": pyth.feed_id,
+            "difference_bps": difference_bps,
+        })
 
     async def close(self) -> None:
         await self._debouncer.close()
-
 
 def _as_probability(value: object) -> float | None:
     try:
@@ -333,3 +427,91 @@ class FinnhubStockStream:
                 payload = json.loads(raw_message)
                 if isinstance(payload, dict):
                     await _emit(callback, payload)
+
+
+class PythHermesStockStream:
+    """Read-only Hermes SSE client for the same Pyth equity feeds named in contracts."""
+
+    def __init__(self, api_key: str = "") -> None:
+        self._api_key = api_key.strip()
+
+    async def run(self, feed_ids: Mapping[str, str], callback: EventCallback) -> None:
+        if not feed_ids:
+            raise ValueError("at least one Pyth feed id is required")
+        query = urlencode([("ids[]", f"0x{_normalize_feed_id(feed_id)}") for feed_id in feed_ids], doseq=True)
+        reader, writer = await asyncio.open_connection(
+            PYTH_HERMES_HOST, 443, ssl=ssl.create_default_context(), server_hostname=PYTH_HERMES_HOST,
+        )
+        request_lines = [
+            f"GET {PYTH_HERMES_STREAM_PATH}?parsed=true&{query} HTTP/1.1",
+            f"Host: {PYTH_HERMES_HOST}", "Accept: text/event-stream", "Connection: close",
+        ]
+        if self._api_key:
+            request_lines.append(f"Authorization: Bearer {self._api_key}")
+        writer.write(("\r\n".join(request_lines) + "\r\n\r\n").encode("ascii"))
+        await writer.drain()
+        try:
+            status_line = (await reader.readline()).decode("iso-8859-1").strip()
+            if " 200 " not in f" {status_line} ":
+                raise OSError(f"Pyth Hermes stream rejected request: {status_line}")
+            headers: dict[str, str] = {}
+            while True:
+                line = await reader.readline()
+                if line in {b"", b"\r\n", b"\n"}:
+                    break
+                name, _, value = line.decode("iso-8859-1").partition(":")
+                headers[name.lower()] = value.strip()
+            buffer = ""
+            async for chunk in _http_response_body(reader, headers):
+                buffer += chunk.decode("utf-8")
+                while "\n\n" in buffer:
+                    event, buffer = buffer.split("\n\n", 1)
+                    data = "\n".join(line[5:].strip() for line in event.splitlines() if line.startswith("data:"))
+                    if not data:
+                        continue
+                    try:
+                        payload = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(payload, Mapping):
+                        await _emit(callback, payload)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+
+async def _http_response_body(reader: asyncio.StreamReader, headers: Mapping[str, str]):
+    if headers.get("transfer-encoding", "").lower() == "chunked":
+        while True:
+            size_line = await reader.readline()
+            if not size_line:
+                return
+            try:
+                size = int(size_line.split(b";", 1)[0].strip(), 16)
+            except ValueError as error:
+                raise OSError("invalid Pyth Hermes chunk framing") from error
+            if size == 0:
+                await reader.readline()
+                return
+            yield await reader.readexactly(size)
+            await reader.readexactly(2)
+        return
+    while chunk := await reader.read(4096):
+        yield chunk
+
+
+def _normalize_feed_id(feed_id: str) -> str:
+    return feed_id.lower().removeprefix("0x")
+
+
+def _unix_timestamp(value: object, *, milliseconds: bool) -> datetime | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if milliseconds:
+        numeric /= 1000
+    try:
+        return datetime.fromtimestamp(numeric, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None

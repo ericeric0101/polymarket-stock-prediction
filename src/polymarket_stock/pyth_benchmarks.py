@@ -37,14 +37,20 @@ class PythBenchmarkPrice:
 class PythBenchmarksClient:
     """Resolve Pyth US-equity feeds and retrieve an official historical value."""
 
-    def __init__(self, get_json_fn: Callable[..., object] = get_json) -> None:
+    def __init__(self, get_json_fn: Callable[..., object] = get_json, api_key: str = "") -> None:
         self._get_json = get_json_fn
+        self._api_key = api_key.strip()
+
+    def _request_json(self, url: str, params: Mapping[str, object]) -> object:
+        if self._api_key:
+            return self._get_json(url, params, headers={"Authorization": f"Bearer {self._api_key}"})
+        return self._get_json(url, params)
 
     def equity_feed_id(self, symbol: str) -> str:
         ticker = symbol.upper().strip()
         if not ticker:
             raise ValueError("symbol is required")
-        payload = self._get_json(PYTH_FEEDS_URL, {"query": ticker})
+        payload = self._request_json(PYTH_FEEDS_URL, {"query": ticker})
         if not isinstance(payload, list):
             raise PythPayloadError("Pyth feed lookup must return a list")
         expected_symbol = f"Equity.US.{ticker}/USD"
@@ -62,7 +68,7 @@ class PythBenchmarksClient:
         if maximum_delay_seconds < 0:
             raise ValueError("maximum_delay_seconds must be non-negative")
         requested_at = observed_at.astimezone(UTC)
-        payload = self._get_json(f"{PYTH_BENCHMARKS_URL}/{int(requested_at.timestamp())}", {"ids": feed_id})
+        payload = self._request_json(f"{PYTH_BENCHMARKS_URL}/{int(requested_at.timestamp())}", {"ids": feed_id})
         try:
             parsed = payload["parsed"]
         except (KeyError, TypeError) as error:

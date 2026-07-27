@@ -20,6 +20,17 @@ class PythBenchmarksTests(unittest.TestCase):
         self.assertAlmostEqual(quote.price, 369.58009)
         self.assertAlmostEqual(quote.confidence, 0.44951)
 
+    def test_api_key_is_sent_when_configured(self) -> None:
+        captured = {}
+
+        def fake_get_json(url, params, **kwargs):
+            captured.update({"url": url, "params": params, "headers": kwargs["headers"]})
+            return [{"id": "feed", "attributes": {"symbol": "Equity.US.TSLA/USD"}}]
+
+        self.assertEqual(PythBenchmarksClient(fake_get_json, api_key="key").equity_feed_id("TSLA"), "feed")
+        self.assertEqual(captured["params"], {"query": "TSLA"})
+        self.assertEqual(captured["headers"], {"Authorization": "Bearer key"})
+
     def test_rejects_price_before_requested_timestamp(self) -> None:
         client = PythBenchmarksClient(lambda _url, _params: {"parsed": [{"id": "feed", "price": {"price": "1", "conf": "1", "expo": 0, "publish_time": 1}}]})
         with self.assertRaises(PythPayloadError):

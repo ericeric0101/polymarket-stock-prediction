@@ -70,6 +70,31 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(events), 1)
         self.assertIn("FINNHUB_TRADE", events[0]["reasons"])
 
+    async def test_coordinator_records_bounded_pyth_finnhub_comparison(self) -> None:
+        spots = []
+        comparisons = []
+
+        async def record_spot(payload):
+            spots.append(payload)
+
+        async def record_comparison(payload):
+            comparisons.append(payload)
+
+        coordinator = ShadowStreamCoordinator(
+            callback=lambda _payload: None, primary_spot_source="FINNHUB",
+            spot_observation_callback=record_spot, spot_comparison_callback=record_comparison,
+        )
+        await coordinator.on_finnhub_message({"type": "trade", "data": [{"s": "TSLA", "p": 100.0, "t": 1_784_000_000_000}]})
+        await coordinator.on_pyth_message(
+            {"parsed": [{"id": "0xfeed", "price": {"price": "10025", "conf": "15", "expo": -2, "publish_time": 1_784_000_000}}]},
+            {"feed": "TSLA"},
+        )
+        await coordinator.close()
+        self.assertEqual(coordinator.latest_quote("PYTH_HERMES", "TSLA").price, 100.25)
+        self.assertEqual([item["source"] for item in spots], ["FINNHUB", "PYTH_HERMES"])
+        self.assertEqual(len(comparisons), 1)
+        self.assertAlmostEqual(comparisons[0]["difference_bps"], -24.9376558603)
+
     def test_polymarket_text_heartbeat_is_ignored(self) -> None:
         self.assertIsNone(PolymarketMarketStream._decode_message("PONG"))
         self.assertEqual(PolymarketMarketStream._decode_message('{"event_type":"book"}'), {"event_type": "book"})

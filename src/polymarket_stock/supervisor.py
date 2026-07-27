@@ -27,7 +27,7 @@ from .portfolio_risk import PaperEntryCandidate, select_diversified_entries
 from .pyth_benchmarks import PythBenchmarksClient
 from .trading_calendar import previous_nyse_trading_day
 from .realtime import RealtimeBaselineEvaluator
-from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, run_with_reconnect
 
 
 MODEL_VERSION = "realized-vol-observation-v1-buffer-2pct"
@@ -105,9 +105,10 @@ class PendingPaperEntry:
 class MultiMarketRouter:
     """Dispatch one shared provider stream to the relevant market evaluators."""
 
-    def __init__(self, runtimes: Mapping[str, ActiveMarket], spot_provider: str) -> None:
+    def __init__(self, runtimes: Mapping[str, ActiveMarket], spot_provider: str, pyth_feed_ids: Mapping[str, str] | None = None) -> None:
         self._runtimes = runtimes
         self._spot_provider = spot_provider
+        self._pyth_feed_ids = {symbol.upper(): feed_id for symbol, feed_id in (pyth_feed_ids or {}).items()}
         self._token_market_ids: dict[str, list[str]] = {}
         self._symbol_market_ids: dict[str, list[str]] = {}
         for market_id, runtime in runtimes.items():
@@ -150,6 +151,12 @@ class MultiMarketRouter:
             for market_id in self._symbol_market_ids.get(symbol.upper(), ()):
                 await self._runtimes[market_id].coordinator.on_alpaca_message(payload)
 
+    async def on_pyth_message(self, payload: Mapping[str, object]) -> None:
+        for market_id, runtime in self._runtimes.items():
+            feed_id = self._pyth_feed_ids.get(runtime.symbol)
+            if feed_id:
+                await runtime.coordinator.on_pyth_message(payload, {feed_id: runtime.symbol})
+
 
 class MultiMarketShadowSupervisor:
     """Refreshes the active universe and manages paper entries through settlement."""
@@ -176,6 +183,7 @@ class MultiMarketShadowSupervisor:
         daily_client: NasdaqBaselineClient | None = None,
         fee_client: PolymarketFeeRateClient | None = None,
         pyth_client: PythBenchmarksClient | None = None,
+        pyth_api_key: str = "",
         tradier_api_token: str = "",
         polygon_api_key: str = "",
         event_calendar_path: Path = Path("data/event_calendar.json"),
@@ -210,7 +218,8 @@ class MultiMarketShadowSupervisor:
         self.gamma = gamma_client or GammaMarketClient()
         self.daily_client = daily_client or NasdaqBaselineClient()
         self.fee_client = fee_client or PolymarketFeeRateClient()
-        self.pyth_client = pyth_client or PythBenchmarksClient()
+        self.pyth_api_key = pyth_api_key.strip()
+        self.pyth_client = pyth_client or PythBenchmarksClient(api_key=self.pyth_api_key)
         self._pyth_feed_ids: dict[str, str] = {}
         self.earnings_client = FinnhubEarningsCalendarClient(finnhub_api_key)
         # Polygon/Massive is preferred when configured because it is a data-only
@@ -399,7 +408,17 @@ class MultiMarketShadowSupervisor:
         async def evaluate_callback(payload: Mapping[str, object]) -> None:
             await self._evaluate_runtime(runtime, payload)
 
-        coordinator = ShadowStreamCoordinator(callback=evaluate_callback)
+        async def record_spot_observation(payload: Mapping[str, object]) -> None:
+            self.journal.record_spot_observation(payload)
+
+        async def record_spot_comparison(payload: Mapping[str, object]) -> None:
+            self.journal.record_spot_source_comparison(payload)
+
+        coordinator = ShadowStreamCoordinator(
+            callback=evaluate_callback, primary_spot_source=self.spot_provider,
+            spot_observation_callback=record_spot_observation,
+            spot_comparison_callback=record_spot_comparison,
+        )
         runtime = ActiveMarket(
             candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,
             reference_quote.last_trade_at, price_to_beat, pyth_reference, option_surface, option_quality_flags, risk_reasons,
@@ -411,21 +430,24 @@ class MultiMarketShadowSupervisor:
         now = datetime.now(UTC)
         coordinator = runtime.coordinator
         token_ids = runtime.token_ids
+        primary_quote = coordinator.latest_quote(self.spot_provider, runtime.symbol)
+        pyth_quote = coordinator.latest_quote("PYTH_HERMES", runtime.symbol)
+        dual_source_risk_reasons = _dual_source_risk_reasons(now, primary_quote, pyth_quote, coordinator.max_age_seconds)
         evaluation = runtime.evaluator.evaluate(
             now=now,
-            spot=coordinator.latest_spots.get(runtime.symbol),
+            spot=primary_quote.price if primary_quote else None,
             up_ask=coordinator.latest_best_asks.get(token_ids[0]),
             down_ask=coordinator.latest_best_asks.get(token_ids[1]),
             up_bid=coordinator.latest_best_bids.get(token_ids[0]),
             down_bid=coordinator.latest_best_bids.get(token_ids[1]),
-            reference_spot=runtime.reference_spot,
-            reference_spot_age_seconds=_age_seconds(now, runtime.reference_spot_observed_at),
+            reference_spot=pyth_quote.price if pyth_quote else None,
+            reference_spot_age_seconds=_quote_age_seconds(now, pyth_quote) if pyth_quote else None,
             option_iv=_usable_option_iv(runtime.option_surface, now),
             option_skew=runtime.option_surface.put_call_skew if runtime.option_surface else None,
             option_iv_provider=runtime.option_surface.provider if runtime.option_surface else None,
             option_iv_age_seconds=_option_iv_age_seconds(runtime.option_surface, now),
             option_quality_flags=_current_option_quality_flags(runtime.option_surface, runtime.option_quality_flags, now),
-            risk_reasons=runtime.risk_reasons,
+            risk_reasons=runtime.risk_reasons + dual_source_risk_reasons,
             additional_model_error_buffer=runtime.additional_model_error_buffer,
             spot_age_seconds=_age_seconds(now, coordinator.freshness.last_spot_at),
             book_age_seconds=_age_seconds(now, coordinator.freshness.last_book_at),
@@ -436,6 +458,10 @@ class MultiMarketShadowSupervisor:
         result = {
             **evaluation.as_payload(), "daily_provider": runtime.daily_provider, "model_version": model_version,
             "price_to_beat": runtime.price_to_beat, "pyth_reference": runtime.pyth_reference,
+            "primary_spot_source": self.spot_provider.upper(),
+            "primary_spot": primary_quote.as_payload() if primary_quote else None,
+            "pyth_live_spot": pyth_quote.as_payload() if pyth_quote else None,
+            "dual_source_gate_reasons": list(dual_source_risk_reasons),
             "contract": runtime.contract.as_payload(),
             "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
         }
@@ -682,7 +708,7 @@ class MultiMarketShadowSupervisor:
         self._stream_signature = signature
         if not token_ids:
             return
-        router = MultiMarketRouter(self.runtimes, self.spot_provider)
+        router = MultiMarketRouter(self.runtimes, self.spot_provider, self._pyth_feed_ids)
 
         async def status_callback(payload: Mapping[str, object]) -> None:
             self.event_sink(str(payload["event_type"]), payload)
@@ -694,9 +720,11 @@ class MultiMarketShadowSupervisor:
         else:
             spot_stream = AlpacaIexStockStream(self.alpaca_api_key, self.alpaca_api_secret)
         spot_callback = router.on_spot_message
+        pyth_feed_ids = {feed_id: symbol for symbol, feed_id in self._pyth_feed_ids.items() if symbol in symbols}
         self._stream_tasks = [
             asyncio.create_task(run_with_reconnect("POLYMARKET_MARKET", lambda: PolymarketMarketStream().run(token_ids, router.on_polymarket_message), status_callback)),
             asyncio.create_task(run_with_reconnect(f"{self.spot_provider.upper()}_STOCK", lambda: spot_stream.run(symbols, spot_callback), status_callback)),
+            asyncio.create_task(run_with_reconnect("PYTH_HERMES", lambda: PythHermesStockStream(self.pyth_api_key).run(pyth_feed_ids, router.on_pyth_message), status_callback)),
         ]
         self._stream_runtimes = dict(self.runtimes)
 
@@ -780,3 +808,28 @@ def _maker_quote_payload(quote: object) -> Mapping[str, object]:
         "fair_probability": getattr(quote, "fair_probability"), "theoretical_edge": getattr(quote, "theoretical_edge"),
         "touch_count": getattr(quote, "touch_count"), "cancel_reason": getattr(quote, "cancel_reason"),
     }
+
+
+def _dual_source_risk_reasons(now: datetime, primary_quote: object | None, pyth_quote: object | None, maximum_age_seconds: float) -> tuple[str, ...]:
+    """Require fresh Pyth and selected primary prices before a paper entry is eligible."""
+
+    reasons: list[str] = []
+    if primary_quote is None:
+        reasons.append("PRIMARY_SPOT_UNAVAILABLE")
+    elif _quote_is_stale(now, primary_quote, maximum_age_seconds):
+        reasons.append("PRIMARY_SPOT_STALE")
+    if pyth_quote is None:
+        reasons.append("PYTH_SPOT_UNAVAILABLE")
+    elif _quote_is_stale(now, pyth_quote, maximum_age_seconds):
+        reasons.append("PYTH_SPOT_STALE")
+    return tuple(reasons)
+
+
+def _quote_age_seconds(now: datetime, quote: object) -> float | None:
+    published_at = getattr(quote, "published_at", None)
+    return _age_seconds(now, published_at or getattr(quote, "observed_at", None))
+
+
+def _quote_is_stale(now: datetime, quote: object, maximum_age_seconds: float) -> bool:
+    age = _quote_age_seconds(now, quote)
+    return age is None or age > maximum_age_seconds
