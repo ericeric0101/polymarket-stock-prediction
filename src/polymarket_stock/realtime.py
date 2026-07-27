@@ -168,8 +168,9 @@ class RealtimeBaselineEvaluator:
             "OPTION_IV_UNAVAILABLE" in flag or "OPTION_IV_PROVIDER_UNCONFIGURED" in flag for flag in quality_flags
         ):
             option_iv_status = "IV_UNAVAILABLE"
-        # Shadow collection uses the reviewed 2% buffer consistently. Missing or stale IV
-        # remains an entry gate; it does not silently widen the probability haircut.
+        # Shadow collection uses the reviewed 2% buffer consistently. When IV is
+        # unavailable, preserve the observation and trade it as a clearly labeled
+        # realized-volatility fallback so settlement data can be collected.
         active_fallback_buffer = self._fallback_buffer
         active_model_error_buffer = self._base_model_error_buffer + active_fallback_buffer + additional_model_error_buffer
         if reference_spot is not None and reference_spot_age_seconds is not None and reference_spot_age_seconds <= 15 and spot is not None:
@@ -248,7 +249,7 @@ class RealtimeBaselineEvaluator:
         model_outcome = assessment.paper_outcome
         entry_block_reasons: list[str] = []
         if model_outcome and option_iv_status != "IV_VALID":
-            entry_block_reasons.append("OPTION_IV_REQUIRED_FOR_PAPER_ENTRY")
+            quality_flags.append("PAPER_ENTRY_REALIZED_VOL_FALLBACK")
         return RealtimeEvaluation(
             **common,
             fair_up_probability=assessment.fair_up_probability,
@@ -259,7 +260,7 @@ class RealtimeBaselineEvaluator:
             up_taker_fee=assessment.up_edge.estimated_taker_fee,
             down_taker_fee=assessment.down_edge.estimated_taker_fee,
             model_outcome=model_outcome,
-            paper_outcome=model_outcome if not entry_block_reasons else None,
+            paper_outcome=model_outcome,
             # Eligibility means an actionable paper entry, not merely that IV was valid.
             paper_entry_eligible=model_outcome is not None and not entry_block_reasons,
             paper_entry_block_reasons=tuple(entry_block_reasons),

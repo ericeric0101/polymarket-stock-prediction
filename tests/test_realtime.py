@@ -24,9 +24,9 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         )
         self.assertIsNotNone(result.fair_up_probability)
         self.assertEqual(result.skip_reasons, ())
-        self.assertIn(result.as_payload()["signal_status"], {"NO_PAPER_TRADE", "OBSERVATION_ONLY_UP", "OBSERVATION_ONLY_DOWN"})
-        self.assertFalse(result.paper_entry_eligible)
-        self.assertIn("OPTION_IV_REQUIRED_FOR_PAPER_ENTRY", result.paper_entry_block_reasons)
+        self.assertIn(result.as_payload()["signal_status"], {"NO_PAPER_TRADE", "PAPER_UP", "PAPER_DOWN"})
+        self.assertEqual(result.paper_outcome, result.model_outcome)
+        self.assertEqual(result.paper_entry_eligible, result.model_outcome is not None)
         self.assertAlmostEqual(result.model_error_buffer, 0.02)
 
     def test_stale_or_incomplete_state_is_recorded_without_signal(self) -> None:
@@ -55,6 +55,18 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         )
         self.assertIn("CROSS_SOURCE_SPOT_DIVERGENCE", result.skip_reasons)
         self.assertAlmostEqual(result.cross_source_difference or 0, 1 / 101)
+
+    def test_unavailable_option_iv_uses_labeled_realized_volatility_fallback(self) -> None:
+        result = self.evaluator.evaluate(
+            now=self.now, spot=101.0, up_ask=0.01, down_ask=0.99, up_bid=0.005, down_bid=0.98,
+            spot_age_seconds=0.2, book_age_seconds=0.1, stream_ready=True, trigger_reasons=("FINNHUB_TRADE",),
+            option_quality_flags=("OPTION_IV_UNAVAILABLE",),
+        )
+        self.assertEqual(result.option_iv_status, "IV_UNAVAILABLE")
+        self.assertEqual(result.model_outcome, "UP")
+        self.assertEqual(result.paper_outcome, "UP")
+        self.assertTrue(result.paper_entry_eligible)
+        self.assertIn("PAPER_ENTRY_REALIZED_VOL_FALLBACK", result.quality_flags)
 
     def test_valid_option_iv_permits_paper_entry_eligibility(self) -> None:
         result = self.evaluator.evaluate(

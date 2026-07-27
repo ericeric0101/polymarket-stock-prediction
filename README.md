@@ -175,11 +175,14 @@ least 30 seconds. Both thresholds are configurable on `supervise-shadow` with
 `TOUCHED` means the published ask reached the quote; it is not treated as a fill,
 does not earn a rebate, and does not create a paper position.
 
-Realized-volatility fallback is observation-only. A paper entry requires an
-`IV_VALID` current near-ATM call/put surface. Eligible signals are collected for
-30 seconds, then selected with conservative defaults: three per day, one per
-static risk group, and two per direction. Every selected or rejected candidate
-is stored in `portfolio_decisions`.
+A current `IV_VALID` near-ATM call/put surface uses the blended IV model. When
+IV is unavailable, the realized-volatility fallback can still enter the paper
+batch with `OPTION_IV_FALLBACK_REALIZED_VOL` and
+`PAPER_ENTRY_REALIZED_VOL_FALLBACK` recorded in its payload. Eligible signals
+are collected for 30 seconds, then selected with conservative defaults: three
+per day, one per static risk group, and two per direction. Every selected or
+rejected candidate is stored in `portfolio_decisions`; later analysis must
+separate IV-backed and realized-volatility-fallback entries.
 
 ### Option-IV Provider Limits
 
@@ -234,9 +237,9 @@ market-day. Compare coverage, trade count, net PnL, Brier/log loss, and later-da
 performance together. A large buffer can appear perfect simply because it makes
 no trades.
 
-The live evaluator keeps a 2% base uncertainty buffer for `IV_VALID` inputs.
-The additional 5% fallback buffer applies only when the option-IV surface is
-unavailable, and that fallback remains observation-only.
+The live evaluator keeps a 2% base uncertainty buffer for both IV-backed and
+realized-volatility-fallback inputs. Fallback entries remain explicitly labelled
+so their outcomes can be evaluated separately before any execution decision.
 
 ## 繁體中文
 
@@ -357,7 +360,7 @@ supervisor 共享一條 Polymarket stream 與一條股價 stream，active univer
 
 supervisor 也會記錄 maker shadow quote。每個有效的 Fair Up/Down 評估都會提出一個低於 fair value、以 `1c` tick 對齊的被動買價，預設理論 edge 為至少 `0.5c`。為避免頻繁取消重掛，只有建議限價至少改變 `2c`，且現有 quote 已存在至少 30 秒，才會重掛；可用 `--maker-reprice-minimum-price-change` 與 `--maker-minimum-quote-lifetime-seconds` 調整。`TOUCHED` 只表示公開 ask 曾觸及該價位，不是成交、不會取得 rebate，也不會建立 paper position。
 
-realized-volatility fallback 現在只做 observation。建立 paper entry 必須具有新鮮、完整的近 ATM call/put `IV_VALID` surface。符合條件的訊號會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`。
+具有新鮮、完整近 ATM call/put `IV_VALID` surface 的訊號會使用 IV 混合模型。若 IV 無法取得，realized-volatility fallback 仍可進入 paper batch，但 payload 會明確記錄 `OPTION_IV_FALLBACK_REALIZED_VOL` 與 `PAPER_ENTRY_REALIZED_VOL_FALLBACK`。符合條件的訊號會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`；後續分析必須區分 IV-backed 與 realized-volatility fallback entry。
 
 美國交易日判定使用紐約時區的週一至週五 `09:30-16:00`，並套用 NYSE 核心休市日。特殊臨時休市與提早收盤仍須由 event calendar 補入。
 
@@ -375,8 +378,8 @@ supervisor 會優先使用 Massive，否則使用 Tradier，從 options chain �
 當天或之後、且 near-ATM 的 call/put，驗證 quote 年齡、bid/ask spread、IV 與資料時間框。
 Massive 的 Currencies Basic 與 Options Basic 免費層沒有美股 option snapshot 權限；Options
 Starter 的 15 分鐘延遲資料也會被拒絕為 `IV_VALID`。程式在 403 後不再重試，並把每程序
-呼叫限制為最多每 12 秒一次。只有新鮮即時 IV 才會用 `75% option IV + 25% realized
-volatility` 建立可進入 paper batch 的 fair probability；其餘狀態維持 observation-only。
+呼叫限制為最多每 12 秒一次。只有新鮮即時 IV 才會使用 `75% option IV + 25% realized
+volatility`；其餘狀態採用 realized-volatility fallback，仍可進入 paper batch，但會以明確 quality flag 標示，供後續分層分析。
 
 ### 離線選擇權定價驗證
 
@@ -440,6 +443,6 @@ polymarket-stock walk-forward-buffer-sweep \
 
 每次重播每市場每日最多選擇一筆、第一個合格並持有至結算的 entry。必須一起比較 coverage、交易數、淨 PnL、Brier/log loss 與後續交易日表現；過大的 buffer 可能因為完全沒有交易而看似完美。
 
-即時 evaluator 對 `IV_VALID` 輸入只保留 2% 基礎不確定性 buffer；額外 5% fallback buffer 只在 option-IV surface 不可用時套用，而 fallback 仍只做 observation。
+即時 evaluator 對 IV-backed 與 realized-volatility fallback 輸入皆使用 2% 基礎不確定性 buffer。fallback entry 會保留明確 quality flag，且在評估或校準時必須與 IV-backed entry 分開報告。
 
 supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開；`dashboard --once` 會輸出單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。
