@@ -918,6 +918,29 @@ class ShadowJournal:
             down_ask=float(row[5]) if row[5] is not None else None, winning_outcome=str(row[6]),
         ) for row in rows)
 
+    def first_signal_performance(self) -> Mapping[str, object]:
+        """Summarize one first model signal per officially settled market."""
+
+        query = """WITH ranked AS (
+            SELECT market_id, json_extract(payload_json, '$.model_outcome') AS prediction,
+                ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY evaluated_at) AS row_number
+            FROM realtime_evaluations
+            WHERE json_extract(payload_json, '$.model_outcome') IN ('UP', 'DOWN')
+        ) SELECT COUNT(*), SUM(ranked.prediction = settlement.winning_outcome)
+          FROM ranked
+          JOIN market_settlements AS settlement USING (market_id)
+          WHERE ranked.row_number = 1"""
+        with _database_connection(self.path) as connection:
+            count, wins = connection.execute(query).fetchone()
+        settled_markets = int(count or 0)
+        correct = int(wins or 0)
+        return {
+            "settled_markets": settled_markets,
+            "wins": correct,
+            "losses": settled_markets - correct,
+            "win_rate": correct / settled_markets if settled_markets else None,
+        }
+
     def dashboard_rows(self, limit: int = 18) -> tuple[Mapping[str, object], ...]:
         with _database_connection(self.path) as connection:
             rows = connection.execute(

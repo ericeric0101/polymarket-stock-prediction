@@ -447,4 +447,4 @@ polymarket-stock walk-forward-buffer-sweep \
 
 即時 evaluator 對 IV-backed 與 realized-volatility fallback 輸入皆使用 2% 基礎不確定性 buffer。fallback entry 會保留明確 quality flag，且在評估或校準時必須與 IV-backed entry 分開報告。
 
-supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開；`dashboard --once` 會輸出單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。
+supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開。底部 `Daily Paper Portfolio` 會顯示紐約交易日經每日風險上限選出的最多 3 筆 paper entry、結算 W/L/PnL，以及全部已結算市場每市場第一筆模型訊號的獨立勝率；`dashboard --once` 會輸出相同內容的單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。

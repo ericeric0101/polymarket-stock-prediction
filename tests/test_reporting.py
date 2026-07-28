@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import unittest
 
 from rich.console import Console
 
+from polymarket_stock.journal import PaperPosition
 from polymarket_stock.reporting import _rich_dashboard, render_dashboard
 
 
@@ -27,6 +29,22 @@ class ReportingTests(unittest.TestCase):
         rendered = console.export_text()
         self.assertIn("Polymarket Stock Shadow", rendered)
         self.assertIn("Market Monitor", rendered)
+        self.assertIn("TSLA", rendered)
+
+    def test_rich_dashboard_shows_daily_portfolio_and_all_signal_metrics(self) -> None:
+        position = PaperPosition(
+            position_id="position-1", opened_at=datetime.now(UTC), market_id="market-1", symbol="TSLA",
+            outcome="UP", status="SETTLED", contracts=1.0, entry_ask=0.20, entry_fee=0.01,
+            entry_slippage=0.0, fair_probability=0.30, model_version="test", settled_at=datetime.now(UTC),
+            settlement_outcome="UP", payout=1.0, realized_pnl=0.79,
+        )
+        layout = _rich_dashboard((), (position,), signal_performance={"settled_markets": 11, "wins": 9})
+        console = Console(width=150, record=True, color_system=None)
+        console.print(layout)
+        rendered = console.export_text()
+        self.assertIn("Daily Paper Portfolio", rendered)
+        self.assertIn("selected: 1 / 3", rendered)
+        self.assertIn("All first signals: 9/11", rendered)
         self.assertIn("TSLA", rendered)
 
     def test_rich_dashboard_shows_active_maker_quote(self) -> None:

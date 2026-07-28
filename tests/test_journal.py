@@ -104,6 +104,23 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(len(observations), 1)
         self.assertAlmostEqual(observations[0].fair_up_probability, 0.62)
 
+    def test_first_signal_performance_uses_only_first_settled_signal_per_market(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            for market_id, prediction, outcome in (("market-1", "UP", "UP"), ("market-2", "DOWN", "UP")):
+                journal.record_realtime_evaluation({
+                    "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": market_id, "symbol": "TSLA",
+                    "spot": 100.0, "up_ask": 0.5, "down_ask": 0.5, "fair_up_probability": 0.6,
+                    "model_outcome": prediction, "signal_status": f"PAPER_{prediction}", "skip_reasons": [],
+                })
+                journal.record_market_settlement(market_id, outcome, {"closed": True})
+            performance = journal.first_signal_performance()
+        self.assertEqual(performance["settled_markets"], 2)
+        self.assertEqual(performance["wins"], 1)
+        self.assertEqual(performance["losses"], 1)
+        self.assertAlmostEqual(performance["win_rate"] or 0, 0.5)
+
     def test_paper_position_is_idempotent_and_settles_at_official_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")

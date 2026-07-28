@@ -171,6 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
+    dashboard_parser.add_argument("--daily-entry-limit", type=int, default=3)
     dashboard_parser.add_argument("--once", action="store_true", help="print one plain-text snapshot instead of opening the live dashboard")
     subparsers.add_parser("settle-paper-positions", help="one-shot official settlement reconciliation for open paper positions")
     alpaca_parser = subparsers.add_parser("snapshot-alpaca-options", help="store free Alpaca indicative option quotes")
@@ -495,9 +496,19 @@ def main() -> None:
     elif arguments.command == "dashboard":
         positions = journal.list_paper_positions()
         if arguments.once:
-            print(render_dashboard(journal.dashboard_rows(arguments.limit), sum(item.status == "OPEN" for item in positions), sum(item.status == "SETTLED" for item in positions)))
+            print(render_dashboard(
+                journal.dashboard_rows(arguments.limit),
+                sum(item.status == "OPEN" for item in positions),
+                sum(item.status == "SETTLED" for item in positions),
+                positions=positions,
+                signal_performance=journal.first_signal_performance(),
+                daily_entry_limit=arguments.daily_entry_limit,
+            ))
         else:
-            run_live_dashboard(journal, refresh_seconds=arguments.refresh_seconds, limit=arguments.limit)
+            run_live_dashboard(
+                journal, refresh_seconds=arguments.refresh_seconds, limit=arguments.limit,
+                daily_entry_limit=arguments.daily_entry_limit,
+            )
     elif arguments.command == "replay-settled":
         report = replay_settled_positions(journal.list_paper_positions()).as_payload()
         if arguments.output:

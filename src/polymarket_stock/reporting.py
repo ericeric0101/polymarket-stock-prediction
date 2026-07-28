@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 import select
 import sys
 import time
-from typing import Mapping
+from typing import Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.layout import Layout
@@ -16,7 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .journal import ShadowJournal
+from .journal import PaperPosition, ShadowJournal
 from .logging import log_event
 
 
@@ -30,7 +32,11 @@ def make_event_sink(log_path: Path, output_format: str):
     return sink
 
 
-def render_dashboard(rows: tuple[Mapping[str, object], ...], open_positions: int, settled_positions: int) -> str:
+def render_dashboard(
+    rows: tuple[Mapping[str, object], ...], open_positions: int, settled_positions: int, *,
+    positions: Iterable[PaperPosition] = (), signal_performance: Mapping[str, object] | None = None,
+    daily_entry_limit: int = 3,
+) -> str:
     lines = [f"Shadow dashboard | active markets: {len(rows)} | paper positions: {open_positions} open / {settled_positions} settled"]
     lines.append("SYMBOL  MARKET    SESSION       SPOT       UP bid/ask   DOWN bid/ask  STATUS")
     for row in rows:
@@ -42,12 +48,15 @@ def render_dashboard(rows: tuple[Mapping[str, object], ...], open_positions: int
         reasons = row.get("skip_reasons") or []
         status = "PAPER " + str(row.get("paper_outcome")) if row.get("paper_outcome") else (str(reasons[0]) if reasons else "OBSERVING")
         lines.append(f"{symbol:<7} {market:<9} {str(row.get('market_session', '-')):<13} {spot:<10} {up:<12} {down:<14} {status}")
+    lines.extend(_plain_daily_portfolio_summary(positions, signal_performance or {}, daily_entry_limit=daily_entry_limit))
     return "\n".join(lines)
 
 
-def run_live_dashboard(journal: ShadowJournal, *, refresh_seconds: float, limit: int) -> None:
-    if refresh_seconds <= 0 or limit < 1:
-        raise ValueError("dashboard refresh_seconds and limit must be positive")
+def run_live_dashboard(
+    journal: ShadowJournal, *, refresh_seconds: float, limit: int, daily_entry_limit: int = 3
+) -> None:
+    if refresh_seconds <= 0 or limit < 1 or daily_entry_limit < 1:
+        raise ValueError("dashboard refresh_seconds, limit, and daily_entry_limit must be positive")
     console = Console()
     with _DashboardInput() as keyboard:
         try:
@@ -55,7 +64,14 @@ def run_live_dashboard(journal: ShadowJournal, *, refresh_seconds: float, limit:
                 while True:
                     positions = journal.list_paper_positions()
                     rows = journal.dashboard_rows(limit)
-                    live.update(_rich_dashboard(rows, positions, refresh_seconds=refresh_seconds), refresh=True)
+                    signal_performance = journal.first_signal_performance()
+                    live.update(
+                        _rich_dashboard(
+                            rows, positions, signal_performance=signal_performance,
+                            refresh_seconds=refresh_seconds, daily_entry_limit=daily_entry_limit,
+                        ),
+                        refresh=True,
+                    )
                     deadline = time.monotonic() + refresh_seconds
                     while time.monotonic() < deadline:
                         if keyboard.poll() == "quit":
@@ -66,7 +82,9 @@ def run_live_dashboard(journal: ShadowJournal, *, refresh_seconds: float, limit:
 
 
 def _rich_dashboard(
-    rows: tuple[Mapping[str, object], ...], positions: tuple[object, ...], *, refresh_seconds: float = 3.0
+    rows: tuple[Mapping[str, object], ...], positions: tuple[PaperPosition, ...], *,
+    signal_performance: Mapping[str, object] | None = None, refresh_seconds: float = 3.0,
+    daily_entry_limit: int = 3,
 ) -> Layout:
     open_positions = sum(getattr(position, "status") == "OPEN" for position in positions)
     settled_positions = sum(getattr(position, "status") == "SETTLED" for position in positions)
@@ -111,9 +129,101 @@ def _rich_dashboard(
     footer.append("Shadow only: no wallet, signing, or order submission.  ", style="dim")
     footer.append("Green=ready/paper  Yellow=data/session gate  Red=risk/data failure\n", style="dim")
     footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close", style="magenta")
+    portfolio = _daily_portfolio_panel(
+        positions, signal_performance or {}, daily_entry_limit=daily_entry_limit,
+    )
     layout = Layout()
-    layout.split_column(Layout(Panel(header, title="Polymarket Stock Shadow", border_style="blue"), size=7), Layout(Panel(table, title="Market Monitor", border_style="green"), ratio=1), Layout(Panel(footer, border_style="magenta"), size=4))
+    layout.split_column(
+        Layout(Panel(header, title="Polymarket Stock Shadow", border_style="blue"), size=5),
+        Layout(Panel(table, title="Market Monitor", border_style="green"), ratio=1),
+        Layout(Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"), size=7),
+        Layout(Panel(footer, border_style="magenta"), size=3),
+    )
     return layout
+
+
+NEW_YORK = ZoneInfo("America/New_York")
+
+
+def _plain_daily_portfolio_summary(
+    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *, daily_entry_limit: int
+) -> list[str]:
+    now = datetime.now(UTC).astimezone(NEW_YORK)
+    today = tuple(
+        position for position in positions
+        if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == now.date()
+    )
+    settled = tuple(position for position in today if position.status == "SETTLED")
+    wins = sum(position.outcome == position.settlement_outcome for position in settled)
+    total_settled = int(signal_performance.get("settled_markets") or 0)
+    total_wins = int(signal_performance.get("wins") or 0)
+    today_rate = f"{wins / len(settled):.1%}" if settled else "pending"
+    all_rate = f"{total_wins / total_settled:.1%}" if total_settled else "pending"
+    lines = [
+        "Daily Paper Portfolio | "
+        f"{now.date().isoformat()} selected: {len(today)} / {daily_entry_limit} | "
+        f"settled W/L: {wins}/{len(settled) - wins} | win rate: {today_rate}",
+        f"All first signals | {total_wins}/{total_settled} | win rate: {all_rate}",
+    ]
+    for position in sorted(today, key=lambda item: item.opened_at):
+        result = "OPEN" if position.status != "SETTLED" else "WIN" if position.outcome == position.settlement_outcome else "LOSS"
+        pnl = "-" if position.realized_pnl is None else f"{position.realized_pnl:+.4f}"
+        lines.append(
+            f"  {position.symbol:<6} {position.outcome:<4} ask {position.entry_ask:.2f} "
+            f"fair {position.fair_probability:.1%} {result:<4} pnl {pnl}"
+        )
+    if not today:
+        lines.append("  No selected paper entries")
+    return lines
+
+
+def _daily_portfolio_panel(
+    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *, daily_entry_limit: int
+) -> Table:
+    now = datetime.now(UTC).astimezone(NEW_YORK)
+    included = tuple(position for position in positions if position.included_in_calibration)
+    today = tuple(position for position in included if position.opened_at.astimezone(NEW_YORK).date() == now.date())
+    settled_today = tuple(position for position in today if position.status == "SETTLED")
+    today_wins = sum(position.outcome == position.settlement_outcome for position in settled_today)
+    total_settled = int(signal_performance.get("settled_markets") or 0)
+    total_wins = int(signal_performance.get("wins") or 0)
+
+    panel = Table.grid(expand=True)
+    panel.add_column(ratio=1)
+    panel.add_column(justify="right", ratio=1)
+    today_rate = f"{today_wins / len(settled_today):.1%}" if settled_today else "pending"
+    all_rate = f"{total_wins / total_settled:.1%}" if total_settled else "pending"
+    panel.add_row(
+        Text(
+            f"{now.date().isoformat()} selected: {len(today)} / {daily_entry_limit}  "
+            f"settled: {len(settled_today)}  W/L: {today_wins}/{len(settled_today) - today_wins}  win rate: {today_rate}",
+            style="bold green" if settled_today and today_wins == len(settled_today) else "cyan",
+        ),
+        Text(f"All first signals: {total_wins}/{total_settled}  win rate: {all_rate}", style="cyan"),
+    )
+    entries = Table(expand=True, header_style="bold cyan", box=None, pad_edge=False)
+    entries.add_column("Symbol", style="bold")
+    entries.add_column("Side")
+    entries.add_column("Ask", justify="right")
+    entries.add_column("Fair", justify="right")
+    entries.add_column("Status")
+    entries.add_column("PnL", justify="right")
+    for position in sorted(today, key=lambda item: item.opened_at):
+        settled = position.status == "SETTLED"
+        won = settled and position.outcome == position.settlement_outcome
+        status = "OPEN" if not settled else f"{position.settlement_outcome} {'WIN' if won else 'LOSS'}"
+        entries.add_row(
+            position.symbol, position.outcome, f"{position.entry_ask:.2f}", f"{position.fair_probability:.1%}",
+            Text(status, style="yellow" if not settled else "bold green" if won else "bold red"),
+            Text(
+                "-" if position.realized_pnl is None else f"{position.realized_pnl:+.4f}",
+                style="dim" if position.realized_pnl is None else "green" if position.realized_pnl >= 0 else "red",
+            ),
+        )
+    if not today:
+        entries.add_row("-", "-", "-", "-", Text("No selected paper entries", style="dim"), "-")
+    panel.add_row(entries)
+    return panel
 
 
 def _session_text(session: str) -> Text:
