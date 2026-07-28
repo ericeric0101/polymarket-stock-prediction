@@ -400,7 +400,7 @@ class MultiMarketShadowSupervisor:
         calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
-            closes=closes, spot_provider=self.spot_provider.upper(), up_fee_rate=up_fee_rate,
+            closes=closes, spot_provider="PYTH_HERMES", up_fee_rate=up_fee_rate,
             down_fee_rate=down_fee_rate, base_model_error_buffer=0.02, fallback_buffer=0.0,
             minimum_edge=calibrated_minimum_edge, price_to_beat=price_to_beat,
         )
@@ -419,7 +419,7 @@ class MultiMarketShadowSupervisor:
             self.event_sink("SOURCE_SPOT_GAP_DETECTED", payload)
 
         coordinator = ShadowStreamCoordinator(
-            callback=evaluate_callback, primary_spot_source=self.spot_provider,
+            callback=evaluate_callback, primary_spot_source="PYTH_HERMES", comparison_spot_source=self.spot_provider,
             spot_observation_callback=record_spot_observation,
             spot_comparison_callback=record_spot_comparison, source_gap_callback=record_source_gap,
         )
@@ -434,24 +434,24 @@ class MultiMarketShadowSupervisor:
         now = datetime.now(UTC)
         coordinator = runtime.coordinator
         token_ids = runtime.token_ids
-        primary_quote = coordinator.latest_quote(self.spot_provider, runtime.symbol)
         pyth_quote = coordinator.latest_quote("PYTH_HERMES", runtime.symbol)
-        dual_source_risk_reasons = _dual_source_risk_reasons(now, primary_quote, pyth_quote, coordinator.max_age_seconds)
+        comparison_quote = coordinator.latest_quote(self.spot_provider, runtime.symbol)
+        pyth_primary_risk_reasons = _pyth_primary_risk_reasons(now, pyth_quote, coordinator.max_age_seconds)
         evaluation = runtime.evaluator.evaluate(
             now=now,
-            spot=primary_quote.price if primary_quote else None,
+            spot=pyth_quote.price if pyth_quote else None,
             up_ask=coordinator.latest_best_asks.get(token_ids[0]),
             down_ask=coordinator.latest_best_asks.get(token_ids[1]),
             up_bid=coordinator.latest_best_bids.get(token_ids[0]),
             down_bid=coordinator.latest_best_bids.get(token_ids[1]),
-            reference_spot=pyth_quote.price if pyth_quote else None,
-            reference_spot_age_seconds=_quote_age_seconds(now, pyth_quote) if pyth_quote else None,
+            reference_spot=comparison_quote.price if comparison_quote else None,
+            reference_spot_age_seconds=_quote_age_seconds(now, comparison_quote) if comparison_quote else None,
             option_iv=_usable_option_iv(runtime.option_surface, now),
             option_skew=runtime.option_surface.put_call_skew if runtime.option_surface else None,
             option_iv_provider=runtime.option_surface.provider if runtime.option_surface else None,
             option_iv_age_seconds=_option_iv_age_seconds(runtime.option_surface, now),
             option_quality_flags=_current_option_quality_flags(runtime.option_surface, runtime.option_quality_flags, now),
-            risk_reasons=runtime.risk_reasons + dual_source_risk_reasons,
+            risk_reasons=runtime.risk_reasons + pyth_primary_risk_reasons,
             additional_model_error_buffer=runtime.additional_model_error_buffer,
             spot_age_seconds=_age_seconds(now, coordinator.freshness.last_spot_at),
             book_age_seconds=_age_seconds(now, coordinator.freshness.last_book_at),
@@ -462,10 +462,12 @@ class MultiMarketShadowSupervisor:
         result = {
             **evaluation.as_payload(), "daily_provider": runtime.daily_provider, "model_version": model_version,
             "price_to_beat": runtime.price_to_beat, "pyth_reference": runtime.pyth_reference,
-            "primary_spot_source": self.spot_provider.upper(),
-            "primary_spot": primary_quote.as_payload() if primary_quote else None,
+            "primary_spot_source": "PYTH_HERMES",
+            "primary_spot": pyth_quote.as_payload() if pyth_quote else None,
             "pyth_live_spot": pyth_quote.as_payload() if pyth_quote else None,
-            "dual_source_gate_reasons": list(dual_source_risk_reasons),
+            "cross_check_spot_source": self.spot_provider.upper(),
+            "cross_check_spot": comparison_quote.as_payload() if comparison_quote else None,
+            "dual_source_gate_reasons": list(pyth_primary_risk_reasons),
             "contract": runtime.contract.as_payload(),
             "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
         }
@@ -814,19 +816,14 @@ def _maker_quote_payload(quote: object) -> Mapping[str, object]:
     }
 
 
-def _dual_source_risk_reasons(now: datetime, primary_quote: object | None, pyth_quote: object | None, maximum_age_seconds: float) -> tuple[str, ...]:
-    """Require fresh Pyth and selected primary prices before a paper entry is eligible."""
+def _pyth_primary_risk_reasons(now: datetime, pyth_quote: object | None, maximum_age_seconds: float) -> tuple[str, ...]:
+    """Pyth is the hard spot gate because it is the contract resolution source."""
 
-    reasons: list[str] = []
-    if primary_quote is None:
-        reasons.append("PRIMARY_SPOT_UNAVAILABLE")
-    elif _quote_is_stale(now, primary_quote, maximum_age_seconds):
-        reasons.append("PRIMARY_SPOT_STALE")
     if pyth_quote is None:
-        reasons.append("PYTH_SPOT_UNAVAILABLE")
-    elif _quote_is_stale(now, pyth_quote, maximum_age_seconds):
-        reasons.append("PYTH_SPOT_STALE")
-    return tuple(reasons)
+        return ("PYTH_SPOT_UNAVAILABLE",)
+    if _quote_is_stale(now, pyth_quote, maximum_age_seconds):
+        return ("PYTH_SPOT_STALE",)
+    return ()
 
 
 def _quote_age_seconds(now: datetime, quote: object) -> float | None:

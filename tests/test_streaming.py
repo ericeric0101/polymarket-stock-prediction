@@ -84,7 +84,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             comparisons.append(payload)
 
         coordinator = ShadowStreamCoordinator(
-            callback=lambda _payload: None, primary_spot_source="FINNHUB",
+            callback=lambda _payload: None, primary_spot_source="PYTH_HERMES", comparison_spot_source="FINNHUB",
             spot_observation_callback=record_spot, spot_comparison_callback=record_comparison,
             session_classifier=lambda _now: "REGULAR",
         )
@@ -95,6 +95,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         )
         await coordinator.close()
         self.assertEqual(coordinator.latest_quote("PYTH_HERMES", "TSLA").price, 100.25)
+        self.assertEqual(coordinator.latest_spots["TSLA"], 100.25)
         self.assertEqual([item["source"] for item in spots], ["FINNHUB", "PYTH_HERMES"])
         self.assertEqual(len(comparisons), 1)
         self.assertAlmostEqual(comparisons[0]["difference_bps"], -24.9376558603)

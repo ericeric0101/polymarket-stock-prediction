@@ -9,7 +9,7 @@ from polymarket_stock.equity_contracts import parse_daily_equity_close_contract
 from polymarket_stock.market_discovery import MarketCandidate
 from polymarket_stock.realtime import RealtimeBaselineEvaluator
 from polymarket_stock.streaming import ShadowStreamCoordinator, SpotQuote
-from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, _dual_source_risk_reasons, select_active_candidates, symbol_from_candidate
+from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, _pyth_primary_risk_reasons, select_active_candidates, symbol_from_candidate
 
 
 def _candidate(market_id: str, symbol: str, end_date: str) -> MarketCandidate:
@@ -46,12 +46,11 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([candidate.market_id for candidate in selected], ["current"])
         self.assertEqual(symbol_from_candidate(selected[0]), "TSLA")
 
-    def test_dual_source_gate_requires_fresh_pyth_and_primary_prices(self) -> None:
-        fresh_primary = SpotQuote("FINNHUB", "TSLA", 100.0, self.now, self.now)
+    def test_pyth_primary_gate_requires_only_a_fresh_pyth_price(self) -> None:
         stale_pyth = SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now - timedelta(seconds=16))
-        self.assertEqual(_dual_source_risk_reasons(self.now, fresh_primary, None, 15), ("PYTH_SPOT_UNAVAILABLE",))
-        self.assertEqual(_dual_source_risk_reasons(self.now, fresh_primary, stale_pyth, 15), ("PYTH_SPOT_STALE",))
-        self.assertEqual(_dual_source_risk_reasons(self.now, fresh_primary, SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now), 15), ())
+        self.assertEqual(_pyth_primary_risk_reasons(self.now, None, 15), ("PYTH_SPOT_UNAVAILABLE",))
+        self.assertEqual(_pyth_primary_risk_reasons(self.now, stale_pyth, 15), ("PYTH_SPOT_STALE",))
+        self.assertEqual(_pyth_primary_risk_reasons(self.now, SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now), 15), ())
 
     async def test_shared_router_dispatches_spot_and_books_to_owning_market(self) -> None:
         candidate = _candidate("one", "TSLA", self.future)

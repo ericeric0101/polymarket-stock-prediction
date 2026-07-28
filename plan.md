@@ -109,9 +109,10 @@ with the user's own account before marking any source as live-grade.
   WebSocket update.
 - The supervisor now also subscribes read-only to Pyth Hermes using the same
   equity feed IDs used for `price_to_beat`. It stores no more than one Pyth or
-  primary-source spot observation and one comparison per symbol per second.
-  Missing/stale Pyth or primary data, or a fresh difference above 0.5%, blocks
-  paper entry while preserving the observation for calibration. `PYTH_API_KEY`
+  cross-check-source spot observation and one comparison per symbol per second.
+  Pyth is the hard primary source because it is the resolution source;
+  missing/stale Pyth data, or a fresh difference above 0.5%, blocks paper entry.
+  A stale Finnhub/Alpaca cross-check remains a quality flag only. `PYTH_API_KEY`
   is optional before the 2026-08-18 authentication change and is used for both
   Hermes and Pyth Benchmarks afterwards.
 
@@ -341,6 +342,7 @@ order submission, or an intraday exit strategy.
 | 2026-07-25 | Added non-leaking checkpoint buffer research. Late checkpoint captures are preserved but excluded; buffer sweeps use original asks and frozen official fees, select at most one first eligible entry per market-day, and walk-forward reports require distinct earlier and later trading dates. | Complete |
 | 2026-07-26 | Backfilled 121 settled NVDA/TSLA markets across 61 trading days with Pyth one-minute spot, Pyth references, CLOB history, and Gamma settlement. Added local Pyth/CLOB batch replay and 1%/2% walk-forward comparison; retain 2% for shadow collection only. | Complete |
 | 2026-07-28 | Enabled explicitly labelled realized-volatility-fallback paper entries when option IV is unavailable. Recorded official settlements for the 14 July 27 signal markets; first-entry hold-to-settlement was 10/14, while the 347 tick-level signals are retained only as correlated observations. | Complete |
+| 2026-07-28 | Made Pyth Hermes the hard primary live-spot source because Polymarket daily-equity contracts resolve from Pyth. Finnhub/Alpaca remains a fresh-only divergence cross-check, so an infrequently traded stock cannot be rejected solely for an external trade-feed gap. | Complete |
 | 2026-07-26 | Aligned daily contract `price_to_beat` to Pyth Benchmarks prior-close reference. Added bounded checkpoint/paper-entry execution observations, top-five reconstructed CLOB depth, fee capture, and 1/5/15/30-minute paper-entry markouts. | Complete |
 | 2026-07-26 | Identified and removed an accidental non-Git directory at `/Users/cheng-kaihuang/Documents/Polymarket-stock` caused by stale Codex CWD metadata. Added canonical-root SOP to this plan and `AGENTS.md`. | Complete |
 | 2026-07-27 | Added Pyth Hermes dual-source spot collection, bounded SQLite observations/comparisons, source freshness/divergence paper gate, and optional API-key authentication for Hermes and Benchmarks. | Complete |

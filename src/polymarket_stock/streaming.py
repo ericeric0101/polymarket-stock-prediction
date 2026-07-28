@@ -133,6 +133,7 @@ class StreamFreshness:
 class ShadowStreamCoordinator:
     callback: EventCallback
     primary_spot_source: str | None = None
+    comparison_spot_source: str | None = None
     spot_observation_callback: EventCallback | None = None
     spot_comparison_callback: EventCallback | None = None
     source_gap_callback: EventCallback | None = None
@@ -152,6 +153,7 @@ class ShadowStreamCoordinator:
 
     def __post_init__(self) -> None:
         self.primary_spot_source = self.primary_spot_source.upper() if self.primary_spot_source else None
+        self.comparison_spot_source = self.comparison_spot_source.upper() if self.comparison_spot_source else None
         self.freshness = StreamFreshness(self.max_age_seconds)
         self._debouncer = DebouncedReevaluation(self.debounce_seconds, self.callback)
 
@@ -298,11 +300,12 @@ class ShadowStreamCoordinator:
     async def _record_comparison_if_due(self, symbol: str, observed_at: datetime) -> None:
         if self.spot_comparison_callback is None:
             return
-        if self.primary_spot_source is None:
+        comparison_source = self.comparison_spot_source or self.primary_spot_source
+        if comparison_source is None:
             return
-        primary = self.latest_quote(self.primary_spot_source, symbol)
+        primary = self.latest_quote(comparison_source, symbol)
         pyth = self.latest_quote("PYTH_HERMES", symbol)
-        if primary is None or pyth is None:
+        if primary is None or pyth is None or primary.source == pyth.source:
             return
         second = observed_at.replace(microsecond=0).isoformat()
         if self._persisted_comparison_seconds.get(symbol) == second:
