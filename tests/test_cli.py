@@ -1,12 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import tempfile
 import unittest
 
-from polymarket_stock.cli import _report_public_api_failure
+from polymarket_stock.cli import _await_with_graceful_shutdown, _report_public_api_failure
 from polymarket_stock.config import Settings
 from polymarket_stock.http import PublicApiError
+
+
+class GracefulShutdownTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_wrapper_waits_for_child_finalizer(self) -> None:
+        started = asyncio.Event()
+        finalized = asyncio.Event()
+
+        async def worker() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                finalized.set()
+
+        wrapper = asyncio.create_task(_await_with_graceful_shutdown(worker()))
+        await started.wait()
+        wrapper.cancel()
+        self.assertTrue(await wrapper)
+        self.assertTrue(finalized.is_set())
 
 
 class CliTests(unittest.TestCase):

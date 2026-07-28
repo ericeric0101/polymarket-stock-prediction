@@ -654,12 +654,30 @@ def _report_public_api_failure(settings: Settings, event_type: str, error: Publi
     raise SystemExit(f"Public API request failed: {message}")
 
 
+async def _await_with_graceful_shutdown(coroutine: object) -> bool:
+    """Await a long-running coroutine and let its finalizers finish after Ctrl+C."""
+
+    task = asyncio.ensure_future(coroutine)  # type: ignore[arg-type]
+    try:
+        await task
+        return False
+    except asyncio.CancelledError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+
 def _run_async(coroutine: object) -> None:
     """Let coroutine finalizers close streams before returning a clean Ctrl+C result."""
 
     try:
-        asyncio.run(coroutine)  # type: ignore[arg-type]
+        interrupted = asyncio.run(_await_with_graceful_shutdown(coroutine))
     except KeyboardInterrupt:
+        # A second Ctrl+C can still interrupt Python's signal runner. The first
+        # interrupt is handled by the wrapper above and drains child tasks.
+        print("\nStopped cleanly.")
+        return
+    if interrupted:
         print("\nStopped cleanly.")
 
 
