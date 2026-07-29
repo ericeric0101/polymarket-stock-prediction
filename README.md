@@ -447,4 +447,24 @@ polymarket-stock walk-forward-buffer-sweep \
 
 即時 evaluator 對 IV-backed 與 realized-volatility fallback 輸入皆使用 2% 基礎不確定性 buffer。fallback entry 會保留明確 quality flag，且在評估或校準時必須與 IV-backed entry 分開報告。
 
+### Probability Calibration and Sizing Gate
+
+```zsh
+# One first model-side signal per officially settled market. The report separates
+# direction, IV/fallback regime, time bucket, probability band, provider, model version,
+# and distance from the contract's Pyth threshold.
+polymarket-stock calibrate-first-signals --output data/first_signal_calibration.json
+
+# Fits probability shrinkage on earlier distinct New York trading dates and scores only
+# later dates. It never changes supervisor thresholds or a live decision.
+polymarket-stock walk-forward-probability-calibration \
+  --training-days 20 \
+  --validation-days 5 \
+  --minimum-training-samples 50
+```
+
+`calibrate-first-signals` reports Wilson confidence intervals as well as Brier/log loss; a high win rate alone is not calibration. `walk-forward-probability-calibration` requires 25 distinct New York dates by default and returns an explicit insufficient-data status otherwise.
+
+Sizing remains `FIXED_SMALL_POSITION_ONLY`. Kelly is always disabled by code and has no execution path. A cohort needs at least 100 settled first signals for an `OPERATOR_REVIEW_REQUIRED` status; that is not approval to trade or to use Kelly. IV-valid and realized-volatility-fallback cohorts are never pooled for this gate.
+
 supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開。底部 `Daily Paper Portfolio` 會顯示紐約交易日經每日風險上限選出的最多 3 筆 paper entry、結算 W/L/PnL，以及全部已結算市場每市場第一筆模型訊號的獨立勝率；`dashboard --once` 會輸出相同內容的單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。

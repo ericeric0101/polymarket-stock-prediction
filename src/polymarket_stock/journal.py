@@ -306,6 +306,25 @@ class ReplayObservation:
 
 
 @dataclass(frozen=True)
+class FirstSignalCalibrationObservation:
+    """One immutable first model-side signal per settled market."""
+
+    market_id: str
+    symbol: str
+    evaluated_at: datetime
+    model_outcome: str
+    selected_fair_probability: float
+    entry_ask: float
+    entry_fee: float | None
+    winning_outcome: str
+    model_version: str
+    option_iv_status: str
+    iv_regime: str
+    spot_provider: str
+    threshold_distance_bps: float | None
+
+
+@dataclass(frozen=True)
 class CheckpointObservation:
     market_id: str
     symbol: str
@@ -917,6 +936,53 @@ class ShadowJournal:
             fair_up_probability=float(row[3]), up_ask=float(row[4]) if row[4] is not None else None,
             down_ask=float(row[5]) if row[5] is not None else None, winning_outcome=str(row[6]),
         ) for row in rows)
+
+    def list_first_signal_calibration_observations(self) -> tuple[FirstSignalCalibrationObservation, ...]:
+        """Return exactly one pre-settlement model signal per officially settled market.
+
+        These are selected-side probabilities, rather than raw Fair-Up probabilities,
+        so calibration measures the probability the policy actually acted on.
+        """
+
+        query = """WITH ranked AS (
+            SELECT evaluated_at, market_id, symbol, fair_up_probability, up_ask, down_ask, payload_json,
+                ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY evaluated_at) AS row_number
+            FROM realtime_evaluations
+            WHERE fair_up_probability IS NOT NULL
+              AND json_extract(payload_json, '$.model_outcome') IN ('UP', 'DOWN')
+        ) SELECT ranked.evaluated_at, ranked.market_id, ranked.symbol, ranked.fair_up_probability,
+            ranked.up_ask, ranked.down_ask, ranked.payload_json, settlement.winning_outcome
+          FROM ranked
+          JOIN market_settlements AS settlement USING (market_id)
+          WHERE ranked.row_number = 1
+          ORDER BY ranked.evaluated_at, ranked.market_id"""
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query).fetchall()
+        observations = []
+        for row in rows:
+            payload = json.loads(str(row[6]))
+            outcome = str(payload["model_outcome"])
+            fair_up = float(row[3])
+            entry_ask = float(row[4] if outcome == "UP" else row[5])
+            entry_fee_value = payload.get("up_taker_fee") if outcome == "UP" else payload.get("down_taker_fee")
+            spot = payload.get("spot")
+            threshold = payload.get("prior_close")
+            threshold_distance_bps = None
+            if spot is not None and threshold is not None and float(threshold) > 0:
+                threshold_distance_bps = (float(spot) / float(threshold) - 1.0) * 10_000
+            option_iv_status = str(payload.get("option_iv_status") or "IV_UNAVAILABLE")
+            observations.append(FirstSignalCalibrationObservation(
+                market_id=str(row[1]), symbol=str(row[2]), evaluated_at=datetime.fromisoformat(str(row[0])),
+                model_outcome=outcome,
+                selected_fair_probability=fair_up if outcome == "UP" else 1.0 - fair_up,
+                entry_ask=entry_ask, entry_fee=float(entry_fee_value) if entry_fee_value is not None else None,
+                winning_outcome=str(row[7]), model_version=str(payload.get("model_version") or "unknown"),
+                option_iv_status=option_iv_status,
+                iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
+                spot_provider=str(payload.get("spot_provider") or "unknown"),
+                threshold_distance_bps=threshold_distance_bps,
+            ))
+        return tuple(observations)
 
     def first_signal_performance(self) -> Mapping[str, object]:
         """Summarize one first model signal per officially settled market."""

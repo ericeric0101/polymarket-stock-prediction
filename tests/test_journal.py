@@ -121,6 +121,32 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(performance["losses"], 1)
         self.assertAlmostEqual(performance["win_rate"] or 0, 0.5)
 
+    def test_first_signal_calibration_observations_use_selected_side_probability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            journal.record_realtime_evaluation({
+                "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": "market-1", "symbol": "TSLA",
+                "spot": 99.0, "prior_close": 100.0, "up_ask": 0.2, "down_ask": 0.8,
+                "fair_up_probability": 0.25, "model_outcome": "DOWN", "signal_status": "PAPER_DOWN",
+                "skip_reasons": [], "option_iv_status": "IV_UNAVAILABLE", "spot_provider": "PYTH_HERMES",
+                "model_version": "test-v1", "down_taker_fee": 0.01,
+            })
+            journal.record_realtime_evaluation({
+                "evaluated_at": "2026-07-20T15:01:00+00:00", "market_id": "market-1", "symbol": "TSLA",
+                "spot": 99.0, "prior_close": 100.0, "up_ask": 0.2, "down_ask": 0.8,
+                "fair_up_probability": 0.10, "model_outcome": "DOWN", "signal_status": "PAPER_DOWN",
+                "skip_reasons": [],
+            })
+            journal.record_market_settlement("market-1", "DOWN", {"closed": True})
+            observation = journal.list_first_signal_calibration_observations()[0]
+        self.assertEqual(observation.model_outcome, "DOWN")
+        self.assertAlmostEqual(observation.selected_fair_probability, 0.75)
+        self.assertAlmostEqual(observation.entry_ask, 0.8)
+        self.assertAlmostEqual(observation.entry_fee or 0, 0.01)
+        self.assertEqual(observation.iv_regime, "REALIZED_VOL_FALLBACK")
+        self.assertAlmostEqual(observation.threshold_distance_bps or 0, -100.0)
+
     def test_paper_position_is_idempotent_and_settles_at_official_outcome(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")

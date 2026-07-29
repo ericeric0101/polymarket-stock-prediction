@@ -30,6 +30,7 @@ from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, load_baseline
 from .option_pricing_validation import OptionPricingInputs, validate_option_quote
 from .polymarket_data import ClobMarketDataClient
 from .paper_reporting import paper_performance
+from .probability_calibration import sizing_readiness, stratified_first_signal_calibration, walk_forward_probability_calibration
 from .pyth_clob_backtest import run_pyth_clob_backtest
 from .replay import replay_market_observations, replay_settled_positions
 from .reporting import make_event_sink, render_dashboard, run_live_dashboard
@@ -150,6 +151,13 @@ def build_parser() -> argparse.ArgumentParser:
     calibration_parser = subparsers.add_parser("calibrate-paper", help="derive conservative settings from settled paper positions")
     calibration_parser.add_argument("--write", action="store_true", help="write a review-only recommendation to data/model_calibration.json")
     subparsers.add_parser("calibrate-observations", help="calibrate from all settled market observations")
+    first_signal_calibration_parser = subparsers.add_parser("calibrate-first-signals", help="stratify selected-side first-signal calibration and sizing readiness")
+    first_signal_calibration_parser.add_argument("--output", help="optional JSON report output path")
+    probability_walk_forward_parser = subparsers.add_parser("walk-forward-probability-calibration", help="fit selected-side probability shrinkage only on earlier trading dates")
+    probability_walk_forward_parser.add_argument("--training-days", type=int, default=20)
+    probability_walk_forward_parser.add_argument("--validation-days", type=int, default=5)
+    probability_walk_forward_parser.add_argument("--minimum-training-samples", type=int, default=50)
+    probability_walk_forward_parser.add_argument("--output", help="optional JSON report output path")
     subparsers.add_parser("calibrate-checkpoints", help="report immutable checkpoint calibration against official settlements")
     buffer_parser = subparsers.add_parser("buffer-sweep", help="replay one-entry-per-market checkpoint policies across probability buffers")
     buffer_parser.add_argument("--minimum-buffer", type=float, default=0.0)
@@ -502,6 +510,7 @@ def main() -> None:
                 sum(item.status == "SETTLED" for item in positions),
                 positions=positions,
                 signal_performance=journal.first_signal_performance(),
+                sizing=sizing_readiness(journal.list_first_signal_calibration_observations()),
                 daily_entry_limit=arguments.daily_entry_limit,
             ))
         else:
@@ -559,6 +568,21 @@ def main() -> None:
         print(json.dumps(replay_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
     elif arguments.command == "calibrate-observations":
         print(json.dumps(calibrate_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
+    elif arguments.command == "calibrate-first-signals":
+        observations = journal.list_first_signal_calibration_observations()
+        report = {
+            "calibration": stratified_first_signal_calibration(observations).as_payload(),
+            "sizing_readiness": sizing_readiness(observations).as_payload(),
+        }
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "walk-forward-probability-calibration":
+        report = walk_forward_probability_calibration(
+            journal.list_first_signal_calibration_observations(), training_days=arguments.training_days,
+            validation_days=arguments.validation_days, minimum_training_samples=arguments.minimum_training_samples,
+        ).as_payload()
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
     elif arguments.command == "calibrate-checkpoints":
         print(json.dumps(calibrate_checkpoint_observations(journal.list_checkpoint_observations()).as_payload(), sort_keys=True))
     elif arguments.command == "buffer-sweep":

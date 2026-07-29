@@ -6,6 +6,7 @@ import unittest
 from rich.console import Console
 
 from polymarket_stock.journal import PaperPosition
+from polymarket_stock.probability_calibration import sizing_readiness
 from polymarket_stock.reporting import _rich_dashboard, render_dashboard
 
 
@@ -17,6 +18,11 @@ class ReportingTests(unittest.TestCase):
         },), 1, 2)
         self.assertIn("TSLA", text)
         self.assertIn("0.48/0.50", text)
+
+    def test_plain_dashboard_shows_sizing_is_not_enabled(self) -> None:
+        text = render_dashboard((), 0, 0, sizing=sizing_readiness(()))
+        self.assertIn("FIXED_SMALL_POSITION_ONLY", text)
+        self.assertIn("Kelly disabled", text)
 
     def test_rich_dashboard_renders_header_and_market_monitor(self) -> None:
         layout = _rich_dashboard(({

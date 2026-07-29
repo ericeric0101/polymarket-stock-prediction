@@ -20,6 +20,7 @@ from rich.text import Text
 
 from .journal import PaperPosition, ShadowJournal
 from .logging import log_event
+from .probability_calibration import SizingReadiness, sizing_readiness
 
 
 def make_event_sink(log_path: Path, output_format: str):
@@ -35,7 +36,7 @@ def make_event_sink(log_path: Path, output_format: str):
 def render_dashboard(
     rows: tuple[Mapping[str, object], ...], open_positions: int, settled_positions: int, *,
     positions: Iterable[PaperPosition] = (), signal_performance: Mapping[str, object] | None = None,
-    daily_entry_limit: int = 3,
+    sizing: SizingReadiness | None = None, daily_entry_limit: int = 3,
 ) -> str:
     lines = [f"Shadow dashboard | active markets: {len(rows)} | paper positions: {open_positions} open / {settled_positions} settled"]
     lines.append("SYMBOL  MARKET    SESSION       SPOT       UP bid/ask   DOWN bid/ask  STATUS")
@@ -48,7 +49,9 @@ def render_dashboard(
         reasons = row.get("skip_reasons") or []
         status = "PAPER " + str(row.get("paper_outcome")) if row.get("paper_outcome") else (str(reasons[0]) if reasons else "OBSERVING")
         lines.append(f"{symbol:<7} {market:<9} {str(row.get('market_session', '-')):<13} {spot:<10} {up:<12} {down:<14} {status}")
-    lines.extend(_plain_daily_portfolio_summary(positions, signal_performance or {}, daily_entry_limit=daily_entry_limit))
+    lines.extend(_plain_daily_portfolio_summary(
+        positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
+    ))
     return "\n".join(lines)
 
 
@@ -65,9 +68,10 @@ def run_live_dashboard(
                     positions = journal.list_paper_positions()
                     rows = journal.dashboard_rows(limit)
                     signal_performance = journal.first_signal_performance()
+                    sizing = sizing_readiness(journal.list_first_signal_calibration_observations())
                     live.update(
                         _rich_dashboard(
-                            rows, positions, signal_performance=signal_performance,
+                            rows, positions, signal_performance=signal_performance, sizing=sizing,
                             refresh_seconds=refresh_seconds, daily_entry_limit=daily_entry_limit,
                         ),
                         refresh=True,
@@ -83,8 +87,8 @@ def run_live_dashboard(
 
 def _rich_dashboard(
     rows: tuple[Mapping[str, object], ...], positions: tuple[PaperPosition, ...], *,
-    signal_performance: Mapping[str, object] | None = None, refresh_seconds: float = 3.0,
-    daily_entry_limit: int = 3,
+    signal_performance: Mapping[str, object] | None = None, sizing: SizingReadiness | None = None,
+    refresh_seconds: float = 3.0, daily_entry_limit: int = 3,
 ) -> Layout:
     open_positions = sum(getattr(position, "status") == "OPEN" for position in positions)
     settled_positions = sum(getattr(position, "status") == "SETTLED" for position in positions)
@@ -130,13 +134,13 @@ def _rich_dashboard(
     footer.append("Green=ready/paper  Yellow=data/session gate  Red=risk/data failure\n", style="dim")
     footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close", style="magenta")
     portfolio = _daily_portfolio_panel(
-        positions, signal_performance or {}, daily_entry_limit=daily_entry_limit,
+        positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
     )
     layout = Layout()
     layout.split_column(
         Layout(Panel(header, title="Polymarket Stock Shadow", border_style="blue"), size=5),
         Layout(Panel(table, title="Market Monitor", border_style="green"), ratio=1),
-        Layout(Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"), size=7),
+        Layout(Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"), size=8),
         Layout(Panel(footer, border_style="magenta"), size=3),
     )
     return layout
@@ -146,7 +150,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 
 
 def _plain_daily_portfolio_summary(
-    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *, daily_entry_limit: int
+    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
+    sizing: SizingReadiness | None, daily_entry_limit: int,
 ) -> list[str]:
     now = datetime.now(UTC).astimezone(NEW_YORK)
     today = tuple(
@@ -174,11 +179,14 @@ def _plain_daily_portfolio_summary(
         )
     if not today:
         lines.append("  No selected paper entries")
+    if sizing is not None:
+        lines.append(_sizing_summary(sizing))
     return lines
 
 
 def _daily_portfolio_panel(
-    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *, daily_entry_limit: int
+    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
+    sizing: SizingReadiness | None, daily_entry_limit: int,
 ) -> Table:
     now = datetime.now(UTC).astimezone(NEW_YORK)
     included = tuple(position for position in positions if position.included_in_calibration)
@@ -223,7 +231,17 @@ def _daily_portfolio_panel(
     if not today:
         entries.add_row("-", "-", "-", "-", Text("No selected paper entries", style="dim"), "-")
     panel.add_row(entries)
+    if sizing is not None:
+        panel.add_row(Text(_sizing_summary(sizing), style="yellow"), Text("Raw fair probabilities are research-only", style="dim"))
     return panel
+
+
+def _sizing_summary(sizing: SizingReadiness) -> str:
+    cohort_summary = "  ".join(
+        f"{cohort.iv_regime}: {cohort.sample_size}/{sizing.kelly_minimum_cohort_samples}"
+        for cohort in sizing.cohorts
+    )
+    return f"Sizing: {sizing.position_sizing}; Kelly disabled. {cohort_summary}"
 
 
 def _session_text(session: str) -> Text:
