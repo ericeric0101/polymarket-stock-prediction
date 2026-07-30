@@ -66,3 +66,23 @@ class ReportingTests(unittest.TestCase):
         rendered = console.export_text()
         self.assertIn("Maker: 2", rendered)
         self.assertIn("MAKER DOWN @ 0.52  UP @ 0.46", rendered)
+
+    def test_rich_dashboard_shows_every_selected_position_up_to_eight(self) -> None:
+        positions = tuple(
+            PaperPosition(
+                position_id=f"position-{index}", opened_at=datetime.now(UTC), market_id=f"market-{index}",
+                symbol=f"SYM{index}", outcome="UP", status="OPEN", contracts=1.0, entry_ask=0.20,
+                entry_fee=0.01, entry_slippage=0.0, fair_probability=0.30, model_version="test",
+                settled_at=None, settlement_outcome=None, payout=None, realized_pnl=None,
+            )
+            for index in range(8)
+        )
+        layout = _rich_dashboard(
+            (), positions, signal_performance={"settled_markets": 0, "wins": 0},
+            sizing=sizing_readiness(()), daily_entry_limit=8,
+        )
+        console = Console(width=150, height=32, record=True, color_system=None)
+        console.print(layout)
+        rendered = console.export_text()
+        for index in range(8):
+            self.assertIn(f"SYM{index}", rendered)

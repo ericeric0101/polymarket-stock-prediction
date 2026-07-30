@@ -133,14 +133,18 @@ def _rich_dashboard(
     footer.append("Shadow only: no wallet, signing, or order submission.  ", style="dim")
     footer.append("Green=ready/paper  Yellow=data/session gate  Red=risk/data failure\n", style="dim")
     footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close", style="magenta")
+    today_positions = _today_selected_positions(positions)
     portfolio = _daily_portfolio_panel(
-        positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
+        today_positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
     )
     layout = Layout()
     layout.split_column(
         Layout(Panel(header, title="Polymarket Stock Shadow", border_style="blue"), size=5),
         Layout(Panel(table, title="Market Monitor", border_style="green"), ratio=1),
-        Layout(Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"), size=8),
+        Layout(
+            Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"),
+            size=_daily_portfolio_height(len(today_positions), sizing is not None),
+        ),
         Layout(Panel(footer, border_style="magenta"), size=3),
     )
     return layout
@@ -154,10 +158,7 @@ def _plain_daily_portfolio_summary(
     sizing: SizingReadiness | None, daily_entry_limit: int,
 ) -> list[str]:
     now = datetime.now(UTC).astimezone(NEW_YORK)
-    today = tuple(
-        position for position in positions
-        if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == now.date()
-    )
+    today = _today_selected_positions(positions, now=now)
     settled = tuple(position for position in today if position.status == "SETTLED")
     wins = sum(position.outcome == position.settlement_outcome for position in settled)
     total_settled = int(signal_performance.get("settled_markets") or 0)
@@ -184,13 +185,27 @@ def _plain_daily_portfolio_summary(
     return lines
 
 
+def _today_selected_positions(
+    positions: Iterable[PaperPosition], *, now: datetime | None = None,
+) -> tuple[PaperPosition, ...]:
+    local_now = now or datetime.now(UTC).astimezone(NEW_YORK)
+    return tuple(
+        position for position in positions
+        if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == local_now.date()
+    )
+
+
+def _daily_portfolio_height(selected_count: int, has_sizing_summary: bool) -> int:
+    """Reserve a visible table row for every selected entry."""
+    return max(8, 6 + max(1, selected_count) + int(has_sizing_summary))
+
+
 def _daily_portfolio_panel(
-    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
+    today: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
     sizing: SizingReadiness | None, daily_entry_limit: int,
 ) -> Table:
     now = datetime.now(UTC).astimezone(NEW_YORK)
-    included = tuple(position for position in positions if position.included_in_calibration)
-    today = tuple(position for position in included if position.opened_at.astimezone(NEW_YORK).date() == now.date())
+    today = tuple(today)
     settled_today = tuple(position for position in today if position.status == "SETTLED")
     today_wins = sum(position.outcome == position.settlement_outcome for position in settled_today)
     total_settled = int(signal_performance.get("settled_markets") or 0)
