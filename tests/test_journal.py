@@ -11,6 +11,15 @@ from polymarket_stock.market_discovery import MarketCandidate
 
 
 class JournalTests(unittest.TestCase):
+    def test_initialize_enables_wal_journal_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            journal = ShadowJournal(path)
+            journal.initialize()
+            with sqlite3.connect(path) as connection:
+                mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
+
     def test_stored_outcome_tokens_are_retrieved_by_market_id(self) -> None:
         candidate = MarketCandidate.from_gamma_payload(
             {

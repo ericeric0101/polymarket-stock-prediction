@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 import unittest
+from unittest.mock import patch
 
 from polymarket_stock.streaming import (
     DebouncedReevaluation, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream,
@@ -12,6 +13,51 @@ from polymarket_stock.streaming import (
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debouncer_retries_a_transient_database_lock(self) -> None:
+        attempts = 0
+        events = []
+
+        async def callback(_payload):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                import sqlite3
+                raise sqlite3.OperationalError("database is locked")
+            events.append("persisted")
+
+        with patch("polymarket_stock.streaming.DATABASE_LOCK_RETRY_SECONDS", (0.001,)):
+            debouncer = DebouncedReevaluation(0.001, callback)
+            debouncer.notify("TEST")
+            await asyncio.sleep(0.02)
+            await debouncer.close()
+        self.assertEqual(attempts, 2)
+        self.assertEqual(events, ["persisted"])
+
+    async def test_debouncer_reports_an_exhausted_database_lock(self) -> None:
+        attempts = 0
+        failures = []
+
+        async def callback(_payload):
+            nonlocal attempts
+            attempts += 1
+            import sqlite3
+            raise sqlite3.OperationalError("database is locked")
+
+        async def error_callback(payload):
+            failures.append(payload)
+
+        with patch("polymarket_stock.streaming.DATABASE_LOCK_RETRY_SECONDS", (0.001,)):
+            debouncer = DebouncedReevaluation(0.001, callback, error_callback=error_callback)
+            debouncer.notify("TEST")
+            await asyncio.sleep(0.02)
+            await debouncer.close()
+        self.assertEqual(attempts, 2)
+        self.assertEqual(
+            [failure["event_type"] for failure in failures],
+            ["SHADOW_REEVALUATION_DATABASE_LOCK_RETRYING", "SHADOW_REEVALUATION_DATABASE_LOCKED"],
+        )
+        self.assertEqual(failures[-1]["attempts"], 2)
+
     async def test_debouncer_close_cancels_a_pending_callback(self) -> None:
         events = []
         debouncer = DebouncedReevaluation(1.0, events.append)

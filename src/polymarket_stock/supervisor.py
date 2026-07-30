@@ -433,10 +433,14 @@ class MultiMarketShadowSupervisor:
         async def record_source_gap(payload: Mapping[str, object]) -> None:
             self.event_sink("SOURCE_SPOT_GAP_DETECTED", payload)
 
+        async def record_reevaluation_error(payload: Mapping[str, object]) -> None:
+            self.event_sink(str(payload["event_type"]), payload)
+
         coordinator = ShadowStreamCoordinator(
             callback=evaluate_callback, primary_spot_source="PYTH_HERMES", comparison_spot_source=self.spot_provider,
             spot_observation_callback=record_spot_observation,
             spot_comparison_callback=record_spot_comparison, source_gap_callback=record_source_gap,
+            reevaluation_error_callback=record_reevaluation_error,
         )
         runtime = ActiveMarket(
             candidate, contract, contract.symbol, evaluator, daily_provider, up_fee_rate, down_fee_rate, reference_quote.price,

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import inspect
 import json
 import ssl
+import sqlite3
 from typing import Awaitable, Callable, Mapping
 from urllib.parse import urlencode
 
@@ -66,12 +67,22 @@ async def run_with_reconnect(
         delay_seconds = min(maximum_delay_seconds, delay_seconds * 2)
 
 
+DATABASE_LOCK_RETRY_SECONDS = (0.05, 0.15, 0.45)
+
+
+def _is_database_locked(error: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(error).lower() or "database is busy" in str(error).lower()
+
+
 class DebouncedReevaluation:
-    def __init__(self, delay_seconds: float, callback: EventCallback) -> None:
+    def __init__(
+        self, delay_seconds: float, callback: EventCallback, *, error_callback: EventCallback | None = None
+    ) -> None:
         if delay_seconds <= 0:
             raise ValueError("delay_seconds must be positive")
         self._delay_seconds = delay_seconds
         self._callback = callback
+        self._error_callback = error_callback
         self._reasons: set[str] = set()
         self._task: asyncio.Task[None] | None = None
         self._closed = False
@@ -91,10 +102,33 @@ class DebouncedReevaluation:
                 return
             reasons = sorted(self._reasons)
             self._reasons.clear()
-            await _emit(self._callback, {
+            payload = {
                 "event_type": "SHADOW_REEVALUATION_REQUESTED", "reasons": reasons,
                 "recorded_at": datetime.now(UTC).isoformat(),
-            })
+            }
+            for attempt, delay_seconds in enumerate((0.0, *DATABASE_LOCK_RETRY_SECONDS), start=1):
+                if delay_seconds:
+                    await asyncio.sleep(delay_seconds)
+                try:
+                    await _emit(self._callback, payload)
+                    return
+                except sqlite3.OperationalError as error:
+                    if not _is_database_locked(error):
+                        raise
+                    final_attempt = attempt == len(DATABASE_LOCK_RETRY_SECONDS) + 1
+                    if self._error_callback is not None:
+                        await _emit(self._error_callback, {
+                            "event_type": (
+                                "SHADOW_REEVALUATION_DATABASE_LOCKED" if final_attempt
+                                else "SHADOW_REEVALUATION_DATABASE_LOCK_RETRYING"
+                            ),
+                            "attempt": attempt, "attempts": attempt, "error": str(error),
+                            "reasons": reasons,
+                            "retry_in_seconds": None if final_attempt else DATABASE_LOCK_RETRY_SECONDS[attempt - 1],
+                            "recorded_at": datetime.now(UTC).isoformat(),
+                        })
+                    if final_attempt:
+                        return
         except asyncio.CancelledError:
             return
         except KeyboardInterrupt:
@@ -158,6 +192,7 @@ class ShadowStreamCoordinator:
     spot_observation_callback: EventCallback | None = None
     spot_comparison_callback: EventCallback | None = None
     source_gap_callback: EventCallback | None = None
+    reevaluation_error_callback: EventCallback | None = None
     session_classifier: Callable[[datetime], str] = us_equity_session
     debounce_seconds: float = 0.5
     max_age_seconds: float = 15.0
@@ -176,7 +211,9 @@ class ShadowStreamCoordinator:
         self.primary_spot_source = self.primary_spot_source.upper() if self.primary_spot_source else None
         self.comparison_spot_source = self.comparison_spot_source.upper() if self.comparison_spot_source else None
         self.freshness = StreamFreshness(self.max_age_seconds)
-        self._debouncer = DebouncedReevaluation(self.debounce_seconds, self.callback)
+        self._debouncer = DebouncedReevaluation(
+            self.debounce_seconds, self.callback, error_callback=self.reevaluation_error_callback,
+        )
 
     def latest_quote(self, source: str, symbol: str) -> SpotQuote | None:
         return self.latest_source_quotes.get(source.upper(), {}).get(symbol.upper())

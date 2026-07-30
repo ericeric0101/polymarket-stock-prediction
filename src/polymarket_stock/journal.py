@@ -9,6 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 from typing import Mapping
 import uuid
 from zoneinfo import ZoneInfo
@@ -358,12 +359,35 @@ class BufferSweepObservation:
     winning_outcome: str
 
 
+DATABASE_BUSY_TIMEOUT_MS = 5_000
+DATABASE_COMMIT_RETRY_SECONDS = (0.05, 0.15, 0.45)
+
+
+def _is_database_locked(error: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(error).lower() or "database is busy" in str(error).lower()
+
+
 @contextmanager
 def _database_connection(path: Path):
-    connection = sqlite3.connect(path)
+    """Use WAL plus bounded commit retries for independent dashboard/bot processes."""
+
+    connection = sqlite3.connect(path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1000)
+    connection.execute(f"PRAGMA busy_timeout = {DATABASE_BUSY_TIMEOUT_MS}")
     try:
-        with connection:
-            yield connection
+        yield connection
+    except BaseException:
+        connection.rollback()
+        raise
+    else:
+        for attempt, delay_seconds in enumerate((0.0, *DATABASE_COMMIT_RETRY_SECONDS)):
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            try:
+                connection.commit()
+                break
+            except sqlite3.OperationalError as error:
+                if not _is_database_locked(error) or attempt == len(DATABASE_COMMIT_RETRY_SECONDS):
+                    raise
     finally:
         connection.close()
 
@@ -375,6 +399,9 @@ class ShadowJournal:
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with _database_connection(self.path) as connection:
+            current_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+            if current_mode != "wal":
+                connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(SCHEMA)
             self._migrate_market_candidate_columns(connection)
             self._migrate_paper_position_columns(connection)
