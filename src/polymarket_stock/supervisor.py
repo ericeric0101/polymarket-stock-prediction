@@ -168,6 +168,9 @@ class MultiMarketShadowSupervisor:
         journal: ShadowJournal,
         log_path: Path,
         spot_provider: str,
+        volatility_estimator: str = "CLOSE_TO_CLOSE",
+        volatility_decay: float = 0.94,
+        comparison_estimators: tuple[str, ...] = ("EWMA",),
         finnhub_api_key: str = "",
         alpaca_api_key: str = "",
         alpaca_api_secret: str = "",
@@ -193,6 +196,13 @@ class MultiMarketShadowSupervisor:
     ) -> None:
         if spot_provider not in {"finnhub", "alpaca"}:
             raise ValueError("spot_provider must be finnhub or alpaca")
+        if volatility_estimator.upper() not in {"CLOSE_TO_CLOSE", "EWMA"}:
+            raise ValueError("supervisor volatility_estimator must be CLOSE_TO_CLOSE or EWMA")
+        if not 0 < volatility_decay < 1:
+            raise ValueError("volatility_decay must be between zero and one")
+        normalized_comparisons = tuple(dict.fromkeys(item.upper() for item in comparison_estimators if item.upper() != volatility_estimator.upper()))
+        if any(item not in {"CLOSE_TO_CLOSE", "EWMA"} for item in normalized_comparisons):
+            raise ValueError("supervisor comparison_estimators must be CLOSE_TO_CLOSE or EWMA")
         if max_markets < 1:
             raise ValueError("max_markets must be positive")
         if maker_minimum_edge < 0 or maker_minimum_edge >= 1:
@@ -204,6 +214,9 @@ class MultiMarketShadowSupervisor:
         self.journal = journal
         self.log_path = log_path
         self.spot_provider = spot_provider
+        self.volatility_estimator = volatility_estimator.upper()
+        self.volatility_decay = volatility_decay
+        self.comparison_estimators = normalized_comparisons
         self.finnhub_api_key = finnhub_api_key
         self.alpaca_api_key = alpaca_api_key
         self.alpaca_api_secret = alpaca_api_secret
@@ -401,6 +414,8 @@ class MultiMarketShadowSupervisor:
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
             closes=closes, spot_provider="PYTH_HERMES", up_fee_rate=up_fee_rate,
+            volatility_estimator=self.volatility_estimator, volatility_decay=self.volatility_decay,
+            comparison_estimators=self.comparison_estimators,
             down_fee_rate=down_fee_rate, base_model_error_buffer=0.02, fallback_buffer=0.0,
             minimum_edge=calibrated_minimum_edge, price_to_beat=price_to_beat,
         )

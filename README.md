@@ -84,6 +84,47 @@ polymarket-stock snapshot-alpaca-options --symbols SPY260718C00600000
 
 Indicative option data is not a live-grade pricing source.
 
+### Phase 1–3 Volatility Research
+
+The realized-volatility research path now supports explicit, comparable
+estimators without changing the default shadow behavior:
+
+```zsh
+# Phase 1: responsive close-to-close EWMA
+polymarket-stock evaluate-baseline \
+  --market-id 2958682 --history-csv /path/to/TSLA_daily.csv \
+  --spot 380.84 --resolves-at 2026-07-20T20:00:00Z \
+  --volatility-estimator EWMA --volatility-decay 0.94
+
+# Phase 3: OHLC estimator from a Date,Open,High,Low,Close CSV
+polymarket-stock evaluate-baseline \
+  --market-id 2958682 --history-csv /path/to/TSLA_daily.csv \
+  --ohlc-history-csv /path/to/TSLA_ohlc.csv \
+  --spot 380.84 --resolves-at 2026-07-20T20:00:00Z \
+  --volatility-estimator YANG_ZHANG
+```
+
+The default remains `CLOSE_TO_CLOSE`. `GARMAN_KLASS` and `YANG_ZHANG` require
+validated OHLC bars and are research comparison modes only. Yahoo's existing
+non-settlement chart adapter can export OHLC bars through its Python API as
+`YahooDailyBarSeries`. Event-conditioned volatility is also report-only and
+requires a minimum historical event cohort; it does not bypass event gates or
+enable any trading path. Compare estimators out of sample with the existing
+walk-forward calibration commands before changing a model default.
+
+The real-time supervisor computes a dual-mode comparison in one process by
+default: `CLOSE_TO_CLOSE` remains the primary paper-decision model while
+`EWMA` is stored inside each evaluation's `comparison_models` payload. The
+comparison model never creates a second paper position. To change the primary
+or comparison modes explicitly:
+
+```zsh
+polymarket-stock supervise-shadow \
+  --volatility-estimator CLOSE_TO_CLOSE \
+  --comparison-estimators EWMA \
+  --volatility-decay 0.94
+```
+
 ### Real-Time Shadow Streams
 
 Finnhub is the default stock-quote provider and does not require a brokerage

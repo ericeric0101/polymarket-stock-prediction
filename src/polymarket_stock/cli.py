@@ -11,7 +11,7 @@ from pathlib import Path
 import ssl
 
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
-from .baseline import daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_closes_csv
+from .baseline import DailyClose, daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_bars_csv, load_daily_closes_csv
 from .batch_backfill import backfill_discovered_markets
 from .buffer_sweep import buffer_values, run_buffer_sweep, walk_forward_buffer_sweep
 from .checkpoints import CHECKPOINTS
@@ -70,6 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_parser.add_argument("--spot", required=True, type=float)
     baseline_parser.add_argument("--resolves-at", required=True, help="ISO-8601 timestamp, e.g. 2026-07-20T20:00:00Z")
     baseline_parser.add_argument("--lookback-days", type=int, default=20)
+    baseline_parser.add_argument("--volatility-estimator", choices=("CLOSE_TO_CLOSE", "EWMA", "GARMAN_KLASS", "YANG_ZHANG"), default="CLOSE_TO_CLOSE")
+    baseline_parser.add_argument("--volatility-decay", type=float, default=0.94)
+    baseline_parser.add_argument("--ohlc-history-csv", help="optional Date,Open,High,Low,Close CSV for OHLC estimators")
     yahoo_parser = subparsers.add_parser("download-yahoo-closes", help="download non-settlement Yahoo daily closes to Date,Close CSV")
     yahoo_parser.add_argument("--symbol", required=True)
     yahoo_parser.add_argument("--start-date", required=True, help="YYYY-MM-DD")
@@ -107,14 +110,21 @@ def build_parser() -> argparse.ArgumentParser:
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
     nasdaq_baseline_parser.add_argument("--resolves-at", required=True)
+    nasdaq_baseline_parser.add_argument("--volatility-estimator", choices=("CLOSE_TO_CLOSE", "EWMA"), default="CLOSE_TO_CLOSE")
+    nasdaq_baseline_parser.add_argument("--volatility-decay", type=float, default=0.94)
     stream_parser = subparsers.add_parser("stream-shadow", help="read-only Polymarket and stock-quote live streams")
     stream_parser.add_argument("--market-id", required=True)
     stream_parser.add_argument("--symbol", required=True)
     stream_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
+    stream_parser.add_argument("--volatility-estimator", choices=("CLOSE_TO_CLOSE", "EWMA"), default="CLOSE_TO_CLOSE")
+    stream_parser.add_argument("--volatility-decay", type=float, default=0.94)
     stream_parser.add_argument("--resolves-at", help="ISO-8601 resolution timestamp; defaults to the discovered market end date")
     stream_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
     supervisor_parser = subparsers.add_parser("supervise-shadow", help="scheduled multi-market shadow observation and paper lifecycle")
     supervisor_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
+    supervisor_parser.add_argument("--volatility-estimator", choices=("CLOSE_TO_CLOSE", "EWMA"), default="CLOSE_TO_CLOSE")
+    supervisor_parser.add_argument("--volatility-decay", type=float, default=0.94)
+    supervisor_parser.add_argument("--comparison-estimators", default="EWMA", help="comma-separated shadow comparison estimators; default EWMA")
     supervisor_parser.add_argument("--scan-interval-seconds", type=float, default=900)
     supervisor_parser.add_argument("--max-markets", type=int, default=18)
     supervisor_parser.add_argument("--minimum-seconds-to-resolution", type=float, default=900)
@@ -324,6 +334,11 @@ def main() -> None:
         now = datetime.now(UTC)
         resolves_at = datetime.fromisoformat(arguments.resolves_at.replace("Z", "+00:00"))
         closes = load_daily_closes_csv(Path(arguments.history_csv))
+        volatility_observations = None
+        if arguments.ohlc_history_csv:
+            bars = load_daily_bars_csv(Path(arguments.ohlc_history_csv))
+            closes = [DailyClose(bar.date, bar.close) for bar in bars]
+            volatility_observations = bars
         up_ask, down_ask = journal.get_latest_outcome_asks(arguments.market_id)
         outcomes = journal.get_market_outcome_tokens(arguments.market_id)
         fee_client = PolymarketFeeRateClient()
@@ -335,6 +350,9 @@ def main() -> None:
             up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
             base_model_error_buffer=0.02, fallback_buffer=0.0, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=arguments.lookback_days,
+            volatility_estimator=arguments.volatility_estimator,
+            volatility_decay=arguments.volatility_decay,
+            volatility_observations=volatility_observations,
         )
         result = {
             "market_id": arguments.market_id,
@@ -342,6 +360,7 @@ def main() -> None:
             "up_ask": up_ask,
             "down_ask": down_ask,
             "realized_volatility": round(assessment.annualized_realized_volatility, 6),
+            "volatility_estimator": assessment.volatility_estimator,
             "prior_close": assessment.prior_close,
             "data_is_fresh": assessment.data_is_fresh,
             "model_error_buffer": assessment.model_error_buffer,
@@ -382,6 +401,8 @@ def main() -> None:
             up_ask=up_ask, down_ask=down_ask, up_fee_rate=up_fee_rate, down_fee_rate=down_fee_rate,
             base_model_error_buffer=0.02, fallback_buffer=0.0, minimum_edge=0.02,
             data_is_fresh=data_is_fresh, lookback_days=20,
+            volatility_estimator=arguments.volatility_estimator,
+            volatility_decay=arguments.volatility_decay,
         )
         result = {
             "market_id": arguments.market_id, "symbol": quote.symbol, "spot": quote.price,
@@ -389,6 +410,7 @@ def main() -> None:
             "fair_up_probability": round(assessment.fair_up_probability, 6), "up_ask": up_ask,
             "down_ask": down_ask, "prior_close": assessment.prior_close,
             "realized_volatility": round(assessment.annualized_realized_volatility, 6),
+            "volatility_estimator": assessment.volatility_estimator,
             "data_is_fresh": assessment.data_is_fresh, "model_error_buffer": assessment.model_error_buffer,
             "paper_outcome": assessment.paper_outcome, "provider": provider,
             "up_fee_rate": up_fee_rate, "down_fee_rate": down_fee_rate,
@@ -472,6 +494,8 @@ def main() -> None:
         api_key, api_secret, finnhub_api_key = _stream_credentials(arguments.spot_provider)
         supervisor = MultiMarketShadowSupervisor(
             journal=journal, log_path=settings.log_path, spot_provider=arguments.spot_provider,
+            volatility_estimator=arguments.volatility_estimator, volatility_decay=arguments.volatility_decay,
+            comparison_estimators=tuple(item.strip() for item in arguments.comparison_estimators.split(",") if item.strip()),
             finnhub_api_key=finnhub_api_key, alpaca_api_key=api_key, alpaca_api_secret=api_secret,
             max_markets=arguments.max_markets, minimum_seconds_to_resolution=arguments.minimum_seconds_to_resolution,
             maker_minimum_edge=arguments.maker_minimum_edge,

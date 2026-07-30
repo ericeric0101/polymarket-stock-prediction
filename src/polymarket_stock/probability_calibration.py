@@ -117,6 +117,7 @@ def stratified_first_signal_calibration(
         ("direction", lambda item: item.model_outcome),
         ("iv_regime", lambda item: item.iv_regime),
         ("option_iv_status", lambda item: item.option_iv_status),
+        ("volatility_estimator", lambda item: item.volatility_estimator),
         ("entry_time_bucket", lambda item: _entry_time_bucket(item.evaluated_at)),
         ("spot_provider", lambda item: item.spot_provider),
         ("model_version", lambda item: item.model_version),

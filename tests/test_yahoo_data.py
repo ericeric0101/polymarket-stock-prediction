@@ -50,6 +50,25 @@ class YahooDataTests(unittest.TestCase):
             series.write_csv(output)
             self.assertIn("DateTime,Spot", output.read_text(encoding="utf-8"))
 
+    def test_daily_bars_parse_and_write_ohlc_csv(self) -> None:
+        client = YahooChartClient(lambda _url, _params: {
+            "chart": {"result": [{
+                "timestamp": [1770000000, 1770086400, 1770172800],
+                "indicators": {"quote": [{
+                    "open": [100.0, 101.0, 102.0],
+                    "high": [102.0, 103.0, 104.0],
+                    "low": [99.0, 100.0, 101.0],
+                    "close": [101.0, 102.0, 103.0],
+                }]},
+            }]}
+        })
+        series = client.daily_bars("TSLA", start_date=date(2026, 2, 1), end_date=date(2026, 2, 3))
+        self.assertEqual(series.bars[0].high, 102.0)
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "TSLA_ohlc.csv"
+            series.write_csv(output)
+            self.assertIn("Date,Open,High,Low,Close", output.read_text(encoding="utf-8"))
+
     def test_invalid_payload_is_rejected(self) -> None:
         client = YahooChartClient(lambda _url, _params: {"chart": {"result": []}})
         with self.assertRaises(YahooPayloadError):

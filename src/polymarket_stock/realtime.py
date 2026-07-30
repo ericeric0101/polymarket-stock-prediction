@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Mapping
 
-from .baseline import DailyClose, annualized_realized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline
+from .baseline import DailyBar, DailyClose, annualized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline
 from .quality import relative_price_difference, us_equity_session
 
 
@@ -40,6 +40,8 @@ class RealtimeEvaluation:
     daily_data_is_fresh: bool
     fair_up_probability: float | None
     annualized_realized_volatility: float | None
+    volatility_estimator: str
+    comparison_models: tuple[Mapping[str, object], ...]
     prior_close: float | None
     model_error_buffer: float
     up_edge: float | None
@@ -59,6 +61,7 @@ class RealtimeEvaluation:
         payload["quality_flags"] = list(self.quality_flags)
         payload["skip_reasons"] = list(self.skip_reasons)
         payload["paper_entry_block_reasons"] = list(self.paper_entry_block_reasons)
+        payload["comparison_models"] = [dict(item) for item in self.comparison_models]
         if self.paper_outcome:
             payload["signal_status"] = f"PAPER_{self.paper_outcome}"
         elif self.model_outcome:
@@ -79,6 +82,10 @@ class RealtimeBaselineEvaluator:
         resolves_at: datetime,
         closes: list[DailyClose],
         spot_provider: str,
+        volatility_estimator: str = "CLOSE_TO_CLOSE",
+        volatility_decay: float = 0.94,
+        volatility_observations: list[DailyClose] | list[DailyBar] | None = None,
+        comparison_estimators: tuple[str, ...] = ("EWMA",),
         up_fee_rate: float | None = None,
         down_fee_rate: float | None = None,
         base_model_error_buffer: float = 0.02,
@@ -92,6 +99,15 @@ class RealtimeBaselineEvaluator:
         self._symbol = symbol.upper()
         self._resolves_at = resolves_at
         self._closes = closes
+        self._volatility_estimator = volatility_estimator.upper()
+        self._volatility_decay = volatility_decay
+        self._volatility_observations = volatility_observations if volatility_observations is not None else closes
+        supported_estimators = {"CLOSE_TO_CLOSE", "EWMA", "GARMAN_KLASS", "YANG_ZHANG"}
+        self._comparison_estimators = tuple(dict.fromkeys(item.upper() for item in comparison_estimators if item.upper() != self._volatility_estimator))
+        if any(item not in supported_estimators for item in self._comparison_estimators):
+            raise ValueError("comparison_estimators contains an unsupported volatility estimator")
+        if self._volatility_estimator in {"GARMAN_KLASS", "YANG_ZHANG"} and volatility_observations is None:
+            raise ValueError(f"{self._volatility_estimator} requires volatility_observations")
         self._spot_provider = spot_provider
         self._up_fee_rate = up_fee_rate
         self._down_fee_rate = down_fee_rate
@@ -205,6 +221,7 @@ class RealtimeBaselineEvaluator:
             "stream_ready": stream_ready,
             "market_session": market_session,
             "daily_data_is_fresh": daily_data_is_fresh,
+            "volatility_estimator": self._volatility_estimator,
             "model_error_buffer": active_model_error_buffer,
         }
         if skip_reasons:
@@ -213,6 +230,7 @@ class RealtimeBaselineEvaluator:
                 fair_up_probability=None,
                 annualized_realized_volatility=None,
                 prior_close=None,
+                comparison_models=(),
                 up_edge=None,
                 down_edge=None,
                 up_taker_fee=None,
@@ -226,7 +244,12 @@ class RealtimeBaselineEvaluator:
                 skip_reasons=tuple(sorted(set(skip_reasons))),
             )
 
-        realized_volatility = annualized_realized_volatility(self._closes, 20)
+        realized_volatility = annualized_volatility(
+            self._volatility_observations,
+            lookback_days=20,
+            estimator=self._volatility_estimator,
+            decay=self._volatility_decay,
+        )
         # IV controls the distribution only when the provider passed its quote-quality checks.
         combined_volatility = 0.75 * option_iv + 0.25 * realized_volatility if option_iv is not None else None
         assessment = evaluate_realized_vol_baseline(
@@ -242,11 +265,54 @@ class RealtimeBaselineEvaluator:
             minimum_edge=self._minimum_edge,
             data_is_fresh=daily_data_is_fresh,
             lookback_days=20,
+            volatility_estimator=self._volatility_estimator,
+            volatility_decay=self._volatility_decay,
+            volatility_observations=self._volatility_observations,
             annualized_volatility_override=combined_volatility,
             additional_model_error_buffer=additional_model_error_buffer,
             price_to_beat_override=self._price_to_beat,
         )
         model_outcome = assessment.paper_outcome
+        comparison_models = []
+        for estimator in self._comparison_estimators:
+            comparison_volatility = annualized_volatility(
+                self._volatility_observations,
+                lookback_days=20,
+                estimator=estimator,
+                decay=self._volatility_decay,
+            )
+            comparison_combined_volatility = (
+                0.75 * option_iv + 0.25 * comparison_volatility if option_iv is not None else None
+            )
+            comparison = evaluate_realized_vol_baseline(
+                spot=spot,
+                closes=self._closes,
+                seconds_to_resolution=(self._resolves_at - now).total_seconds(),
+                up_ask=up_ask,
+                down_ask=down_ask,
+                up_fee_rate=self._up_fee_rate,
+                down_fee_rate=self._down_fee_rate,
+                base_model_error_buffer=self._base_model_error_buffer,
+                fallback_buffer=active_fallback_buffer,
+                minimum_edge=self._minimum_edge,
+                data_is_fresh=daily_data_is_fresh,
+                lookback_days=20,
+                volatility_estimator=estimator,
+                volatility_decay=self._volatility_decay,
+                volatility_observations=self._volatility_observations,
+                annualized_volatility_override=comparison_combined_volatility,
+                additional_model_error_buffer=additional_model_error_buffer,
+                price_to_beat_override=self._price_to_beat,
+            )
+            comparison_models.append({
+                "volatility_estimator": comparison.volatility_estimator,
+                "annualized_volatility": comparison.annualized_realized_volatility,
+                "fair_up_probability": comparison.fair_up_probability,
+                "up_edge": comparison.up_edge.edge,
+                "down_edge": comparison.down_edge.edge,
+                "model_outcome": comparison.paper_outcome,
+                "model_error_buffer": comparison.model_error_buffer,
+            })
         entry_block_reasons: list[str] = []
         if model_outcome and option_iv_status != "IV_VALID":
             quality_flags.append("PAPER_ENTRY_REALIZED_VOL_FALLBACK")
@@ -254,6 +320,7 @@ class RealtimeBaselineEvaluator:
             **common,
             fair_up_probability=assessment.fair_up_probability,
             annualized_realized_volatility=assessment.annualized_realized_volatility,
+            comparison_models=tuple(comparison_models),
             prior_close=assessment.prior_close,
             up_edge=assessment.up_edge.edge,
             down_edge=assessment.down_edge.edge,

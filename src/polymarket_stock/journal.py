@@ -322,6 +322,7 @@ class FirstSignalCalibrationObservation:
     iv_regime: str
     spot_provider: str
     threshold_distance_bps: float | None
+    volatility_estimator: str = "CLOSE_TO_CLOSE"
 
 
 @dataclass(frozen=True)
@@ -981,6 +982,7 @@ class ShadowJournal:
                 iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
                 spot_provider=str(payload.get("spot_provider") or "unknown"),
                 threshold_distance_bps=threshold_distance_bps,
+                volatility_estimator=str(payload.get("volatility_estimator") or "CLOSE_TO_CLOSE"),
             ))
         return tuple(observations)
 

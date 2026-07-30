@@ -29,6 +29,20 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertEqual(result.paper_entry_eligible, result.model_outcome is not None)
         self.assertAlmostEqual(result.model_error_buffer, 0.02)
 
+    def test_dual_mode_records_comparison_without_second_paper_outcome(self) -> None:
+        result = self.evaluator.evaluate(
+            now=self.now, spot=101.0, up_ask=0.50, down_ask=0.50,
+            up_bid=0.49, down_bid=0.49, spot_age_seconds=0.2, book_age_seconds=0.1,
+            stream_ready=True, trigger_reasons=("FINNHUB_TRADE",),
+        )
+        payload = result.as_payload()
+        self.assertEqual(result.volatility_estimator, "CLOSE_TO_CLOSE")
+        self.assertEqual(len(payload["comparison_models"]), 1)
+        comparison = payload["comparison_models"][0]
+        self.assertEqual(comparison["volatility_estimator"], "EWMA")
+        self.assertIn("fair_up_probability", comparison)
+        self.assertNotIn("paper_outcome", comparison)
+
     def test_stale_or_incomplete_state_is_recorded_without_signal(self) -> None:
         result = self.evaluator.evaluate(
             now=self.now, spot=101.0, up_ask=None, down_ask=None,

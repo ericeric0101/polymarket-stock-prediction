@@ -129,6 +129,11 @@ with the user's own account before marking any source as live-grade.
 4. Keep up to 18 active markets for shadow collection. Storage is not expected
    to be a constraint because depth is stored only at bounded research events;
    portfolio selection remains capped separately.
+5. Collect volatility-model comparison data using one supervisor process. Keep
+   `CLOSE_TO_CLOSE` as the primary paper-decision model and record `EWMA`
+   (`decay=0.94`) under each realtime evaluation's `comparison_models` payload.
+   Do not run two independent supervisors for this comparison because that
+   duplicates streams and paper positions.
 
 ## Repository and CWD SOP
 
@@ -252,7 +257,7 @@ order submission, or an intraday exit strategy.
 | 3.18 Independent option-pricing validation | Complete: local Black-Scholes-Merton and CRR binomial calculations cross-check quote inputs and recover midpoint IV. | No provider, scrape, journal write, supervisor dependency, or entry path exists; every result is explicitly research-only. |
 | 3.19 Remote calendar resilience | Complete: Finnhub calendar timeouts are converted to an explicit unavailable data gate, with a 60-second per-process cooldown. | A failed remote calendar never terminates the supervisor or silently permits a paper entry. |
 | 3.20 Checkpoint buffer calibration research | Complete: only checkpoints captured within five minutes of their scheduled New York time are calibration-eligible; `buffer-sweep` replays one hold-to-settlement entry per market-day and `walk-forward-buffer-sweep` selects only on earlier dates. The supervisor uses a fixed 2% buffer for IV-backed and explicitly labelled realized-volatility-fallback paper entries. | Research reports never alter supervisor thresholds automatically. Buffer selection requires independent later-day validation, not same-day tick count or historical win-rate maximization. |
-| 3.14 Test and rollout | In progress: deterministic unit coverage is added for core lifecycle behavior and contract/data-quality gates. | Run the supervisor through multiple market sessions before relying on paper-entry results. |
+| 3.14 Test and rollout | In progress: deterministic unit coverage is added for core lifecycle behavior, contract/data-quality gates, and dual volatility-model comparison. | Run the supervisor through multiple market sessions before relying on paper-entry results; compare settled primary versus EWMA outcomes out of sample. |
 
 ### Phase 3: Verifiable Research
 

@@ -12,7 +12,7 @@ from pathlib import Path
 import csv
 from typing import Callable, Mapping
 
-from .baseline import DailyClose
+from .baseline import DailyBar, DailyClose
 from .http import get_json
 
 
@@ -36,6 +36,21 @@ class YahooDailyCloseSeries:
             writer.writeheader()
             for close in self.closes:
                 writer.writerow({"Date": close.date, "Close": close.close})
+
+
+@dataclass(frozen=True)
+class YahooDailyBarSeries:
+    symbol: str
+    bars: tuple[DailyBar, ...]
+    provider: str = "YAHOO_CHART_NON_SETTLEMENT"
+
+    def write_csv(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("Date", "Open", "High", "Low", "Close"))
+            writer.writeheader()
+            for bar in self.bars:
+                writer.writerow({"Date": bar.date, "Open": bar.open, "High": bar.high, "Low": bar.low, "Close": bar.close})
 
 
 @dataclass(frozen=True)
@@ -77,6 +92,25 @@ class YahooChartClient:
         )
         return YahooDailyCloseSeries(symbol.upper(), _parse_chart_response(response))
 
+    def daily_bars(self, symbol: str, *, start_date: date, end_date: date) -> YahooDailyBarSeries:
+        if not symbol.strip():
+            raise ValueError("symbol is required")
+        if end_date < start_date:
+            raise ValueError("end_date must be on or after start_date")
+        start_at = datetime.combine(start_date, time.min, tzinfo=UTC)
+        end_at = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
+        response = self._get_json(
+            f"{YAHOO_CHART_URL}/{symbol.upper()}",
+            {
+                "period1": int(start_at.timestamp()),
+                "period2": int(end_at.timestamp()),
+                "interval": "1d",
+                "events": "history",
+                "includeAdjustedClose": "false",
+            },
+        )
+        return YahooDailyBarSeries(symbol.upper(), _parse_bar_chart_response(response))
+
     def intraday_spots(self, symbol: str, *, start_at: datetime, end_at: datetime) -> YahooIntradaySpotSeries:
         if not symbol.strip():
             raise ValueError("symbol is required")
@@ -113,6 +147,30 @@ def _parse_chart_response(payload: object) -> tuple[DailyClose, ...]:
     if not values:
         raise YahooPayloadError("Yahoo chart response has no usable closes")
     return tuple(values)
+
+
+def _parse_bar_chart_response(payload: object) -> tuple[DailyBar, ...]:
+    try:
+        result = payload["chart"]["result"][0]  # type: ignore[index]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+        opens, highs, lows, closes = quote["open"], quote["high"], quote["low"], quote["close"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise YahooPayloadError("Yahoo chart OHLC response is invalid") from error
+    arrays = (timestamps, opens, highs, lows, closes)
+    if not all(isinstance(values, list) for values in arrays) or len({len(values) for values in arrays}) != 1:
+        raise YahooPayloadError("Yahoo chart OHLC arrays must be same-length lists")
+    bars = []
+    for timestamp, open_, high, low, close in zip(timestamps, opens, highs, lows, closes):
+        values = (open_, high, low, close)
+        if not isinstance(timestamp, (int, float)) or not all(isinstance(value, (int, float)) and value > 0 for value in values):
+            continue
+        if low > high or not low <= open_ <= high or not low <= close <= high:
+            continue
+        bars.append(DailyBar(datetime.fromtimestamp(float(timestamp), tz=UTC).date().isoformat(), float(open_), float(high), float(low), float(close)))
+    if not bars:
+        raise YahooPayloadError("Yahoo chart response has no usable OHLC bars")
+    return tuple(bars)
 
 
 def _parse_intraday_chart_response(payload: object, start_at: datetime, end_at: datetime) -> tuple[tuple[datetime, float], ...]:
