@@ -74,8 +74,11 @@ class DebouncedReevaluation:
         self._callback = callback
         self._reasons: set[str] = set()
         self._task: asyncio.Task[None] | None = None
+        self._closed = False
 
     def notify(self, reason: str) -> None:
+        if self._closed:
+            return
         self._reasons.add(reason)
         if self._task and not self._task.done():
             self._task.cancel()
@@ -84,15 +87,33 @@ class DebouncedReevaluation:
     async def _flush(self) -> None:
         try:
             await asyncio.sleep(self._delay_seconds)
+            if self._closed:
+                return
+            reasons = sorted(self._reasons)
+            self._reasons.clear()
+            await _emit(self._callback, {
+                "event_type": "SHADOW_REEVALUATION_REQUESTED", "reasons": reasons,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            })
         except asyncio.CancelledError:
             return
-        reasons = sorted(self._reasons)
-        self._reasons.clear()
-        await _emit(self._callback, {"event_type": "SHADOW_REEVALUATION_REQUESTED", "reasons": reasons, "recorded_at": datetime.now(UTC).isoformat()})
+        except KeyboardInterrupt:
+            # A second Ctrl+C can interrupt a callback while asyncio is draining
+            # stream tasks. It is a normal shutdown path, not an unhandled task error.
+            return
 
     async def close(self) -> None:
-        if self._task:
-            await self._task
+        self._closed = True
+        self._reasons.clear()
+        task = self._task
+        self._task = None
+        if task and not task.done():
+            task.cancel()
+        if task:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 @dataclass(frozen=True)

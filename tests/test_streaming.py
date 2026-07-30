@@ -5,12 +5,30 @@ from datetime import UTC, datetime
 import unittest
 
 from polymarket_stock.streaming import (
-    FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, SpotQuote,
+    DebouncedReevaluation, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream,
+    ShadowStreamCoordinator, SpotQuote,
     _has_finnhub_trade, _has_pyth_price, run_with_reconnect,
 )
 
 
 class StreamingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_debouncer_close_cancels_a_pending_callback(self) -> None:
+        events = []
+        debouncer = DebouncedReevaluation(1.0, events.append)
+        debouncer.notify("TEST")
+        await debouncer.close()
+        await asyncio.sleep(0)
+        self.assertEqual(events, [])
+
+    async def test_debouncer_treats_keyboard_interrupt_during_flush_as_shutdown(self) -> None:
+        def interrupted_callback(_payload):
+            raise KeyboardInterrupt
+
+        debouncer = DebouncedReevaluation(0.001, interrupted_callback)
+        debouncer.notify("TEST")
+        await asyncio.sleep(0.01)
+        await debouncer.close()
+
     async def test_coordinator_debounces_spot_and_book_updates(self) -> None:
         events = []
 
