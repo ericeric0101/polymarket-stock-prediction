@@ -60,6 +60,31 @@ class JournalTests(unittest.TestCase):
                 ).fetchone()
         self.assertEqual(row, ("market-1", "TSLA", 0.51, "NO_PAPER_TRADE"))
 
+    def test_dashboard_rows_exclude_prior_day_contracts(self) -> None:
+        def candidate(market_id: str, symbol: str, end_date: str) -> MarketCandidate:
+            return MarketCandidate.from_gamma_payload({
+                "id": market_id, "question": f"{symbol} Up or Down?", "slug": market_id,
+                "description": "Pyth close terms", "resolutionSource": "https://pyth.example",
+                "endDate": end_date, "outcomes": '["Up", "Down"]',
+                "clobTokenIds": '["up-token", "down-token"]',
+            })
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            for market_id, symbol, end_date in (
+                ("prior", "AAPL", "2026-07-29T20:00:00Z"),
+                ("current", "TSLA", "2026-07-30T20:00:00Z"),
+            ):
+                journal.upsert_market_candidate(candidate(market_id, symbol, end_date))
+                journal.record_realtime_evaluation({
+                    "evaluated_at": "2026-07-30T15:00:00+00:00", "market_id": market_id,
+                    "symbol": symbol, "spot": 100.0, "up_ask": 0.50, "down_ask": 0.50,
+                    "fair_up_probability": 0.51, "signal_status": "NO_PAPER_TRADE", "skip_reasons": [],
+                })
+            rows = journal.dashboard_rows(18, now=datetime(2026, 7, 30, 15, tzinfo=UTC))
+        self.assertEqual([row["market_id"] for row in rows], ["current"])
+
     def test_bounded_spot_observations_and_comparisons_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.db"

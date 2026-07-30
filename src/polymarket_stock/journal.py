@@ -1036,12 +1036,18 @@ class ShadowJournal:
             "win_rate": correct / settled_markets if settled_markets else None,
         }
 
-    def dashboard_rows(self, limit: int = 18) -> tuple[Mapping[str, object], ...]:
+    def dashboard_rows(
+        self, limit: int = 18, *, now: datetime | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
+        """Return the latest rows for contracts resolving on the current NY date."""
+        ny_date = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York")).date().isoformat()
         with _database_connection(self.path) as connection:
             rows = connection.execute(
-                """SELECT payload_json FROM realtime_evaluations
-                WHERE id IN (SELECT MAX(id) FROM realtime_evaluations GROUP BY market_id)
-                ORDER BY evaluated_at DESC LIMIT ?""", (limit,)
+                """SELECT evaluation.payload_json FROM realtime_evaluations AS evaluation
+                JOIN market_candidates AS candidate ON candidate.market_id = evaluation.market_id
+                WHERE evaluation.id IN (SELECT MAX(id) FROM realtime_evaluations GROUP BY market_id)
+                  AND date(candidate.end_date) = ?
+                ORDER BY evaluation.evaluated_at DESC LIMIT ?""", (ny_date, limit)
             ).fetchall()
         return tuple(json.loads(str(row[0])) for row in rows)
 
