@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+import tempfile
 import unittest
 
 from polymarket_stock.baseline import DailyClose
 from polymarket_stock.equity_contracts import parse_daily_equity_close_contract
-from polymarket_stock.market_discovery import MarketCandidate
+from polymarket_stock.journal import ShadowJournal
+from polymarket_stock.market_discovery import MarketCandidate, MarketSettlement
 from polymarket_stock.realtime import RealtimeBaselineEvaluator
 from polymarket_stock.streaming import ShadowStreamCoordinator, SpotQuote
-from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, _pyth_primary_risk_reasons, select_active_candidates, symbol_from_candidate
+from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, MultiMarketShadowSupervisor, _pyth_primary_risk_reasons, select_active_candidates, symbol_from_candidate
 
 
 def _candidate(market_id: str, symbol: str, end_date: str) -> MarketCandidate:
@@ -73,3 +76,31 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         await coordinator.close()
         self.assertEqual(coordinator.latest_spots["TSLA"], 101.0)
         self.assertEqual(coordinator.latest_best_asks["one-up"], 0.50)
+
+    async def test_full_settlement_reconciliation_records_paper_and_model_outcomes(self) -> None:
+        class SettledGamma:
+            def get_market_settlement(self, market_id: str) -> MarketSettlement:
+                return MarketSettlement(market_id, True, "UP", {"closed": True, "outcomePrices": "[\"1\", \"0\"]"})
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            journal.record_realtime_evaluation({
+                "evaluated_at": self.now.isoformat(), "market_id": "market-1", "symbol": "TSLA",
+                "spot": 100.0, "up_ask": 0.50, "down_ask": 0.50, "fair_up_probability": 0.60,
+                "model_outcome": "UP", "signal_status": "PAPER_UP", "skip_reasons": [],
+            })
+            position, _ = journal.open_paper_position(
+                market_id="market-1", symbol="TSLA", outcome="UP", entry_ask=0.50,
+                fair_probability=0.60, model_version="test", payload={}, fee_rate=0.04,
+            )
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal, log_path=Path(directory) / "events.jsonl", spot_provider="finnhub",
+                gamma_client=SettledGamma(),
+            )
+            await supervisor.reconcile_settlements()
+            settled = next(item for item in journal.list_paper_positions() if item.position_id == position.position_id)
+            outcome = journal.get_market_settlement_outcome("market-1")
+        self.assertEqual(settled.status, "SETTLED")
+        self.assertEqual(settled.settlement_outcome, "UP")
+        self.assertEqual(outcome, "UP")

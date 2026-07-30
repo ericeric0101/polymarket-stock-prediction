@@ -191,7 +191,10 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
     dashboard_parser.add_argument("--daily-entry-limit", type=int, default=3)
     dashboard_parser.add_argument("--once", action="store_true", help="print one plain-text snapshot instead of opening the live dashboard")
-    subparsers.add_parser("settle-paper-positions", help="one-shot official settlement reconciliation for open paper positions")
+    subparsers.add_parser(
+        "settle-paper-positions",
+        help="one-shot official reconciliation for open paper positions and model observations",
+    )
     alpaca_parser = subparsers.add_parser("snapshot-alpaca-options", help="store free Alpaca indicative option quotes")
     alpaca_parser.add_argument("--symbols", required=True, help="comma-separated OCC option symbols, maximum 100")
     validation_parser = subparsers.add_parser("validate-option-pricing", help="offline BSM/binomial option-pricing cross-check; never creates a signal")

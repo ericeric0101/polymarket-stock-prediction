@@ -262,8 +262,7 @@ class MultiMarketShadowSupervisor:
         """Discover current candidates, settle completed positions, and reconcile streams."""
 
         now = datetime.now(UTC)
-        await self._settle_open_positions()
-        await self._reconcile_evaluation_settlements()
+        await self.reconcile_settlements()
         report = await asyncio.to_thread(
             self.gamma.discover_active_equity_candidates,
             tag_slugs=("stocks", "equities"),
@@ -719,9 +718,15 @@ class MultiMarketShadowSupervisor:
                 self.event_sink("EVALUATION_MARKET_SETTLED", {"market_id": market_id, "settlement_outcome": outcome})
 
     async def settle_open_positions(self) -> None:
-        """Public one-shot settlement reconciliation used by the CLI and scheduler."""
+        """Backward-compatible entry point for a full official settlement reconciliation."""
+
+        await self.reconcile_settlements()
+
+    async def reconcile_settlements(self) -> None:
+        """Reconcile open paper positions and all eligible model observations."""
 
         await self._settle_open_positions()
+        await self._reconcile_evaluation_settlements()
 
     async def _reconcile_streams(self) -> None:
         token_ids = tuple(sorted(token for runtime in self.runtimes.values() for token in runtime.token_ids))
@@ -792,6 +797,9 @@ class MultiMarketShadowSupervisor:
                     return
                 await asyncio.sleep(wait_seconds)
         finally:
+            # A process stopped after the close should still persist any official
+            # resolution already published before its next scheduled refresh.
+            await self.reconcile_settlements()
             await self._stop_paper_batch()
             await self._stop_streams()
 
