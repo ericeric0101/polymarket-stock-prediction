@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from math import log, sqrt
 from statistics import mean
 from typing import Iterable, Mapping
+from zoneinfo import ZoneInfo
 
 from .fees import estimate_taker_fee_usdc
-from .journal import BufferSweepObservation, ExecutionObservation, SpotSourceComparison
+from .journal import BufferSweepObservation, ExecutionObservation, SpotSourceComparison, StoredSpotObservation
+
+
+NEW_YORK = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,16 @@ class VolatilityComparisonSummary:
 
 
 @dataclass(frozen=True)
+class IntradayVolatilitySummary:
+    checkpoint_paths: int
+    history_comparisons: int
+    high_regime_count: int
+    median_intraday_annualized_volatility: float | None
+    mean_intraday_to_daily_model_ratio: float | None
+    by_checkpoint: Mapping[str, Mapping[str, float | int | None]]
+
+
+@dataclass(frozen=True)
 class ExitHorizonSummary:
     horizon: str
     positions: int
@@ -70,6 +85,7 @@ class StrategyDiagnosticsReport:
     execution: ExecutionQualitySummary
     spot_divergence: SpotDivergenceSummary
     volatility: VolatilityComparisonSummary
+    intraday_volatility: IntradayVolatilitySummary
     exits: tuple[ExitHorizonSummary, ...]
 
     def as_payload(self) -> Mapping[str, object]:
@@ -80,13 +96,15 @@ class StrategyDiagnosticsReport:
             "execution": asdict(self.execution),
             "spot_divergence": asdict(self.spot_divergence),
             "volatility": asdict(self.volatility),
+            "intraday_volatility": asdict(self.intraday_volatility),
             "exits": [asdict(item) for item in self.exits],
         }
 
 
 def strategy_diagnostics(
     checkpoints: Iterable[BufferSweepObservation], executions: Iterable[ExecutionObservation],
-    comparisons: Iterable[SpotSourceComparison], *, requested_shares: float = 10,
+    comparisons: Iterable[SpotSourceComparison], *, spots: Iterable[StoredSpotObservation] = (),
+    requested_shares: float = 10,
 ) -> StrategyDiagnosticsReport:
     checkpoint_items = tuple(checkpoints)
     benchmarks = direction_benchmarks(checkpoint_items)
@@ -110,6 +128,7 @@ def strategy_diagnostics(
         execution=execution_quality(execution_items, requested_shares=requested_shares),
         spot_divergence=spot_divergence_summary(comparisons),
         volatility=volatility_comparison_summary(checkpoint_items),
+        intraday_volatility=intraday_volatility_summary(spots, checkpoint_items),
         exits=exit_horizon_replay(execution_items, checkpoint_items, requested_shares=requested_shares),
     )
 
@@ -232,6 +251,81 @@ def volatility_comparison_summary(
             }
             for estimator, values in sorted(by_estimator_values.items())
         },
+    )
+
+
+def intraday_volatility_summary(
+    spots: Iterable[StoredSpotObservation], checkpoints: Iterable[BufferSweepObservation], *,
+    high_regime_ratio: float = 1.5,
+) -> IntradayVolatilitySummary:
+    """Compare partial-session Pyth realized volatility with prior matching checkpoints."""
+
+    paths: dict[tuple[str, str], list[StoredSpotObservation]] = {}
+    for spot in spots:
+        local_date = spot.observed_at.astimezone(NEW_YORK).date().isoformat()
+        paths.setdefault((spot.symbol.upper(), local_date), []).append(spot)
+    for values in paths.values():
+        values.sort(key=lambda item: item.observed_at)
+
+    history: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    checkpoint_values: dict[str, list[tuple[float, float | None, float | None, bool]]] = {}
+    all_intraday: list[float] = []
+    all_model_ratios: list[float] = []
+    history_comparisons = 0
+    high_regime_count = 0
+    ordered = sorted(
+        checkpoints,
+        key=lambda item: (item.checkpoint_date, item.checkpoint_name, item.symbol, item.evaluated_at),
+    )
+    for item in ordered:
+        samples = [
+            sample for sample in paths.get((item.symbol.upper(), item.checkpoint_date), ())
+            if sample.observed_at <= item.evaluated_at
+        ]
+        prices = [sample.price for sample in samples if sample.price > 0]
+        if len(prices) < 3:
+            continue
+        realized_variance = sum(log(current / previous) ** 2 for previous, current in zip(prices, prices[1:]))
+        intraday_annualized = sqrt(realized_variance * 252)
+        model_ratio = (
+            intraday_annualized / item.annualized_volatility
+            if item.annualized_volatility is not None and item.annualized_volatility > 0 else None
+        )
+        history_key = (item.symbol.upper(), item.checkpoint_name)
+        prior = [value for date, value in history.get(history_key, ()) if date < item.checkpoint_date]
+        prior_mean = mean(prior) if prior else None
+        history_ratio = intraday_annualized / prior_mean if prior_mean is not None and prior_mean > 0 else None
+        high_regime = history_ratio is not None and history_ratio >= high_regime_ratio
+        if history_ratio is not None:
+            history_comparisons += 1
+            high_regime_count += int(high_regime)
+        if not any(date == item.checkpoint_date for date, _ in history.get(history_key, ())):
+            history.setdefault(history_key, []).append((item.checkpoint_date, intraday_annualized))
+        checkpoint_values.setdefault(item.checkpoint_name, []).append(
+            (intraday_annualized, model_ratio, history_ratio, high_regime)
+        )
+        all_intraday.append(intraday_annualized)
+        if model_ratio is not None:
+            all_model_ratios.append(model_ratio)
+
+    by_checkpoint = {}
+    for checkpoint_name, values in sorted(checkpoint_values.items()):
+        model_ratios = [value[1] for value in values if value[1] is not None]
+        history_ratios = [value[2] for value in values if value[2] is not None]
+        by_checkpoint[checkpoint_name] = {
+            "paths": len(values),
+            "mean_intraday_annualized_volatility": mean(value[0] for value in values),
+            "mean_intraday_to_daily_model_ratio": mean(model_ratios) if model_ratios else None,
+            "history_comparisons": len(history_ratios),
+            "mean_same_checkpoint_history_ratio": mean(history_ratios) if history_ratios else None,
+            "high_regime_count": sum(value[3] for value in values),
+        }
+    return IntradayVolatilitySummary(
+        checkpoint_paths=len(all_intraday), history_comparisons=history_comparisons,
+        high_regime_count=high_regime_count,
+        median_intraday_annualized_volatility=_percentile(sorted(all_intraday), 0.5),
+        mean_intraday_to_daily_model_ratio=mean(all_model_ratios) if all_model_ratios else None,
+        by_checkpoint=by_checkpoint,
     )
 
 

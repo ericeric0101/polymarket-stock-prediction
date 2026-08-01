@@ -293,7 +293,7 @@ polymarket-stock strategy-diagnostics --shares 10 --output data/strategy_diagnos
 
 `walk-forward-top-five` fits binned probability shrinkage on training dates only, searches checkpoint, buffer, and minimum-edge combinations, caps each day at five entries, and applies the frozen policy to later validation dates. `--raw-probabilities` provides an explicit uncalibrated comparison. It never forces five entries.
 
-`strategy-diagnostics` compares model direction with the market favorite, spot versus Pyth threshold, and market-majority baselines. It also reports top-five-depth VWAP, delayed-entry slippage, fresh Pyth/cross-source divergence, primary-versus-EWMA probability disagreement, and executable-bid exit markouts. The source report samples one stored comparison per minute and excludes stale or timestamp-missing pairs; the original per-second rows remain in SQLite. All PnL includes frozen taker fees where available and remains shadow research.
+`strategy-diagnostics` compares model direction with the market favorite, spot versus Pyth threshold, and market-majority baselines. It also reports top-five-depth VWAP, delayed-entry slippage, fresh Pyth/cross-source divergence, primary-versus-EWMA probability disagreement, partial-session Pyth realized volatility versus prior matching checkpoints, and executable-bid exit markouts. The source report samples one stored comparison per minute and excludes stale or timestamp-missing pairs; the original per-second rows remain in SQLite. All PnL includes frozen taker fees where available and remains shadow research.
 
 Fresh cross-source differences below the existing 0.5% hard gate now add a bounded model-error buffer, including Pyth confidence. A realized-volatility fallback signal is recorded but cannot open a paper position when the primary and comparison volatility models disagree on direction or by at least ten probability points.
 
@@ -530,7 +530,7 @@ polymarket-stock strategy-diagnostics --shares 10 --output data/strategy_diagnos
 
 `walk-forward-top-five` 的機率校正只使用 training dates，接著挑選 checkpoint、buffer 與 minimum edge，再把完全鎖定的策略套到 validation dates。每天是「最多五筆」，不會為了湊滿五筆強迫交易；`--raw-probabilities` 可輸出未校正對照。
 
-`strategy-diagnostics` 同時比較模型方向、市場熱門方向、spot 相對 Pyth threshold 與市場多數方向，並分析 top-five depth VWAP、延遲成交 slippage、Pyth/Finnhub 新鮮報價差、CLOSE_TO_CLOSE/EWMA 分歧，以及使用可成交 bid 的 1/5/15/30 分鐘 exit 回放。跨來源報價以每分鐘一筆規則抽樣並排除 stale/缺 timestamp 的 pair，逐秒原始資料仍完整保留。
+`strategy-diagnostics` 同時比較模型方向、市場熱門方向、spot 相對 Pyth threshold 與市場多數方向，並分析 top-five depth VWAP、延遲成交 slippage、Pyth/Finnhub 新鮮報價差、CLOSE_TO_CLOSE/EWMA 分歧、Pyth 當日 realized volatility 相對過往同 checkpoint 的異常，以及使用可成交 bid 的 1/5/15/30 分鐘 exit 回放。跨來源報價以每分鐘一筆規則抽樣並排除 stale/缺 timestamp 的 pair，逐秒原始資料仍完整保留。
 
 未達 0.5% hard gate 的新鮮跨來源誤差與 Pyth confidence 會增加 bounded model-error buffer。realized-vol fallback 若與 comparison volatility model 方向不同或 fair probability 相差至少 10 個百分點，仍保留觀察，但不建立 paper position。
 

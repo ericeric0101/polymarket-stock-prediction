@@ -681,7 +681,9 @@ def main() -> None:
     elif arguments.command == "strategy-diagnostics":
         report = strategy_diagnostics(
             journal.list_buffer_sweep_observations(), journal.list_execution_observations(),
-            journal.list_spot_source_comparisons(sample_every_seconds=60), requested_shares=arguments.shares,
+            journal.list_spot_source_comparisons(sample_every_seconds=60),
+            spots=journal.list_spot_observations(source="PYTH_HERMES", sample_every_seconds=60),
+            requested_shares=arguments.shares,
         ).as_payload()
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))

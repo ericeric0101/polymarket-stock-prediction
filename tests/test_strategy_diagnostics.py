@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import unittest
 
-from polymarket_stock.journal import BufferSweepObservation, ExecutionObservation, SpotSourceComparison
+from polymarket_stock.journal import (
+    BufferSweepObservation, ExecutionObservation, SpotSourceComparison, StoredSpotObservation,
+)
 from polymarket_stock.strategy_diagnostics import (
     book_vwap, direction_benchmarks, execution_quality, exit_horizon_replay,
-    spot_divergence_summary, volatility_comparison_summary,
+    intraday_volatility_summary, spot_divergence_summary, volatility_comparison_summary,
 )
 
 
@@ -15,13 +17,14 @@ NOW = datetime(2026, 7, 30, 16, tzinfo=UTC)
 
 def checkpoint(
     market_id: str = "one", *, fair_up: float = 0.7, outcome: str = "UP",
-    spot: float = 101, threshold: float = 100,
+    spot: float = 101, threshold: float = 100, evaluated_at: datetime = NOW,
+    checkpoint_date: str = "2026-07-30", annualized_volatility: float | None = None,
 ) -> BufferSweepObservation:
     return BufferSweepObservation(
-        market_id=market_id, symbol=market_id, checkpoint_date="2026-07-30", checkpoint_name="1200_EDT",
-        evaluated_at=NOW, fair_up_probability=fair_up, up_ask=0.6, down_ask=0.4,
+        market_id=market_id, symbol=market_id, checkpoint_date=checkpoint_date, checkpoint_name="1200_EDT",
+        evaluated_at=evaluated_at, fair_up_probability=fair_up, up_ask=0.6, down_ask=0.4,
         up_taker_fee=0.01, down_taker_fee=0.01, winning_outcome=outcome,
-        spot=spot, price_to_beat=threshold,
+        spot=spot, price_to_beat=threshold, annualized_volatility=annualized_volatility,
         comparison_models=({"volatility_estimator": "EWMA", "fair_up_probability": 0.4},),
     )
 
@@ -80,3 +83,24 @@ class StrategyDiagnosticsTests(unittest.TestCase):
         report = exit_horizon_replay((entry, markout), (checkpoint(),), requested_shares=10)[0]
         assert report.liquid_positions == 1
         assert report.total_exit_pnl < report.total_hold_pnl
+
+    def test_intraday_volatility_uses_only_prior_matching_checkpoint_history(self) -> None:
+        day_one = datetime(2026, 7, 29, 16, tzinfo=UTC)
+        spots = (
+            StoredSpotObservation(day_one.replace(minute=0), "PYTH_HERMES", "ONE", 100.00),
+            StoredSpotObservation(day_one.replace(minute=1), "PYTH_HERMES", "ONE", 100.01),
+            StoredSpotObservation(day_one.replace(minute=2), "PYTH_HERMES", "ONE", 100.02),
+            StoredSpotObservation(NOW.replace(minute=0), "PYTH_HERMES", "ONE", 100.00),
+            StoredSpotObservation(NOW.replace(minute=1), "PYTH_HERMES", "ONE", 101.00),
+            StoredSpotObservation(NOW.replace(minute=2), "PYTH_HERMES", "ONE", 102.00),
+        )
+        checkpoints = (
+            checkpoint(evaluated_at=day_one.replace(minute=3), checkpoint_date="2026-07-29", annualized_volatility=0.2),
+            checkpoint(evaluated_at=NOW.replace(minute=3), annualized_volatility=0.2),
+        )
+        summary = intraday_volatility_summary(spots, checkpoints)
+        assert summary.checkpoint_paths == 2
+        assert summary.history_comparisons == 1
+        assert summary.high_regime_count == 1
+        assert summary.mean_intraday_to_daily_model_ratio is not None
+        assert summary.by_checkpoint["1200_EDT"]["high_regime_count"] == 1

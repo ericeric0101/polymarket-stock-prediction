@@ -399,6 +399,15 @@ class SpotSourceComparison:
     pyth_published_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class StoredSpotObservation:
+    observed_at: datetime
+    source: str
+    symbol: str
+    price: float
+    published_at: datetime | None = None
+
+
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 DATABASE_COMMIT_RETRY_SECONDS = (0.05, 0.15, 0.45)
 
@@ -959,6 +968,30 @@ class ShadowJournal:
             fair_probability=_optional_float(row[9]), best_bid=_optional_float(row[10]),
             best_ask=_optional_float(row[11]), fee_rate=_optional_float(row[12]),
             book_payload=json.loads(str(row[13])), evaluation_payload=json.loads(str(row[14])),
+        ) for row in rows)
+
+    def list_spot_observations(
+        self, *, source: str | None = None, sample_every_seconds: int = 1,
+    ) -> tuple[StoredSpotObservation, ...]:
+        if sample_every_seconds < 1:
+            raise ValueError("sample_every_seconds must be positive")
+        query = "SELECT observed_at, source, symbol, price, published_at FROM spot_observations"
+        conditions = []
+        parameters: list[object] = []
+        if source:
+            conditions.append("source = ?")
+            parameters.append(source.upper())
+        if sample_every_seconds > 1:
+            conditions.append("unixepoch(observed_at) % ? = 0")
+            parameters.append(sample_every_seconds)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY observed_at, id"
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(StoredSpotObservation(
+            observed_at=datetime.fromisoformat(str(row[0])), source=str(row[1]), symbol=str(row[2]),
+            price=float(row[3]), published_at=datetime.fromisoformat(str(row[4])) if row[4] else None,
         ) for row in rows)
 
     def list_spot_source_comparisons(self, *, sample_every_seconds: int = 1) -> tuple[SpotSourceComparison, ...]:
