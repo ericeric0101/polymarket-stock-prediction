@@ -50,7 +50,7 @@ def render_dashboard(
         cells = [_plain_checkpoint_cell(checkpoints.get(name), now=now) for name in CHECKPOINT_NAMES]
         lines.append(
             f"{str(row.get('symbol', '-'))[:6]:<7} {cells[0]:<25} {cells[1]:<25} {cells[2]:<25} "
-            f"{_plain_latest_recommendation(checkpoints, now=now)}"
+            f"{_plain_latest_recommendation(checkpoints, row=row)}"
         )
     lines.extend(_plain_daily_portfolio_summary(
         positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
@@ -130,7 +130,7 @@ def _rich_dashboard(
             _checkpoint_text("1200_EDT", checkpoints.get("1200_EDT"), now=ny_now),
             _checkpoint_text("1400_EDT", checkpoints.get("1400_EDT"), now=ny_now),
             _checkpoint_text("1530_EDT", checkpoints.get("1530_EDT"), now=ny_now),
-            _latest_recommendation_text(checkpoints),
+            _latest_recommendation_text(checkpoints, row=row),
         )
     if not rows:
         table.add_row("-", Text("PENDING", style="dim"), Text("PENDING", style="dim"),
@@ -253,31 +253,43 @@ def _latest_checkpoint(checkpoints: Mapping[str, Mapping[str, object]]) -> tuple
     return None
 
 
-def _latest_recommendation(checkpoints: Mapping[str, Mapping[str, object]]) -> tuple[str, str]:
+def _latest_recommendation(
+    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+) -> tuple[str, str]:
     latest = _latest_checkpoint(checkpoints)
     if latest is None:
         return "WAIT", "Waiting for 12:00 EDT"
     name, payload = latest
-    outcome, _probability, ask, edge = _checkpoint_direction(payload)
+    outcome, _probability, checkpoint_ask, edge = _checkpoint_direction(payload)
     limit = _recommended_limit(payload, outcome)
     blocks = payload.get("paper_entry_block_reasons") or []
-    detail = f"{outcome} now {_format_contract_price(ask)} / <= {_format_contract_price(limit)}"
-    if payload.get("paper_outcome") == outcome:
-        suffix = f"  edge {edge:+.1%}" if edge is not None else ""
-        return "ENTER", f"{name[:4]} {detail}{suffix}"
+    current_ask_value = row.get("up_ask" if outcome == "UP" else "down_ask") if row else None
+    current_ask = float(current_ask_value) if current_ask_value is not None else checkpoint_ask
+    stream_is_live = bool(row and row.get("stream_ready") and not row.get("skip_reasons"))
+    price_label = "live" if stream_is_live else "last" if row else "ask@cp"
+    detail = f"{name[:4]} {outcome} {price_label} {_format_contract_price(current_ask)} <= {_format_contract_price(limit)}"
     if blocks:
         return "SKIP", f"{name[:4]} {outcome} blocked: {blocks[0]}"
-    return "SKIP", f"{name[:4]} wait {detail}"
+    if payload.get("paper_outcome") == outcome:
+        suffix = f"  edge@cp {edge:+.1%}" if edge is not None else ""
+        if current_ask is not None and limit is not None and current_ask <= limit:
+            return "ENTER", detail + suffix
+        return "WAIT", detail + suffix
+    return "SKIP", detail
 
 
-def _latest_recommendation_text(checkpoints: Mapping[str, Mapping[str, object]]) -> Text:
-    action, detail = _latest_recommendation(checkpoints)
-    style = "bold green" if action == "ENTER" else "yellow" if action == "SKIP" else "dim"
+def _latest_recommendation_text(
+    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+) -> Text:
+    action, detail = _latest_recommendation(checkpoints, row=row)
+    style = "bold green" if action == "ENTER" else "yellow" if action == "SKIP" else "cyan"
     return Text(f"{action}  {detail}", style=style)
 
 
-def _plain_latest_recommendation(checkpoints: Mapping[str, Mapping[str, object]], *, now: datetime) -> str:
-    action, detail = _latest_recommendation(checkpoints)
+def _plain_latest_recommendation(
+    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+) -> str:
+    action, detail = _latest_recommendation(checkpoints, row=row)
     return f"{action} {detail}"
 
 

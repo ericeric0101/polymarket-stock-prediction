@@ -112,3 +112,12 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(action, "SKIP")
         self.assertIn("UP", detail)
         self.assertAlmostEqual(_recommended_limit(payload, "UP"), 0.367)
+
+    def test_live_ask_above_checkpoint_limit_changes_enter_to_wait(self) -> None:
+        payload = checkpoint_payload()
+        action, detail = _latest_recommendation(
+            {"1200_EDT": payload},
+            row={"up_ask": 0.70, "stream_ready": True, "skip_reasons": []},
+        )
+        self.assertEqual(action, "WAIT")
+        self.assertIn("live 0.70 <= 0.66", detail)
