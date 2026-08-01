@@ -5,7 +5,7 @@ import unittest
 
 from polymarket_stock.journal import BufferSweepObservation
 from polymarket_stock.top5_walk_forward import (
-    TopFivePolicy, run_top_five_policy, top_five_policies, walk_forward_top_five_policy,
+    TopFivePolicy, TrainingProbabilityCalibrator, run_top_five_policy, top_five_policies, walk_forward_top_five_policy,
 )
 
 
@@ -36,6 +36,17 @@ class TopFiveWalkForwardTests(unittest.TestCase):
         )
         self.assertEqual(result.selected_trades, 5)
         self.assertEqual(result.wins, 5)
+
+    def test_training_calibrator_leaves_sparse_bands_raw_and_shrinks_supported_bands(self) -> None:
+        sparse = TrainingProbabilityCalibrator.fit((
+            _observation("one", "2026-07-20", "1200_EDT", 0.85, "DOWN"),
+        ))
+        self.assertEqual(sparse.transform(0.85), 0.85)
+        supported = TrainingProbabilityCalibrator.fit(tuple(
+            _observation(str(index), f"2026-07-{20 + index:02d}", "1200_EDT", 0.85, "DOWN")
+            for index in range(5)
+        ))
+        self.assertLess(supported.transform(0.85), 0.85)
 
     def test_validation_day_cannot_change_selected_policy(self) -> None:
         observations = [

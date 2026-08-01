@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from statistics import mean
 from typing import Iterable, Mapping
@@ -18,6 +18,7 @@ class TopFivePolicy:
     buffer: float
     minimum_edge: float
     max_daily_entries: int
+    probability_calibration: str = "RAW"
 
     def as_payload(self) -> Mapping[str, object]:
         return {
@@ -25,6 +26,7 @@ class TopFivePolicy:
             "buffer": self.buffer,
             "minimum_edge": self.minimum_edge,
             "max_daily_entries": self.max_daily_entries,
+            "probability_calibration": self.probability_calibration,
         }
 
 
@@ -129,13 +131,15 @@ def parse_probability_values(value: str) -> tuple[float, ...]:
 
 def top_five_policies(
     *, checkpoint_groups: Iterable[tuple[str, ...]], buffers: Iterable[float], minimum_edges: Iterable[float],
-    max_daily_entries: int,
+    max_daily_entries: int, probability_calibration: str = "RAW",
 ) -> tuple[TopFivePolicy, ...]:
     if max_daily_entries < 1:
         raise ValueError("max_daily_entries must be positive")
+    if probability_calibration not in {"RAW", "TRAINING_BINNED_SHRINKAGE"}:
+        raise ValueError("unknown probability calibration")
     policies = tuple(
         TopFivePolicy(checkpoints=checkpoints, buffer=buffer, minimum_edge=minimum_edge,
-                      max_daily_entries=max_daily_entries)
+                      max_daily_entries=max_daily_entries, probability_calibration=probability_calibration)
         for checkpoints in checkpoint_groups
         for buffer in buffers
         for minimum_edge in minimum_edges
@@ -145,8 +149,36 @@ def top_five_policies(
     return policies
 
 
+@dataclass(frozen=True)
+class TrainingProbabilityCalibrator:
+    wins_by_band: Mapping[int, int]
+    samples_by_band: Mapping[int, int]
+    minimum_band_samples: int = 5
+    prior_strength: int = 20
+
+    @classmethod
+    def fit(cls, observations: Iterable[BufferSweepObservation]) -> "TrainingProbabilityCalibrator":
+        wins: dict[int, int] = {}
+        samples: dict[int, int] = {}
+        for item in observations:
+            band = _probability_band(item.fair_up_probability)
+            samples[band] = samples.get(band, 0) + 1
+            wins[band] = wins.get(band, 0) + int(item.winning_outcome == "UP")
+        return cls(wins, samples)
+
+    def transform(self, raw_probability: float) -> float:
+        band = _probability_band(raw_probability)
+        sample_size = self.samples_by_band.get(band, 0)
+        if sample_size < self.minimum_band_samples:
+            return raw_probability
+        return (
+            self.wins_by_band.get(band, 0) + self.prior_strength * raw_probability
+        ) / (sample_size + self.prior_strength)
+
+
 def run_top_five_policy(
     observations: Iterable[BufferSweepObservation], *, policy: TopFivePolicy,
+    calibrator: TrainingProbabilityCalibrator | None = None,
 ) -> TopFivePolicyResult:
     """Replay an executable, chronological, maximum-five-entries-per-day policy."""
 
@@ -166,6 +198,8 @@ def run_top_five_policy(
             for item in by_date_and_checkpoint.get((checkpoint_date, checkpoint_name), ()):
                 if item.market_id in entered_markets:
                     continue
+                if calibrator is not None:
+                    item = replace(item, fair_up_probability=calibrator.transform(item.fair_up_probability))
                 trade = _candidate_trade(item, policy.buffer, policy.minimum_edge)
                 if trade is not None:
                     candidates.append(trade)
@@ -209,7 +243,18 @@ def walk_forward_top_five_policy(
         validation_dates = dates[start + training_days:start + training_days + validation_days]
         training_items = tuple(item for item in items if item.checkpoint_date in training_dates)
         validation_items = tuple(item for item in items if item.checkpoint_date in validation_dates)
-        training_results = [run_top_five_policy(training_items, policy=policy) for policy in policy_values]
+        calibrator = (
+            TrainingProbabilityCalibrator.fit(training_items)
+            if any(policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" for policy in policy_values)
+            else None
+        )
+        training_results = [
+            run_top_five_policy(
+                training_items, policy=policy,
+                calibrator=calibrator if policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" else None,
+            )
+            for policy in policy_values
+        ]
         eligible = [result for result in training_results if result.selected_trades >= minimum_training_trades]
         if not eligible:
             windows.append(TopFiveWalkForwardWindow(training_dates, validation_dates, None, None, None))
@@ -224,14 +269,24 @@ def walk_forward_top_five_policy(
                 -len(result.policy.checkpoints),
             ),
         )
-        validation_result = run_top_five_policy(validation_items, policy=selected.policy)
+        validation_result = run_top_five_policy(
+            validation_items, policy=selected.policy,
+            calibrator=(
+                calibrator if selected.policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" else None
+            ),
+        )
         windows.append(TopFiveWalkForwardWindow(
             training_dates, validation_dates, selected.policy, selected, validation_result,
         ))
     return TopFiveWalkForwardReport("READY", len(dates), training_days, validation_days, len(policy_values), tuple(windows))
 
 
+def _probability_band(probability: float) -> int:
+    return min(9, max(0, int(probability * 10)))
+
+
 __all__ = [
-    "TopFivePolicy", "TopFivePolicyResult", "checkpoint_sets", "parse_checkpoint_sets", "parse_probability_values",
+    "TopFivePolicy", "TopFivePolicyResult", "TrainingProbabilityCalibrator", "checkpoint_sets",
+    "parse_checkpoint_sets", "parse_probability_values",
     "run_top_five_policy", "top_five_policies", "walk_forward_top_five_policy",
 ]

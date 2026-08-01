@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import unittest
+from unittest.mock import patch
 
 from polymarket_stock.baseline import DailyClose
-from polymarket_stock.realtime import RealtimeBaselineEvaluator
+from polymarket_stock.realtime import RealtimeBaselineEvaluator, volatility_models_disagree
 
 
 class RealtimeBaselineEvaluatorTests(unittest.TestCase):
@@ -28,6 +29,11 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertEqual(result.paper_outcome, result.model_outcome)
         self.assertEqual(result.paper_entry_eligible, result.model_outcome is not None)
         self.assertAlmostEqual(result.model_error_buffer, 0.02)
+
+    def test_volatility_disagreement_detects_direction_and_large_probability_gap(self) -> None:
+        self.assertTrue(volatility_models_disagree(0.70, ({"fair_up_probability": 0.49},)))
+        self.assertTrue(volatility_models_disagree(0.70, ({"fair_up_probability": 0.59},)))
+        self.assertFalse(volatility_models_disagree(0.70, ({"fair_up_probability": 0.65},)))
 
     def test_dual_mode_records_comparison_without_second_paper_outcome(self) -> None:
         result = self.evaluator.evaluate(
@@ -81,6 +87,18 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertEqual(result.paper_outcome, "UP")
         self.assertTrue(result.paper_entry_eligible)
         self.assertIn("PAPER_ENTRY_REALIZED_VOL_FALLBACK", result.quality_flags)
+
+    def test_fallback_volatility_disagreement_blocks_entry_but_preserves_model_signal(self) -> None:
+        with patch("polymarket_stock.realtime.volatility_models_disagree", return_value=True):
+            result = self.evaluator.evaluate(
+                now=self.now, spot=101.0, up_ask=0.01, down_ask=0.99, up_bid=0.005, down_bid=0.98,
+                spot_age_seconds=0.2, book_age_seconds=0.1, stream_ready=True,
+                trigger_reasons=("FINNHUB_TRADE",), option_quality_flags=("OPTION_IV_UNAVAILABLE",),
+            )
+        self.assertEqual(result.model_outcome, "UP")
+        self.assertIsNone(result.paper_outcome)
+        self.assertFalse(result.paper_entry_eligible)
+        self.assertIn("VOLATILITY_MODEL_DISAGREEMENT", result.paper_entry_block_reasons)
 
     def test_valid_option_iv_permits_paper_entry_eligibility(self) -> None:
         result = self.evaluator.evaluate(

@@ -12,7 +12,7 @@ from polymarket_stock.journal import ShadowJournal
 from polymarket_stock.market_discovery import MarketCandidate, MarketSettlement
 from polymarket_stock.realtime import RealtimeBaselineEvaluator
 from polymarket_stock.streaming import ShadowStreamCoordinator, SpotQuote
-from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, MultiMarketShadowSupervisor, _pyth_primary_risk_reasons, select_active_candidates, symbol_from_candidate
+from polymarket_stock.supervisor import ActiveMarket, MultiMarketRouter, MultiMarketShadowSupervisor, _cross_source_uncertainty_buffer, _pyth_primary_risk_reasons, select_active_candidates, symbol_from_candidate
 
 
 def _candidate(market_id: str, symbol: str, end_date: str) -> MarketCandidate:
@@ -54,6 +54,13 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_pyth_primary_risk_reasons(self.now, None, 15), ("PYTH_SPOT_UNAVAILABLE",))
         self.assertEqual(_pyth_primary_risk_reasons(self.now, stale_pyth, 15), ("PYTH_SPOT_STALE",))
         self.assertEqual(_pyth_primary_risk_reasons(self.now, SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now), 15), ())
+
+    def test_fresh_cross_source_difference_adds_bounded_model_buffer(self) -> None:
+        pyth = SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now, 0.01)
+        finnhub = SpotQuote("FINNHUB", "TSLA", 100.25, self.now, self.now)
+        buffer = _cross_source_uncertainty_buffer(self.now, pyth, finnhub, 15)
+        self.assertGreater(buffer, 0.0025)
+        self.assertLess(buffer, 0.02)
 
     async def test_shared_router_dispatches_spot_and_books_to_owning_market(self) -> None:
         candidate = _candidate("one", "TSLA", self.future)

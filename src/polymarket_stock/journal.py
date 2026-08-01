@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from contextlib import contextmanager
 import hashlib
@@ -357,6 +357,46 @@ class BufferSweepObservation:
     up_taker_fee: float | None
     down_taker_fee: float | None
     winning_outcome: str
+    spot: float | None = None
+    price_to_beat: float | None = None
+    up_bid: float | None = None
+    down_bid: float | None = None
+    annualized_volatility: float | None = None
+    cross_source_difference: float | None = None
+    comparison_models: tuple[Mapping[str, object], ...] = ()
+    payload: Mapping[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ExecutionObservation:
+    observed_at: datetime
+    signal_id: str | None
+    observation_kind: str
+    market_id: str
+    symbol: str
+    outcome: str
+    token_id: str
+    spot: float | None
+    price_to_beat: float | None
+    fair_probability: float | None
+    best_bid: float | None
+    best_ask: float | None
+    fee_rate: float | None
+    book_payload: Mapping[str, object]
+    evaluation_payload: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class SpotSourceComparison:
+    observed_at: datetime
+    symbol: str
+    primary_source: str
+    primary_price: float
+    pyth_price: float
+    pyth_confidence: float | None
+    difference_bps: float
+    primary_published_at: datetime | None = None
+    pyth_published_at: datetime | None = None
 
 
 DATABASE_BUSY_TIMEOUT_MS = 5_000
@@ -885,6 +925,7 @@ class ShadowJournal:
         observations = []
         for row in rows:
             payload = json.loads(str(row[8]))
+            comparison_models = payload.get("comparison_models")
             observations.append(BufferSweepObservation(
                 market_id=str(row[0]), symbol=str(row[1]), checkpoint_date=str(row[2]), checkpoint_name=str(row[3]),
                 evaluated_at=datetime.fromisoformat(str(row[4])), fair_up_probability=float(row[5]),
@@ -892,8 +933,53 @@ class ShadowJournal:
                 down_ask=float(row[7]) if row[7] is not None else None,
                 up_taker_fee=_payload_execution_fee(payload, "up"),
                 down_taker_fee=_payload_execution_fee(payload, "down"), winning_outcome=str(row[9]),
+                spot=_optional_float(payload.get("spot")),
+                price_to_beat=_optional_float(payload.get("price_to_beat")),
+                up_bid=_optional_float(payload.get("up_bid")), down_bid=_optional_float(payload.get("down_bid")),
+                annualized_volatility=_optional_float(payload.get("annualized_realized_volatility")),
+                cross_source_difference=_optional_float(payload.get("cross_source_difference")),
+                comparison_models=tuple(
+                    dict(item) for item in comparison_models if isinstance(item, Mapping)
+                ) if isinstance(comparison_models, list) else (),
+                payload=payload,
             ))
         return tuple(observations)
+
+    def list_execution_observations(self) -> tuple[ExecutionObservation, ...]:
+        query = """SELECT observed_at, signal_id, observation_kind, market_id, symbol, outcome, token_id,
+            spot, price_to_beat, fair_probability, best_bid, best_ask, fee_rate,
+            book_payload_json, evaluation_payload_json
+          FROM execution_observations ORDER BY observed_at, id"""
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query).fetchall()
+        return tuple(ExecutionObservation(
+            observed_at=datetime.fromisoformat(str(row[0])), signal_id=str(row[1]) if row[1] else None,
+            observation_kind=str(row[2]), market_id=str(row[3]), symbol=str(row[4]), outcome=str(row[5]),
+            token_id=str(row[6]), spot=_optional_float(row[7]), price_to_beat=_optional_float(row[8]),
+            fair_probability=_optional_float(row[9]), best_bid=_optional_float(row[10]),
+            best_ask=_optional_float(row[11]), fee_rate=_optional_float(row[12]),
+            book_payload=json.loads(str(row[13])), evaluation_payload=json.loads(str(row[14])),
+        ) for row in rows)
+
+    def list_spot_source_comparisons(self, *, sample_every_seconds: int = 1) -> tuple[SpotSourceComparison, ...]:
+        if sample_every_seconds < 1:
+            raise ValueError("sample_every_seconds must be positive")
+        query = """SELECT observed_at, symbol, primary_source, primary_price, pyth_price,
+            pyth_confidence, difference_bps, primary_published_at, pyth_published_at FROM spot_source_comparisons"""
+        parameters: tuple[object, ...] = ()
+        if sample_every_seconds > 1:
+            query += " WHERE unixepoch(observed_at) % ? = 0"
+            parameters = (sample_every_seconds,)
+        query += " ORDER BY observed_at, id"
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(SpotSourceComparison(
+            observed_at=datetime.fromisoformat(str(row[0])), symbol=str(row[1]), primary_source=str(row[2]),
+            primary_price=float(row[3]), pyth_price=float(row[4]), pyth_confidence=_optional_float(row[5]),
+            difference_bps=float(row[6]),
+            primary_published_at=datetime.fromisoformat(str(row[7])) if row[7] else None,
+            pyth_published_at=datetime.fromisoformat(str(row[8])) if row[8] else None,
+        ) for row in rows)
 
     def record_contract_review(
         self, market_id: str, *, accepted: bool, reason: str, contract: Mapping[str, object] | None = None
@@ -1348,6 +1434,15 @@ def _payload_execution_fee(payload: Mapping[str, object], outcome_prefix: str) -
     except (TypeError, ValueError):
         return None
     return fee if fee >= 0 else None
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _paper_position_from_row(row: tuple[object, ...]) -> PaperPosition:

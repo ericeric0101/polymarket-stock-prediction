@@ -284,6 +284,19 @@ The live evaluator keeps a 2% base uncertainty buffer for both IV-backed and
 realized-volatility-fallback inputs. Fallback entries remain explicitly labelled
 so their outcomes can be evaluated separately before any execution decision.
 
+### Top-5 Walk-Forward and Strategy Diagnostics
+
+```zsh
+polymarket-stock walk-forward-top-five --training-days 4 --validation-days 2
+polymarket-stock strategy-diagnostics --shares 10 --output data/strategy_diagnostics.json
+```
+
+`walk-forward-top-five` fits binned probability shrinkage on training dates only, searches checkpoint, buffer, and minimum-edge combinations, caps each day at five entries, and applies the frozen policy to later validation dates. `--raw-probabilities` provides an explicit uncalibrated comparison. It never forces five entries.
+
+`strategy-diagnostics` compares model direction with the market favorite, spot versus Pyth threshold, and market-majority baselines. It also reports top-five-depth VWAP, delayed-entry slippage, fresh Pyth/cross-source divergence, primary-versus-EWMA probability disagreement, and executable-bid exit markouts. The source report samples one stored comparison per minute and excludes stale or timestamp-missing pairs; the original per-second rows remain in SQLite. All PnL includes frozen taker fees where available and remains shadow research.
+
+Fresh cross-source differences below the existing 0.5% hard gate now add a bounded model-error buffer, including Pyth confidence. A realized-volatility fallback signal is recorded but cannot open a paper position when the primary and comparison volatility models disagree on direction or by at least ten probability points.
+
 ## 繁體中文
 
 ### 用途
@@ -507,5 +520,18 @@ polymarket-stock walk-forward-probability-calibration \
 `calibrate-first-signals` reports Wilson confidence intervals as well as Brier/log loss; a high win rate alone is not calibration. `walk-forward-probability-calibration` requires 25 distinct New York dates by default and returns an explicit insufficient-data status otherwise.
 
 Sizing remains `FIXED_SMALL_POSITION_ONLY`. Kelly is always disabled by code and has no execution path. A cohort needs at least 100 settled first signals for an `OPERATOR_REVIEW_REQUIRED` status; that is not approval to trade or to use Kelly. IV-valid and realized-volatility-fallback cohorts are never pooled for this gate.
+
+### Top-5 Walk-Forward 與策略診斷
+
+```zsh
+polymarket-stock walk-forward-top-five --training-days 4 --validation-days 2
+polymarket-stock strategy-diagnostics --shares 10 --output data/strategy_diagnostics.json
+```
+
+`walk-forward-top-five` 的機率校正只使用 training dates，接著挑選 checkpoint、buffer 與 minimum edge，再把完全鎖定的策略套到 validation dates。每天是「最多五筆」，不會為了湊滿五筆強迫交易；`--raw-probabilities` 可輸出未校正對照。
+
+`strategy-diagnostics` 同時比較模型方向、市場熱門方向、spot 相對 Pyth threshold 與市場多數方向，並分析 top-five depth VWAP、延遲成交 slippage、Pyth/Finnhub 新鮮報價差、CLOSE_TO_CLOSE/EWMA 分歧，以及使用可成交 bid 的 1/5/15/30 分鐘 exit 回放。跨來源報價以每分鐘一筆規則抽樣並排除 stale/缺 timestamp 的 pair，逐秒原始資料仍完整保留。
+
+未達 0.5% hard gate 的新鮮跨來源誤差與 Pyth confidence 會增加 bounded model-error buffer。realized-vol fallback 若與 comparison volatility model 方向不同或 fair probability 相差至少 10 個百分點，仍保留觀察，但不建立 paper position。
 
 supervisor 預設使用精簡的單行人類輸出，完整 JSON 仍會寫入 `logs/shadow_bot.jsonl`。若要把 terminal 輸出也交給程式解析，加入 `--output-format json`。`dashboard` 是持續刷新的 Rich terminal UI，預設每 3 秒更新，按 `q` 或 `Ctrl+C` 離開。底部 `Daily Paper Portfolio` 會顯示紐約交易日經每日風險上限選出的最多 3 筆 paper entry、結算 W/L/PnL，以及全部已結算市場每市場第一筆模型訊號的獨立勝率；`dashboard --once` 會輸出相同內容的單次純文字快照。`replay-observations` 與 `calibrate-observations` 使用所有有有效 fair probability 且已官方結算的市場，而不是只使用 paper entries。

@@ -20,3 +20,6 @@ def test_execution_observation_persists_book_fee_and_signal_link(tmp_path: Path)
     connection.close()
     assert row[:7] == ("position-1", "MARKOUT_300S", 320.0, 318.5, 0.66, 0.68, 0.04)
     assert '"size":"15"' in row[7]
+    observation = journal.list_execution_observations()[0]
+    assert observation.signal_id == "position-1"
+    assert observation.book_payload["asks"][0]["size"] == "15"

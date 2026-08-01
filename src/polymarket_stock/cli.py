@@ -40,6 +40,7 @@ from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarke
 from .top5_walk_forward import (
     parse_checkpoint_sets, parse_probability_values, top_five_policies, walk_forward_top_five_policy,
 )
+from .strategy_diagnostics import strategy_diagnostics
 from .supervisor import MultiMarketShadowSupervisor
 from .yahoo_data import YahooChartClient, YahooPayloadError
 
@@ -208,7 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
     top_five_walk_forward_parser.add_argument("--training-days", type=int, default=4)
     top_five_walk_forward_parser.add_argument("--validation-days", type=int, default=2)
     top_five_walk_forward_parser.add_argument("--minimum-training-trades", type=int, default=5)
+    top_five_walk_forward_parser.add_argument("--raw-probabilities", action="store_true")
     top_five_walk_forward_parser.add_argument("--output", help="optional JSON report output path")
+    diagnostics_parser = subparsers.add_parser("strategy-diagnostics", help="model, execution, source, volatility, and exit diagnostics")
+    diagnostics_parser.add_argument("--shares", type=float, default=10.0)
+    diagnostics_parser.add_argument("--output", help="optional JSON report output path")
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
@@ -662,6 +667,7 @@ def main() -> None:
                 buffers=buffer_values(arguments.minimum_buffer, arguments.maximum_buffer, arguments.buffer_step),
                 minimum_edges=parse_probability_values(arguments.minimum_edges),
                 max_daily_entries=arguments.max_daily_entries,
+                probability_calibration=("RAW" if arguments.raw_probabilities else "TRAINING_BINNED_SHRINKAGE"),
             )
             report = walk_forward_top_five_policy(
                 journal.list_buffer_sweep_observations(), policies=policies,
@@ -670,6 +676,13 @@ def main() -> None:
             ).as_payload()
         except ValueError as error:
             raise SystemExit(f"walk-forward-top-five rejected arguments: {error}") from error
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "strategy-diagnostics":
+        report = strategy_diagnostics(
+            journal.list_buffer_sweep_observations(), journal.list_execution_observations(),
+            journal.list_spot_source_comparisons(sample_every_seconds=60), requested_shares=arguments.shares,
+        ).as_payload()
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))
     elif arguments.command == "settle-paper-positions":

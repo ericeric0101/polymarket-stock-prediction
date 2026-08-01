@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Mapping
+from typing import Iterable, Mapping
 
 from .baseline import DailyBar, DailyClose, annualized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline
 from .quality import relative_price_difference, us_equity_session
@@ -315,6 +315,12 @@ class RealtimeBaselineEvaluator:
             })
         entry_block_reasons: list[str] = []
         if model_outcome and option_iv_status != "IV_VALID":
+            volatility_disagreement = volatility_models_disagree(
+                assessment.fair_up_probability, comparison_models,
+            )
+            if volatility_disagreement:
+                entry_block_reasons.append("VOLATILITY_MODEL_DISAGREEMENT")
+        if model_outcome and option_iv_status != "IV_VALID":
             quality_flags.append("PAPER_ENTRY_REALIZED_VOL_FALLBACK")
         return RealtimeEvaluation(
             **common,
@@ -327,7 +333,7 @@ class RealtimeBaselineEvaluator:
             up_taker_fee=assessment.up_edge.estimated_taker_fee,
             down_taker_fee=assessment.down_edge.estimated_taker_fee,
             model_outcome=model_outcome,
-            paper_outcome=model_outcome,
+            paper_outcome=model_outcome if not entry_block_reasons else None,
             # Eligibility means an actionable paper entry, not merely that IV was valid.
             paper_entry_eligible=model_outcome is not None and not entry_block_reasons,
             paper_entry_block_reasons=tuple(entry_block_reasons),
@@ -335,3 +341,17 @@ class RealtimeBaselineEvaluator:
             trigger_reasons=trigger_reasons,
             skip_reasons=(),
         )
+
+
+def volatility_models_disagree(
+    primary_probability: float, comparison_models: Iterable[Mapping[str, object]], *, threshold: float = 0.10,
+) -> bool:
+    primary_direction_up = primary_probability >= 0.5
+    for item in comparison_models:
+        try:
+            probability = float(item["fair_up_probability"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if abs(probability - primary_probability) >= threshold or (probability >= 0.5) != primary_direction_up:
+            return True
+    return False

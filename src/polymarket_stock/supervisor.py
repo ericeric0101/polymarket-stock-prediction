@@ -455,6 +455,9 @@ class MultiMarketShadowSupervisor:
         pyth_quote = coordinator.latest_quote("PYTH_HERMES", runtime.symbol)
         comparison_quote = coordinator.latest_quote(self.spot_provider, runtime.symbol)
         pyth_primary_risk_reasons = _pyth_primary_risk_reasons(now, pyth_quote, coordinator.max_age_seconds)
+        source_uncertainty_buffer = _cross_source_uncertainty_buffer(
+            now, pyth_quote, comparison_quote, coordinator.max_age_seconds,
+        )
         evaluation = runtime.evaluator.evaluate(
             now=now,
             spot=pyth_quote.price if pyth_quote else None,
@@ -470,7 +473,7 @@ class MultiMarketShadowSupervisor:
             option_iv_age_seconds=_option_iv_age_seconds(runtime.option_surface, now),
             option_quality_flags=_current_option_quality_flags(runtime.option_surface, runtime.option_quality_flags, now),
             risk_reasons=runtime.risk_reasons + pyth_primary_risk_reasons,
-            additional_model_error_buffer=runtime.additional_model_error_buffer,
+            additional_model_error_buffer=runtime.additional_model_error_buffer + source_uncertainty_buffer,
             spot_age_seconds=_age_seconds(now, coordinator.freshness.last_spot_at),
             book_age_seconds=_age_seconds(now, coordinator.freshness.last_book_at),
             stream_ready=coordinator.freshness.ready(now),
@@ -486,6 +489,7 @@ class MultiMarketShadowSupervisor:
             "cross_check_spot_source": self.spot_provider.upper(),
             "cross_check_spot": comparison_quote.as_payload() if comparison_quote else None,
             "dual_source_gate_reasons": list(pyth_primary_risk_reasons),
+            "cross_source_model_error_buffer": source_uncertainty_buffer,
             "contract": runtime.contract.as_payload(),
             "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
         }
@@ -841,6 +845,26 @@ def _maker_quote_payload(quote: object) -> Mapping[str, object]:
         "fair_probability": getattr(quote, "fair_probability"), "theoretical_edge": getattr(quote, "theoretical_edge"),
         "touch_count": getattr(quote, "touch_count"), "cancel_reason": getattr(quote, "cancel_reason"),
     }
+
+
+def _cross_source_uncertainty_buffer(
+    now: datetime, pyth_quote: object | None, comparison_quote: object | None, maximum_age_seconds: float,
+) -> float:
+    """Convert fresh sub-gate source disagreement into a bounded probability penalty."""
+
+    if pyth_quote is None or comparison_quote is None:
+        return 0.0
+    if (
+        _quote_is_stale(now, pyth_quote, maximum_age_seconds)
+        or _quote_is_stale(now, comparison_quote, maximum_age_seconds)
+    ):
+        return 0.0
+    pyth_price = float(getattr(pyth_quote, "price"))
+    comparison_price = float(getattr(comparison_quote, "price"))
+    relative_difference = abs(comparison_price - pyth_price) / pyth_price
+    confidence = getattr(pyth_quote, "confidence", None)
+    confidence_ratio = float(confidence) / pyth_price if confidence is not None else 0.0
+    return min(0.02, relative_difference + min(0.005, 3 * confidence_ratio))
 
 
 def _pyth_primary_risk_reasons(now: datetime, pyth_quote: object | None, maximum_age_seconds: float) -> tuple[str, ...]:

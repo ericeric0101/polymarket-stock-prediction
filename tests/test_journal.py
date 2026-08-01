@@ -105,9 +105,12 @@ class JournalTests(unittest.TestCase):
             with sqlite3.connect(path) as connection:
                 spot_count = connection.execute("SELECT COUNT(*) FROM spot_observations").fetchone()[0]
                 comparison = connection.execute("SELECT primary_source, difference_bps FROM spot_source_comparisons").fetchone()
+            typed = journal.list_spot_source_comparisons()[0]
         self.assertEqual(spot_count, 1)
         self.assertEqual(comparison[0], "FINNHUB")
         self.assertAlmostEqual(comparison[1], -24.9376558603)
+        self.assertEqual(typed.symbol, "TSLA")
+        self.assertAlmostEqual(typed.difference_bps, -24.9376558603)
 
     def test_contract_review_is_upserted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
