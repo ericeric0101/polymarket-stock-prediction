@@ -18,6 +18,7 @@ from .checkpoints import CHECKPOINTS
 from .calibration import calibrate_checkpoint_observations, calibrate_market_observations, calibrate_settled_positions, write_calibration_recommendation
 from .clob_history import ClobPriceHistoryClient
 from .config import Settings
+from .cross_market import cross_market_report
 from .equity_contracts import EquityContractParseError, parse_daily_equity_close_contract
 from .fees import PolymarketFeeRateClient
 from .historical_backtest import load_intraday_spots_csv, replay_daily_up_down_market
@@ -31,9 +32,12 @@ from .option_pricing_validation import OptionPricingInputs, validate_option_quot
 from .polymarket_data import ClobMarketDataClient
 from .paper_reporting import paper_performance
 from .probability_calibration import sizing_readiness, stratified_first_signal_calibration, walk_forward_probability_calibration
+from .price_ladder_collector import PriceLadderCollector
+from .price_ladder_journal import PriceLadderJournal
 from .pyth_clob_backtest import run_pyth_clob_backtest
 from .replay import replay_market_observations, replay_settled_positions
 from .reporting import make_event_sink, render_dashboard, run_live_dashboard
+from .research_web import ResearchDashboardServer
 from .realtime import RealtimeBaselineEvaluator
 from .settled_market_data import backfill_settled_market_data
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
@@ -219,6 +223,27 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
     dashboard_parser.add_argument("--daily-entry-limit", type=int, default=5)
     dashboard_parser.add_argument("--once", action="store_true", help="print one plain-text snapshot instead of opening the live dashboard")
+    ladder_discovery_parser = subparsers.add_parser(
+        "discover-price-ladders", help="discover strict Pyth closes-above contracts for isolated research",
+    )
+    ladder_discovery_parser.add_argument("--symbols", default="TSLA,NVDA")
+    ladder_collection_parser = subparsers.add_parser(
+        "collect-price-ladders", help="poll price-ladder books into isolated research tables",
+    )
+    ladder_collection_parser.add_argument("--symbols", default="TSLA,NVDA")
+    ladder_collection_parser.add_argument("--interval-seconds", type=float, default=60.0)
+    ladder_collection_parser.add_argument("--duration-seconds", type=float, default=0.0)
+    subparsers.add_parser("settle-price-ladders", help="reconcile stored ladder contracts with official outcomes")
+    ladder_report_parser = subparsers.add_parser(
+        "price-ladder-report", help="compare core checkpoints with isolated ladder probabilities",
+    )
+    ladder_report_parser.add_argument("--date", help="New York market date, YYYY-MM-DD")
+    ladder_report_parser.add_argument("--output", help="optional JSON report output path")
+    research_dashboard_parser = subparsers.add_parser(
+        "research-dashboard", help="serve a localhost-only core and price-ladder research dashboard",
+    )
+    research_dashboard_parser.add_argument("--host", default="127.0.0.1")
+    research_dashboard_parser.add_argument("--port", type=int, default=8765)
     subparsers.add_parser(
         "settle-paper-positions",
         help="one-shot official reconciliation for open paper positions and model observations",
@@ -573,6 +598,35 @@ def main() -> None:
                 journal, refresh_seconds=arguments.refresh_seconds, limit=arguments.limit,
                 daily_entry_limit=arguments.daily_entry_limit,
             )
+    elif arguments.command in {"discover-price-ladders", "collect-price-ladders", "settle-price-ladders"}:
+        symbols = tuple(
+            symbol.strip().upper()
+            for symbol in getattr(arguments, "symbols", "").split(",")
+            if symbol.strip()
+        )
+        ladder_journal = PriceLadderJournal(settings.journal_path)
+        ladder_journal.initialize()
+        collector = PriceLadderCollector(journal=ladder_journal)
+        try:
+            if arguments.command == "discover-price-ladders":
+                print(json.dumps(collector.discover_and_store(symbols=symbols).as_payload(), sort_keys=True))
+            elif arguments.command == "collect-price-ladders":
+                collector.run(
+                    symbols=symbols, interval_seconds=arguments.interval_seconds,
+                    duration_seconds=arguments.duration_seconds,
+                )
+            else:
+                print(json.dumps(collector.settle_stored_contracts(), sort_keys=True))
+        except PublicApiError as error:
+            _report_public_api_failure(settings, "PRICE_LADDER_PUBLIC_API_FAILED", error)
+    elif arguments.command == "price-ladder-report":
+        report = cross_market_report(settings.journal_path, market_date=arguments.date)
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "research-dashboard":
+        ResearchDashboardServer(
+            settings.journal_path, host=arguments.host, port=arguments.port,
+        ).serve_forever()
     elif arguments.command == "replay-settled":
         report = replay_settled_positions(journal.list_paper_positions()).as_payload()
         if arguments.output:

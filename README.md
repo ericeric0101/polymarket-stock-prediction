@@ -153,6 +153,36 @@ consolidated SIP feed; Finnhub coverage and latency should likewise be measured
 against the market before relying on it. This stream does not yet obtain live
 option IV, so it is an observation and timing layer only, not a trading signal.
 
+### Isolated Price-Ladder Research
+
+Polymarket `closes above K` markets are collected as an independent research
+sidecar. Only strict binary Yes/No contracts whose rules name the matching Pyth
+`Equity.US.<SYMBOL>/USD` close feed are accepted. The collector saves executable
+Yes/No bid, ask, top-five-level depth, immutable checkpoint snapshots, and
+official settlement in `price_ladder_*` SQLite tables. It never writes paper
+positions or changes the supervisor, Top-5 policy, entry gates, or sizing.
+
+```zsh
+# Terminal 3: discover TSLA/NVDA ladders and poll public CLOB books every minute.
+polymarket-stock collect-price-ladders \
+  --symbols TSLA,NVDA --interval-seconds 60 --duration-seconds 0
+
+# Terminal 4: separate localhost interface. Open http://127.0.0.1:8765
+polymarket-stock research-dashboard --host 127.0.0.1 --port 8765
+
+# Optional one-shot discovery, settlement reconciliation, and JSON comparison.
+polymarket-stock discover-price-ladders --symbols TSLA,NVDA
+polymarket-stock settle-price-ladders
+polymarket-stock price-ladder-report --date 2026-08-03
+```
+
+The research UI has separate `Core Up/Down`, `Price Distribution`, and
+`Cross-Market` views. Ladder probabilities are fitted with weighted monotonic
+regression because `P(close > K)` must decrease as `K` rises. The comparison
+reports only `CONFIRM`, `MIXED`, `DISAGREE`, or `UNRELIABLE`; wide books,
+insufficient strikes, an unbracketed price-to-beat, and raw monotonic violations
+remain visible. No probability averaging is used for entries.
+
 ### Current Limits
 
 - No live orders, wallet access, private keys, or execution adapter exist.
@@ -385,6 +415,34 @@ polymarket-stock stream-shadow --market-id 2958682 --symbol TSLA --spot-provider
 重複且相同的 stale-data 狀態最多每分鐘記錄一次；公開資料流因暫時網路中斷關閉時會自動重連。美股休市期間，沒有 Finnhub trade 時會顯示 `MISSING_SPOT`，這是預期的安全結果。
 
 每次 `stream-shadow` 與 supervisor 都會先重讀 journal 保存的 Gamma 原始條款，只接受目前已觀察到的 Pyth `Equity.US.<TICKER>/USD` 日收盤模板：`Up/Down` 順序、前一交易日比較、50-50 平手規則，以及 Pyth 未四捨五入收盤價都必須存在。實時評估也會輸出 `market_session`、bid/ask、資料年齡、`reference_spot` 與 `cross_source_difference`；以下狀態會被拒絕並記錄：非正常交易時段、缺少或 crossed 的任一 outcome order book、未就緒/過期 stream，以及當 Nasdaq reference quote 在 15 秒內仍和 streaming spot 相差超過 0.5%。
+
+### 獨立 Price-Ladder 研究
+
+Polymarket 的 `收盤高於固定價 K` 市場由獨立 sidecar 收集。程式只接受規則明確指定對應
+Pyth `Equity.US.<SYMBOL>/USD` 收盤 feed、outcome 為 Yes/No 的二元合約；資料會寫入獨立
+`price_ladder_*` SQLite tables，包含 Yes/No 可成交 bid/ask、前五層 depth、不可變
+checkpoint 快照與官方結算。它不會寫入 paper position，也不會改變 supervisor、Top-5、
+entry gate 或 sizing。
+
+```zsh
+# Terminal 3：每分鐘掃描並收集 TSLA / NVDA 價格階梯訂單簿
+polymarket-stock collect-price-ladders \
+  --symbols TSLA,NVDA --interval-seconds 60 --duration-seconds 0
+
+# Terminal 4：獨立 localhost 研究介面，瀏覽器開啟 http://127.0.0.1:8765
+polymarket-stock research-dashboard --host 127.0.0.1 --port 8765
+
+# 可選的一次性掃描、結算對帳與指定日期 JSON 報表
+polymarket-stock discover-price-ladders --symbols TSLA,NVDA
+polymarket-stock settle-price-ladders
+polymarket-stock price-ladder-report --date 2026-08-03
+```
+
+網頁將 `Core Up/Down`、`Price Distribution`、`Cross-Market` 分頁隔離。因為
+`P(close > K)` 理論上必須隨 strike 上升而下降，曲線使用加權 monotonic regression；
+跨市場只輸出 `CONFIRM / MIXED / DISAGREE / UNRELIABLE`。spread 太寬、strike 不足、
+price-to-beat 沒有被階梯包住或原始曲線違反單調性都會顯示，且不會把兩個市場機率直接
+平均後拿去進場。
 
 ### 目前限制
 
