@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
-from .journal import ShadowJournal, _database_connection
+from .journal import PaperPosition, ShadowJournal, _database_connection
 from .price_ladder import (
     CrossMarketDiagnostic, LadderProbabilityPoint, diagnose_cross_market, fit_monotonic_curve, probability_point,
 )
 from .price_ladder_journal import PriceLadderJournal, StoredLadderSnapshot
+from .probability_calibration import sizing_readiness
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -64,7 +65,11 @@ def cross_market_report(journal_path: Path, *, market_date: str | None = None) -
     }
 
 
-def research_dashboard_state(journal_path: Path, *, now: datetime | None = None, limit: int = 18) -> Mapping[str, object]:
+def research_dashboard_state(
+    journal_path: Path, *, now: datetime | None = None, limit: int = 18, daily_entry_limit: int = 5,
+) -> Mapping[str, object]:
+    if limit < 1 or daily_entry_limit < 1:
+        raise ValueError("research dashboard limits must be positive")
     timestamp = now or datetime.now(UTC)
     market_date = timestamp.astimezone(NEW_YORK).date().isoformat()
     core = ShadowJournal(journal_path)
@@ -97,9 +102,50 @@ def research_dashboard_state(journal_path: Path, *, now: datetime | None = None,
     return {
         "generated_at": timestamp.isoformat(), "market_date": market_date,
         "core_rows": list(core.dashboard_rows(limit, now=timestamp)),
+        "paper_portfolio": _paper_portfolio_payload(
+            core.list_paper_positions(), core.first_signal_performance(),
+            sizing_readiness(core.list_first_signal_calibration_observations()).as_payload(),
+            timestamp=timestamp, daily_entry_limit=daily_entry_limit,
+        ),
         "ladder_curves": curves,
         "cross_market": [latest_diagnostic[symbol].as_payload() for symbol in sorted(latest_diagnostic)],
         "isolation": {"affects_entries": False, "affects_sizing": False, "research_only": True},
+    }
+
+
+def _paper_portfolio_payload(
+    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object],
+    sizing: Mapping[str, object], *, timestamp: datetime, daily_entry_limit: int,
+) -> Mapping[str, object]:
+    market_date = timestamp.astimezone(NEW_YORK).date()
+    all_positions = tuple(positions)
+    selected = tuple(sorted((
+        position for position in all_positions
+        if position.included_in_calibration
+        and position.opened_at.astimezone(NEW_YORK).date() == market_date
+    ), key=lambda item: item.opened_at))
+    settled = tuple(position for position in selected if position.status == "SETTLED")
+    wins = sum(position.outcome == position.settlement_outcome for position in settled)
+    entries = []
+    for position in selected:
+        won = position.status == "SETTLED" and position.outcome == position.settlement_outcome
+        status = "OPEN" if position.status != "SETTLED" else f"{position.settlement_outcome} {'WIN' if won else 'LOSS'}"
+        entries.append({
+            "position_id": position.position_id, "opened_at": position.opened_at.isoformat(),
+            "opened_at_ny": position.opened_at.astimezone(NEW_YORK).isoformat(),
+            "symbol": position.symbol, "side": position.outcome, "contracts": position.contracts,
+            "entry_ask": position.entry_ask, "entry_fee": position.entry_fee,
+            "fair_probability": position.fair_probability, "status": status,
+            "settlement_outcome": position.settlement_outcome, "realized_pnl": position.realized_pnl,
+        })
+    return {
+        "market_date": market_date.isoformat(), "daily_entry_limit": daily_entry_limit,
+        "selected_count": len(selected), "settled_count": len(settled),
+        "wins": wins, "losses": len(settled) - wins,
+        "win_rate": wins / len(settled) if settled else None,
+        "open_positions": sum(position.status == "OPEN" for position in all_positions),
+        "settled_positions": sum(position.status == "SETTLED" for position in all_positions),
+        "entries": entries, "first_signal_performance": dict(signal_performance), "sizing": dict(sizing),
     }
 
 

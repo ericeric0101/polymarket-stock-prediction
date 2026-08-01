@@ -244,6 +244,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     research_dashboard_parser.add_argument("--host", default="127.0.0.1")
     research_dashboard_parser.add_argument("--port", type=int, default=8765)
+    research_dashboard_parser.add_argument("--limit", type=int, default=18)
+    research_dashboard_parser.add_argument("--daily-entry-limit", type=int, default=5)
     subparsers.add_parser(
         "settle-paper-positions",
         help="one-shot official reconciliation for open paper positions and model observations",
@@ -626,6 +628,7 @@ def main() -> None:
     elif arguments.command == "research-dashboard":
         ResearchDashboardServer(
             settings.journal_path, host=arguments.host, port=arguments.port,
+            limit=arguments.limit, daily_entry_limit=arguments.daily_entry_limit,
         ).serve_forever()
     elif arguments.command == "replay-settled":
         report = replay_settled_positions(journal.list_paper_positions()).as_payload()

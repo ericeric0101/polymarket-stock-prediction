@@ -36,6 +36,27 @@ class CrossMarketResearchTests(unittest.TestCase):
                     "model_version": "test",
                 },
             )
+            core.record_realtime_evaluation({
+                "evaluated_at": "2026-08-03T15:45:00+00:00", "market_id": "signal-market",
+                "symbol": "TSLA", "spot": 310, "up_ask": 0.45, "down_ask": 0.57,
+                "fair_up_probability": 0.62, "model_outcome": "UP", "signal_status": "PAPER_UP",
+                "skip_reasons": [], "model_version": "test",
+            })
+            core.record_market_settlement("signal-market", "UP", {"closed": True})
+            settled_position, _ = core.open_paper_position(
+                market_id="paper-1", symbol="TSLA", outcome="UP", entry_ask=0.45,
+                fair_probability=0.62, model_version="test", payload={}, contracts=10,
+                fee_rate=0, opened_at=datetime(2026, 8, 3, 16, 10, tzinfo=UTC),
+            )
+            core.settle_paper_position(
+                settled_position.position_id, settlement_outcome="UP", settlement_payload={"closed": True},
+                settled_at=datetime(2026, 8, 3, 20, 5, tzinfo=UTC),
+            )
+            core.open_paper_position(
+                market_id="paper-2", symbol="NVDA", outcome="DOWN", entry_ask=0.55,
+                fair_probability=0.64, model_version="test", payload={}, contracts=5,
+                fee_rate=0, opened_at=datetime(2026, 8, 3, 16, 20, tzinfo=UTC),
+            )
             ladder = PriceLadderJournal(path)
             ladder.initialize()
             for strike, probability in ((290, 0.80), (310, 0.50), (330, 0.20)):
@@ -54,14 +75,28 @@ class CrossMarketResearchTests(unittest.TestCase):
         self.assertEqual(diagnostics[0].status, "CONFIRM")
         self.assertEqual(state["isolation"]["affects_entries"], False)
         self.assertEqual(len(state["ladder_curves"]), 1)
+        portfolio = state["paper_portfolio"]
+        self.assertEqual(portfolio["selected_count"], 2)
+        self.assertEqual(portfolio["settled_count"], 1)
+        self.assertEqual((portfolio["wins"], portfolio["losses"]), (1, 0))
+        self.assertEqual(portfolio["daily_entry_limit"], 5)
+        self.assertEqual(portfolio["first_signal_performance"]["wins"], 1)
+        self.assertEqual([entry["status"] for entry in portfolio["entries"]], ["UP WIN", "OPEN"])
+        self.assertAlmostEqual(portfolio["entries"][0]["realized_pnl"], 5.5)
+        self.assertFalse(portfolio["sizing"]["kelly_enabled"])
 
     def test_web_dashboard_is_localhost_only_and_exposes_separate_views(self) -> None:
         with self.assertRaises(ValueError):
             ResearchDashboardServer(Path("journal.db"), host="0.0.0.0")
+        with self.assertRaises(ValueError):
+            ResearchDashboardServer(Path("journal.db"), daily_entry_limit=0)
         self.assertIn("Core Up/Down", HTML)
         self.assertIn("Price Distribution", HTML)
         self.assertIn("Cross-Market", HTML)
         self.assertIn("Never changes entries or sizing", HTML)
+        self.assertIn("Top Recommendations", HTML)
+        self.assertIn("Daily Paper Portfolio", HTML)
+        self.assertIn("portfolio-summary", HTML)
         self.assertIn("Asia/Taipei", HTML)
         self.assertIn("America/New_York", HTML)
         self.assertIn("taipei-time", HTML)

@@ -392,7 +392,9 @@ source .venv/bin/activate
 
 polymarket-stock research-dashboard \
   --host 127.0.0.1 \
-  --port 8765
+  --port 8765 \
+  --limit 18 \
+  --daily-entry-limit 5
 ```
 
 保持 Terminal 3 運作，然後用瀏覽器開啟 `http://127.0.0.1:8765`。頁面右上角會同時顯示
@@ -414,6 +416,10 @@ Terminal 1 與 Terminal 2 都會自動初始化並持續寫入 `.env` 所指定�
 都只讀取 DB。各程序按一次 `Ctrl+C` 即可乾淨停止。若要把每日 paper 上限從 `5` 改成
 `8`，Terminal 1 使用 `--max-daily-paper-entries 8`，Terminal 4 也要同步使用
 `--daily-entry-limit 8`，否則顯示的分母會和 bot 設定不同。
+
+localhost 的 Core 頁面已包含原本 Rich dashboard 的 checkpoint matrix、Top Recommendations、
+Daily Paper Portfolio、OPEN/SETTLED、W/L/PnL、全部 first-signal 勝率與 sizing readiness。
+因此日常運行可以不開 Terminal 4；Terminal 4 只保留作為純文字備援。
 
 ### 市場掃描與訂單簿觀察
 
