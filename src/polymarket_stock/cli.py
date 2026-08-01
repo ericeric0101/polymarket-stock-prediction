@@ -37,6 +37,9 @@ from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .realtime import RealtimeBaselineEvaluator
 from .settled_market_data import backfill_settled_market_data
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from .top5_walk_forward import (
+    parse_checkpoint_sets, parse_probability_values, top_five_policies, walk_forward_top_five_policy,
+)
 from .supervisor import MultiMarketShadowSupervisor
 from .yahoo_data import YahooChartClient, YahooPayloadError
 
@@ -186,6 +189,26 @@ def build_parser() -> argparse.ArgumentParser:
     walk_forward_parser.add_argument("--validation-days", type=int, default=5)
     walk_forward_parser.add_argument("--minimum-training-trades", type=int, default=10)
     walk_forward_parser.add_argument("--output", help="optional JSON report output path")
+    top_five_walk_forward_parser = subparsers.add_parser(
+        "walk-forward-top-five", help="select a capped daily Top-5 checkpoint policy on prior days only",
+    )
+    top_five_walk_forward_parser.add_argument(
+        "--checkpoints", default="1200_EDT,1400_EDT,1530_EDT",
+        help="chronological checkpoint names available to the policy search",
+    )
+    top_five_walk_forward_parser.add_argument(
+        "--checkpoint-sets", default="",
+        help="optional semicolon-separated policy sets, e.g. 1200_EDT;1200_EDT,1530_EDT",
+    )
+    top_five_walk_forward_parser.add_argument("--minimum-buffer", type=float, default=0.01)
+    top_five_walk_forward_parser.add_argument("--maximum-buffer", type=float, default=0.03)
+    top_five_walk_forward_parser.add_argument("--buffer-step", type=float, default=0.01)
+    top_five_walk_forward_parser.add_argument("--minimum-edges", default="0.02,0.03,0.05")
+    top_five_walk_forward_parser.add_argument("--max-daily-entries", type=int, default=5)
+    top_five_walk_forward_parser.add_argument("--training-days", type=int, default=4)
+    top_five_walk_forward_parser.add_argument("--validation-days", type=int, default=2)
+    top_five_walk_forward_parser.add_argument("--minimum-training-trades", type=int, default=5)
+    top_five_walk_forward_parser.add_argument("--output", help="optional JSON report output path")
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
@@ -628,6 +651,25 @@ def main() -> None:
             training_days=arguments.training_days, validation_days=arguments.validation_days,
             minimum_training_trades=arguments.minimum_training_trades,
         ).as_payload()
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "walk-forward-top-five":
+        checkpoints = tuple(item.strip() for item in arguments.checkpoints.split(",") if item.strip())
+        try:
+            checkpoint_groups = parse_checkpoint_sets(arguments.checkpoint_sets, allowed=checkpoints)
+            policies = top_five_policies(
+                checkpoint_groups=checkpoint_groups,
+                buffers=buffer_values(arguments.minimum_buffer, arguments.maximum_buffer, arguments.buffer_step),
+                minimum_edges=parse_probability_values(arguments.minimum_edges),
+                max_daily_entries=arguments.max_daily_entries,
+            )
+            report = walk_forward_top_five_policy(
+                journal.list_buffer_sweep_observations(), policies=policies,
+                training_days=arguments.training_days, validation_days=arguments.validation_days,
+                minimum_training_trades=arguments.minimum_training_trades,
+            ).as_payload()
+        except ValueError as error:
+            raise SystemExit(f"walk-forward-top-five rejected arguments: {error}") from error
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))
     elif arguments.command == "settle-paper-positions":
