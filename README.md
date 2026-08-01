@@ -350,6 +350,71 @@ python -m unittest discover -s tests -v
 
 若 VPN、Proxy 或資安軟體會重新簽發 HTTPS 憑證，請匯出其受信任根憑證為 PEM 檔，並在 `.env` 設定 `SSL_CERT_FILE`。不可關閉 TLS/SSL 憑證驗證。
 
+### 每日啟動指令
+
+以下程序必須在不同 Terminal 分別執行。每個 Terminal 都先進入同一個 canonical repo 並啟用
+`.venv`；不要使用 `/Users/cheng-kaihuang/Documents/Polymarket-stock`。
+
+**Terminal 1：主 bot（會自動寫入同一個 SQLite DB）**
+
+```zsh
+cd /Users/cheng-kaihuang/Polymarket-stock
+source .venv/bin/activate
+
+polymarket-stock supervise-shadow \
+  --spot-provider finnhub \
+  --volatility-estimator CLOSE_TO_CLOSE \
+  --comparison-estimators EWMA \
+  --volatility-decay 0.94 \
+  --scan-interval-seconds 900 \
+  --max-markets 18 \
+  --max-daily-paper-entries 5 \
+  --duration-seconds 0
+```
+
+**Terminal 2：TSLA / NVDA price-ladder collector（會寫入獨立 `price_ladder_*` tables）**
+
+```zsh
+cd /Users/cheng-kaihuang/Polymarket-stock
+source .venv/bin/activate
+
+polymarket-stock collect-price-ladders \
+  --symbols TSLA,NVDA \
+  --interval-seconds 60 \
+  --duration-seconds 0
+```
+
+**Terminal 3：localhost research dashboard（唯讀，不會自行啟動 bot 或 collector）**
+
+```zsh
+cd /Users/cheng-kaihuang/Polymarket-stock
+source .venv/bin/activate
+
+polymarket-stock research-dashboard \
+  --host 127.0.0.1 \
+  --port 8765
+```
+
+保持 Terminal 3 運作，然後用瀏覽器開啟 `http://127.0.0.1:8765`。頁面右上角會同時顯示
+台灣 `TW` 與紐約 `NY` 時間。電腦重開機或該 Terminal 關閉後，必須重新執行這個指令。
+
+**Terminal 4（可選）：原本的 Rich terminal dashboard**
+
+```zsh
+cd /Users/cheng-kaihuang/Polymarket-stock
+source .venv/bin/activate
+
+polymarket-stock dashboard \
+  --refresh-seconds 3 \
+  --limit 18 \
+  --daily-entry-limit 5
+```
+
+Terminal 1 與 Terminal 2 都會自動初始化並持續寫入 `.env` 所指定的 journal DB；兩種 dashboard
+都只讀取 DB。各程序按一次 `Ctrl+C` 即可乾淨停止。若要把每日 paper 上限從 `5` 改成
+`8`，Terminal 1 使用 `--max-daily-paper-entries 8`，Terminal 4 也要同步使用
+`--daily-entry-limit 8`，否則顯示的分母會和 bot 設定不同。
+
 ### 市場掃描與訂單簿觀察
 
 ```zsh
