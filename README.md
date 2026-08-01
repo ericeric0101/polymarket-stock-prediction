@@ -438,6 +438,11 @@ polymarket-stock settle-price-ladders
 polymarket-stock price-ladder-report --date 2026-08-03
 ```
 
+`localhost` 不是永久網址，也不是另一個雲端服務。每次電腦重開機或 dashboard terminal 關閉後，
+都要在 repo 內重新執行 `polymarket-stock research-dashboard --host 127.0.0.1 --port 8765`，
+並保持該 terminal 運行，再用瀏覽器開啟 `http://127.0.0.1:8765`。按 `Ctrl+C` 即停止網站；
+collector 與原本 bot 是另外的程序，不會因為開啟這個網頁而自動啟動。
+
 網頁將 `Core Up/Down`、`Price Distribution`、`Cross-Market` 分頁隔離。因為
 `P(close > K)` 理論上必須隨 strike 上升而下降，曲線使用加權 monotonic regression；
 跨市場只輸出 `CONFIRM / MIXED / DISAGREE / UNRELIABLE`。spread 太寬、strike 不足、

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from datetime import UTC, datetime
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -34,6 +36,24 @@ class PriceLadderCollectorTests(unittest.TestCase):
         self.assertEqual(len(report.contracts), 1)
         self.assertEqual(report.contracts[0].event_id, "event")
         self.assertEqual(report.rejected_markets, 2)
+
+    def test_ctrl_c_during_book_request_stops_without_traceback(self) -> None:
+        event = {"id": "event", "slug": "event-slug", "title": "TSLA closes above", "active": True,
+                 "closed": False, "markets": [candidate_payload()]}
+        gamma = PriceLadderGammaClient(get_json_fn=lambda _url, _params: {"events": [event], "next_cursor": ""})
+
+        class InterruptingClob:
+            def get_order_book(self, _token_id: str) -> OrderBookSnapshot:
+                raise KeyboardInterrupt
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = PriceLadderJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            collector = PriceLadderCollector(journal=journal, gamma=gamma, clob=InterruptingClob())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                collector.run(symbols=("TSLA",), interval_seconds=60)
+        self.assertEqual(output.getvalue(), "\nStopped cleanly.\n")
 
     def test_collection_records_checkpoint_books_without_affecting_core_tables(self) -> None:
         event = {"id": "event", "slug": "event-slug", "title": "TSLA closes above", "active": True,

@@ -162,15 +162,18 @@ class PriceLadderCollector:
     ) -> None:
         if interval_seconds <= 0 or duration_seconds < 0:
             raise ValueError("invalid ladder collection interval or duration")
-        discovery = self.discover_and_store(symbols=symbols)
-        contracts = discovery.contracts
-        started = time.monotonic()
-        while True:
-            report = self.collect_once(contracts=contracts)
-            print(json.dumps(report.as_payload(), sort_keys=True), flush=True)
-            if duration_seconds and time.monotonic() - started >= duration_seconds:
-                return
-            self.sleep(interval_seconds)
+        try:
+            discovery = self.discover_and_store(symbols=symbols)
+            contracts = discovery.contracts
+            started = time.monotonic()
+            while True:
+                report = self.collect_once(contracts=contracts)
+                print(json.dumps(report.as_payload(), sort_keys=True), flush=True)
+                if duration_seconds and time.monotonic() - started >= duration_seconds:
+                    return
+                self.sleep(interval_seconds)
+        except KeyboardInterrupt:
+            print("\nStopped cleanly.", flush=True)
 
     def settle_stored_contracts(self) -> tuple[Mapping[str, object], ...]:
         gamma = GammaMarketClient()

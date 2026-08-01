@@ -62,6 +62,10 @@ class CrossMarketResearchTests(unittest.TestCase):
         self.assertIn("Price Distribution", HTML)
         self.assertIn("Cross-Market", HTML)
         self.assertIn("Never changes entries or sizing", HTML)
+        self.assertIn("Asia/Taipei", HTML)
+        self.assertIn("America/New_York", HTML)
+        self.assertIn("taipei-time", HTML)
+        self.assertIn("new-york-time", HTML)
 
 
 if __name__ == "__main__":
