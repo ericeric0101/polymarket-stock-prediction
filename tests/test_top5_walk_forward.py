@@ -54,4 +54,3 @@ class TopFiveWalkForwardTests(unittest.TestCase):
         self.assertEqual(report.windows[0].training_dates, ("2026-07-20", "2026-07-21"))
         self.assertEqual(report.windows[0].validation_dates, ("2026-07-22",))
         self.assertEqual(report.windows[0].selected_policy.buffer, 0.01)
-
