@@ -1158,7 +1158,9 @@ class ShadowJournal:
     def dashboard_rows(
         self, limit: int = 18, *, now: datetime | None = None,
     ) -> tuple[Mapping[str, object], ...]:
-        """Return the latest rows for contracts resolving on the current NY date."""
+        """Return stable symbol rows with immutable same-day checkpoint decisions."""
+        if limit < 1:
+            raise ValueError("dashboard limit must be positive")
         ny_date = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York")).date().isoformat()
         with _database_connection(self.path) as connection:
             rows = connection.execute(
@@ -1166,9 +1168,40 @@ class ShadowJournal:
                 JOIN market_candidates AS candidate ON candidate.market_id = evaluation.market_id
                 WHERE evaluation.id IN (SELECT MAX(id) FROM realtime_evaluations GROUP BY market_id)
                   AND date(candidate.end_date) = ?
-                ORDER BY evaluation.evaluated_at DESC LIMIT ?""", (ny_date, limit)
+                ORDER BY evaluation.evaluated_at DESC""", (ny_date,)
             ).fetchall()
-        return tuple(json.loads(str(row[0])) for row in rows)
+            checkpoint_rows = connection.execute(
+                """SELECT market_id, checkpoint_name, payload_json FROM checkpoint_observations
+                WHERE checkpoint_date = ? AND eligible_for_calibration = 1
+                  AND checkpoint_name IN ('1200_EDT', '1400_EDT', '1530_EDT')
+                ORDER BY evaluated_at, id""", (ny_date,)
+            ).fetchall()
+
+        # Old journals can contain overlapping regular and after-hours contracts.
+        # Keep one stable row per symbol and prefer the regular-session contract.
+        by_symbol: dict[str, dict[str, object]] = {}
+        for row in rows:
+            payload = json.loads(str(row[0]))
+            symbol = str(payload.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            current = by_symbol.get(symbol)
+            candidate_rank = (payload.get("market_session") == "REGULAR", str(payload.get("evaluated_at") or ""))
+            current_rank = (
+                current.get("market_session") == "REGULAR", str(current.get("evaluated_at") or "")
+            ) if current else (False, "")
+            if current is None or candidate_rank > current_rank:
+                by_symbol[symbol] = payload
+
+        checkpoints_by_market: dict[str, dict[str, Mapping[str, object]]] = {}
+        for market_id, checkpoint_name, payload_json in checkpoint_rows:
+            checkpoints_by_market.setdefault(str(market_id), {})[str(checkpoint_name)] = json.loads(str(payload_json))
+        selected = []
+        for symbol in sorted(by_symbol)[:limit]:
+            payload = dict(by_symbol[symbol])
+            payload["checkpoints"] = checkpoints_by_market.get(str(payload.get("market_id")), {})
+            selected.append(payload)
+        return tuple(selected)
 
     def open_paper_position(
         self,

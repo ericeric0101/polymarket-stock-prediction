@@ -44,6 +44,7 @@ class RealtimeEvaluation:
     comparison_models: tuple[Mapping[str, object], ...]
     prior_close: float | None
     model_error_buffer: float
+    minimum_edge: float
     up_edge: float | None
     down_edge: float | None
     model_outcome: str | None
@@ -223,6 +224,7 @@ class RealtimeBaselineEvaluator:
             "daily_data_is_fresh": daily_data_is_fresh,
             "volatility_estimator": self._volatility_estimator,
             "model_error_buffer": active_model_error_buffer,
+            "minimum_edge": self._minimum_edge,
         }
         if skip_reasons:
             return RealtimeEvaluation(

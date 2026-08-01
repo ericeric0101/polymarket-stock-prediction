@@ -72,18 +72,31 @@ class JournalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
-            for market_id, symbol, end_date in (
-                ("prior", "AAPL", "2026-07-29T20:00:00Z"),
-                ("current", "TSLA", "2026-07-30T20:00:00Z"),
+            for market_id, symbol, end_date, session, evaluated_at in (
+                ("prior", "AAPL", "2026-07-29T20:00:00Z", "REGULAR", "2026-07-30T15:00:00+00:00"),
+                ("current-aapl", "AAPL", "2026-07-30T20:00:00Z", "REGULAR", "2026-07-30T15:00:00+00:00"),
+                ("current", "TSLA", "2026-07-30T20:00:00Z", "REGULAR", "2026-07-30T15:00:00+00:00"),
+                ("after", "TSLA", "2026-07-30T20:00:00Z", "AFTER_HOURS", "2026-07-30T18:00:00+00:00"),
             ):
                 journal.upsert_market_candidate(candidate(market_id, symbol, end_date))
                 journal.record_realtime_evaluation({
-                    "evaluated_at": "2026-07-30T15:00:00+00:00", "market_id": market_id,
+                    "evaluated_at": evaluated_at, "market_id": market_id,
                     "symbol": symbol, "spot": 100.0, "up_ask": 0.50, "down_ask": 0.50,
                     "fair_up_probability": 0.51, "signal_status": "NO_PAPER_TRADE", "skip_reasons": [],
+                    "market_session": session,
                 })
-            rows = journal.dashboard_rows(18, now=datetime(2026, 7, 30, 15, tzinfo=UTC))
-        self.assertEqual([row["market_id"] for row in rows], ["current"])
+            journal.record_checkpoint_observation(
+                checkpoint_date="2026-07-30", checkpoint_name="1200_EDT",
+                payload={
+                    "evaluated_at": "2026-07-30T16:00:00+00:00", "market_id": "current",
+                    "symbol": "TSLA", "fair_up_probability": 0.70, "up_ask": 0.58,
+                    "down_ask": 0.42, "up_edge": 0.08, "down_edge": -0.32,
+                    "model_outcome": "UP", "paper_outcome": "UP", "model_version": "test",
+                },
+            )
+            rows = journal.dashboard_rows(18, now=datetime(2026, 7, 30, 17, tzinfo=UTC))
+        self.assertEqual([row["market_id"] for row in rows], ["current-aapl", "current"])
+        self.assertEqual(rows[1]["checkpoints"]["1200_EDT"]["model_outcome"], "UP")
 
     def test_bounded_spot_observations_and_comparisons_are_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

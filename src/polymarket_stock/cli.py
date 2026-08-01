@@ -136,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     supervisor_parser.add_argument("--maker-reprice-minimum-price-change", type=float, default=0.02, help="minimum maker limit-price change before reprice, default 0.02")
     supervisor_parser.add_argument("--maker-minimum-quote-lifetime-seconds", type=float, default=30.0, help="minimum seconds an active maker quote remains before reprice, default 30")
     supervisor_parser.add_argument("--paper-batch-seconds", type=float, default=30.0)
-    supervisor_parser.add_argument("--max-daily-paper-entries", type=int, default=3)
+    supervisor_parser.add_argument("--max-daily-paper-entries", type=int, default=5)
     supervisor_parser.add_argument("--max-per-risk-group", type=int, default=1)
     supervisor_parser.add_argument("--max-same-direction-paper-entries", type=int, default=2)
     supervisor_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
@@ -217,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
-    dashboard_parser.add_argument("--daily-entry-limit", type=int, default=3)
+    dashboard_parser.add_argument("--daily-entry-limit", type=int, default=5)
     dashboard_parser.add_argument("--once", action="store_true", help="print one plain-text snapshot instead of opening the live dashboard")
     subparsers.add_parser(
         "settle-paper-positions",

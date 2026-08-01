@@ -7,17 +7,30 @@ from rich.console import Console
 
 from polymarket_stock.journal import PaperPosition
 from polymarket_stock.probability_calibration import sizing_readiness
-from polymarket_stock.reporting import _rich_dashboard, render_dashboard
+from polymarket_stock.reporting import _latest_recommendation, _recommended_limit, _rich_dashboard, render_dashboard
+
+
+def checkpoint_payload(
+    *, fair_up: float = 0.70, up_edge: float = 0.08, down_edge: float = -0.32,
+    model_outcome: str | None = "UP", paper_outcome: str | None = "UP",
+) -> dict[str, object]:
+    return {
+        "fair_up_probability": fair_up, "up_ask": 0.58, "down_ask": 0.42,
+        "up_edge": up_edge, "down_edge": down_edge, "model_outcome": model_outcome,
+        "paper_outcome": paper_outcome, "paper_entry_block_reasons": [],
+        "model_error_buffer": 0.02, "up_fee_rate": 0.0, "down_fee_rate": 0.0,
+    }
 
 
 class ReportingTests(unittest.TestCase):
     def test_dashboard_renders_compact_market_row(self) -> None:
         text = render_dashboard(({
-            "symbol": "TSLA", "market_id": "2958682", "market_session": "REGULAR", "spot": 380.12,
-            "up_bid": 0.48, "up_ask": 0.50, "down_bid": 0.49, "down_ask": 0.51, "skip_reasons": [],
+            "symbol": "TSLA", "market_id": "2958682", "market_session": "REGULAR",
+            "checkpoints": {"1200_EDT": checkpoint_payload()},
         },), 1, 2)
         self.assertIn("TSLA", text)
-        self.assertIn("0.48/0.50", text)
+        self.assertIn("UP 70%", text)
+        self.assertIn("ENTER", text)
 
     def test_plain_dashboard_shows_sizing_is_not_enabled(self) -> None:
         text = render_dashboard((), 0, 0, sizing=sizing_readiness(()))
@@ -29,12 +42,15 @@ class ReportingTests(unittest.TestCase):
             "symbol": "TSLA", "market_id": "2958682", "market_session": "REGULAR", "spot": 380.12,
             "up_bid": 0.48, "up_ask": 0.50, "down_bid": 0.49, "down_ask": 0.51,
             "fair_up_probability": 0.53, "option_iv": 0.40, "skip_reasons": [],
+            "checkpoints": {"1200_EDT": checkpoint_payload()},
         },), ())
         console = Console(width=150, record=True, color_system=None)
         console.print(layout)
         rendered = console.export_text()
         self.assertIn("Polymarket Stock Shadow", rendered)
-        self.assertIn("Market Monitor", rendered)
+        self.assertIn("Checkpoint Decision Matrix", rendered)
+        self.assertIn("12:00 EDT", rendered)
+        self.assertIn("ENTER", rendered)
         self.assertIn("TSLA", rendered)
 
     def test_rich_dashboard_shows_daily_portfolio_and_all_signal_metrics(self) -> None:
@@ -65,7 +81,7 @@ class ReportingTests(unittest.TestCase):
         console.print(layout)
         rendered = console.export_text()
         self.assertIn("Maker: 2", rendered)
-        self.assertIn("MAKER DOWN @ 0.52  UP @ 0.46", rendered)
+        self.assertIn("Checkpoint Decision Matrix", rendered)
 
     def test_rich_dashboard_shows_every_selected_position_up_to_eight(self) -> None:
         positions = tuple(
@@ -86,3 +102,13 @@ class ReportingTests(unittest.TestCase):
         rendered = console.export_text()
         for index in range(8):
             self.assertIn(f"SYM{index}", rendered)
+
+    def test_recommendation_uses_best_edge_side_even_below_fifty_percent(self) -> None:
+        payload = checkpoint_payload(
+            fair_up=0.407, up_edge=0.014, down_edge=-0.109,
+            model_outcome=None, paper_outcome=None,
+        )
+        action, detail = _latest_recommendation({"1200_EDT": payload})
+        self.assertEqual(action, "SKIP")
+        self.assertIn("UP", detail)
+        self.assertAlmostEqual(_recommended_limit(payload, "UP"), 0.367)

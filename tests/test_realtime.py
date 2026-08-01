@@ -29,6 +29,8 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertEqual(result.paper_outcome, result.model_outcome)
         self.assertEqual(result.paper_entry_eligible, result.model_outcome is not None)
         self.assertAlmostEqual(result.model_error_buffer, 0.02)
+        self.assertAlmostEqual(result.minimum_edge, 0.02)
+        self.assertAlmostEqual(result.as_payload()["minimum_edge"], 0.02)
 
     def test_volatility_disagreement_detects_direction_and_large_probability_gap(self) -> None:
         self.assertTrue(volatility_models_disagree(0.70, ({"fair_up_probability": 0.49},)))

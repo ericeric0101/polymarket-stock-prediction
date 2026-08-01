@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from .fees import estimate_taker_fee_usdc
 from .journal import PaperPosition, ShadowJournal
 from .logging import log_event
 from .probability_calibration import SizingReadiness, sizing_readiness
@@ -38,17 +39,19 @@ def render_dashboard(
     positions: Iterable[PaperPosition] = (), signal_performance: Mapping[str, object] | None = None,
     sizing: SizingReadiness | None = None, daily_entry_limit: int = 3,
 ) -> str:
-    lines = [f"Shadow dashboard | active markets: {len(rows)} | paper positions: {open_positions} open / {settled_positions} settled"]
-    lines.append("SYMBOL  MARKET    SESSION       SPOT       UP bid/ask   DOWN bid/ask  STATUS")
+    now = datetime.now(UTC).astimezone(NEW_YORK)
+    lines = [
+        f"Shadow dashboard | NY {now:%Y-%m-%d %H:%M:%S} | active markets: {len(rows)} | "
+        f"paper positions: {open_positions} open / {settled_positions} settled"
+    ]
+    lines.append("SYMBOL  12:00 EDT                 14:00 EDT                 15:30 EDT                 LATEST ACTION")
     for row in rows:
-        symbol = str(row.get("symbol", "-"))[:6]
-        market = str(row.get("market_id", "-"))[-6:]
-        spot = _price(row.get("spot"), 2)
-        up = f"{_price(row.get('up_bid'), 2)}/{_price(row.get('up_ask'), 2)}"
-        down = f"{_price(row.get('down_bid'), 2)}/{_price(row.get('down_ask'), 2)}"
-        reasons = row.get("skip_reasons") or []
-        status = "PAPER " + str(row.get("paper_outcome")) if row.get("paper_outcome") else (str(reasons[0]) if reasons else "OBSERVING")
-        lines.append(f"{symbol:<7} {market:<9} {str(row.get('market_session', '-')):<13} {spot:<10} {up:<12} {down:<14} {status}")
+        checkpoints = _row_checkpoints(row)
+        cells = [_plain_checkpoint_cell(checkpoints.get(name), now=now) for name in CHECKPOINT_NAMES]
+        lines.append(
+            f"{str(row.get('symbol', '-'))[:6]:<7} {cells[0]:<25} {cells[1]:<25} {cells[2]:<25} "
+            f"{_plain_latest_recommendation(checkpoints, now=now)}"
+        )
     lines.extend(_plain_daily_portfolio_summary(
         positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
     ))
@@ -93,46 +96,50 @@ def _rich_dashboard(
     open_positions = sum(getattr(position, "status") == "OPEN" for position in positions)
     settled_positions = sum(getattr(position, "status") == "SETTLED" for position in positions)
     regular = sum(row.get("market_session") == "REGULAR" for row in rows)
-    signals = sum(row.get("paper_outcome") is not None for row in rows)
+    signals = sum(
+        any(payload.get("paper_outcome") for payload in _row_checkpoints(row).values()) for row in rows
+    )
     maker_quotes = sum(len(row.get("maker_shadow_quotes") or []) for row in rows)
+    local_now = datetime.now().astimezone()
+    ny_now = datetime.now(UTC).astimezone(NEW_YORK)
+
     header = Table.grid(expand=True)
     header.add_column(ratio=1)
     header.add_column(justify="right", ratio=1)
     left = Text()
     left.append("Mode: ", style="dim")
     left.append("SHADOW", style="bold cyan")
-    left.append(f"   Markets: {len(rows)}   Regular: {regular}   Taker: {signals}   Maker: {maker_quotes}\n")
+    left.append(f"   Markets: {len(rows)}   Regular: {regular}   Checkpoint entries: {signals}   Maker: {maker_quotes}\n")
     left.append(f"Paper positions: {open_positions} open / {settled_positions} settled", style="green" if open_positions else "dim")
     right = Text()
-    right.append("Data source: ", style="dim")
-    right.append("SQLite shadow journal\n", style="cyan")
-    right.append(f"Updated: {time.strftime('%Y-%m-%d %H:%M:%S')}", style="dim")
+    right.append("Data source: SQLite shadow journal\n", style="cyan")
+    right.append(f"Local: {local_now:%Y-%m-%d %H:%M:%S %Z}\n", style="dim")
+    right.append(f"New York: {ny_now:%Y-%m-%d %H:%M:%S %Z}", style="bold cyan")
     header.add_row(left, right)
 
-    table = Table(expand=True, header_style="bold cyan")
-    table.add_column("Symbol", style="bold")
-    table.add_column("Market", style="dim")
-    table.add_column("Session")
-    table.add_column("Spot", justify="right")
-    table.add_column("Up B/A", justify="right")
-    table.add_column("Down B/A", justify="right")
-    table.add_column("Fair Up", justify="right")
-    table.add_column("IV", justify="right")
-    table.add_column("Status", ratio=2)
+    table = Table(expand=True, header_style="bold cyan", pad_edge=False)
+    table.add_column("Symbol", style="bold", no_wrap=True)
+    table.add_column("12:00 EDT", ratio=2)
+    table.add_column("14:00 EDT", ratio=2)
+    table.add_column("15:30 EDT", ratio=2)
+    table.add_column("Latest recommendation", ratio=3)
     for row in rows:
+        checkpoints = _row_checkpoints(row)
         table.add_row(
-            str(row.get("symbol", "-")), str(row.get("market_id", "-"))[-6:],
-            _session_text(str(row.get("market_session", "-"))), _price_text(row.get("spot"), 2),
-            _book_text(row.get("up_bid"), row.get("up_ask")), _book_text(row.get("down_bid"), row.get("down_ask")),
-            _probability_text(row.get("fair_up_probability")), _iv_text(row.get("option_iv")), _status_text(row),
+            str(row.get("symbol", "-")),
+            _checkpoint_text("1200_EDT", checkpoints.get("1200_EDT"), now=ny_now),
+            _checkpoint_text("1400_EDT", checkpoints.get("1400_EDT"), now=ny_now),
+            _checkpoint_text("1530_EDT", checkpoints.get("1530_EDT"), now=ny_now),
+            _latest_recommendation_text(checkpoints),
         )
     if not rows:
-        table.add_row("-", "-", "-", "-", "-", "-", "-", "-", Text("Waiting for evaluations", style="yellow"))
+        table.add_row("-", Text("PENDING", style="dim"), Text("PENDING", style="dim"),
+                      Text("PENDING", style="dim"), Text("Waiting for regular-session evaluations", style="yellow"))
 
     footer = Text()
-    footer.append("Shadow only: no wallet, signing, or order submission.  ", style="dim")
-    footer.append("Green=ready/paper  Yellow=data/session gate  Red=risk/data failure\n", style="dim")
-    footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close", style="magenta")
+    footer.append("Direction cells: side / fair / recorded ask / fee+buffer-adjusted edge.  ", style="dim")
+    footer.append("Green=entry-eligible  Yellow=skip/blocked  Dim=non-positive edge\n", style="dim")
+    footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close  |  Shadow only", style="magenta")
     today_positions = _today_selected_positions(positions)
     portfolio = _daily_portfolio_panel(
         today_positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
@@ -140,9 +147,12 @@ def _rich_dashboard(
     layout = Layout()
     layout.split_column(
         Layout(Panel(header, title="Polymarket Stock Shadow", border_style="blue"), size=5),
-        Layout(Panel(table, title="Market Monitor", border_style="green"), ratio=1),
         Layout(
-            Panel(portfolio, title="Daily Paper Portfolio", border_style="cyan"),
+            Panel(table, title=f"Checkpoint Decision Matrix - {ny_now:%Y-%m-%d} New York", border_style="green"),
+            ratio=1,
+        ),
+        Layout(
+            Panel(portfolio, title="Top Recommendations - Daily Paper Portfolio", border_style="cyan"),
             size=_daily_portfolio_height(len(today_positions), sizing is not None),
         ),
         Layout(Panel(footer, border_style="magenta"), size=3),
@@ -151,6 +161,124 @@ def _rich_dashboard(
 
 
 NEW_YORK = ZoneInfo("America/New_York")
+
+CHECKPOINT_NAMES = ("1200_EDT", "1400_EDT", "1530_EDT")
+CHECKPOINT_CLOCKS = {"1200_EDT": (12, 0), "1400_EDT": (14, 0), "1530_EDT": (15, 30)}
+DASHBOARD_MINIMUM_EDGE = 0.02
+
+
+def _row_checkpoints(row: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    value = row.get("checkpoints")
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(name): payload for name, payload in value.items() if isinstance(payload, Mapping)}
+
+
+def _checkpoint_has_passed(name: str, now: datetime) -> bool:
+    hour, minute = CHECKPOINT_CLOCKS[name]
+    return (now.hour, now.minute) >= (hour, minute)
+
+
+def _checkpoint_direction(payload: Mapping[str, object]) -> tuple[str, float, float | None, float | None]:
+    fair_up = float(payload["fair_up_probability"])
+    model_outcome = str(payload.get("model_outcome") or "")
+    if model_outcome in {"UP", "DOWN"}:
+        outcome = model_outcome
+    else:
+        up_edge = payload.get("up_edge")
+        down_edge = payload.get("down_edge")
+        if up_edge is not None and down_edge is not None and max(float(up_edge), float(down_edge)) > 0:
+            outcome = "UP" if float(up_edge) >= float(down_edge) else "DOWN"
+        else:
+            outcome = "UP" if fair_up >= 0.5 else "DOWN"
+    probability = fair_up if outcome == "UP" else 1 - fair_up
+    ask_value = payload.get("up_ask" if outcome == "UP" else "down_ask")
+    edge_value = payload.get("up_edge" if outcome == "UP" else "down_edge")
+    return (
+        outcome, probability,
+        float(ask_value) if ask_value is not None else None,
+        float(edge_value) if edge_value is not None else None,
+    )
+
+
+def _recommended_limit(payload: Mapping[str, object], outcome: str) -> float | None:
+    fair_up = float(payload["fair_up_probability"])
+    raw_probability = fair_up if outcome == "UP" else 1 - fair_up
+    conservative_probability = max(0.0, raw_probability - float(payload.get("model_error_buffer") or 0.02))
+    fee_rate_value = payload.get("up_fee_rate" if outcome == "UP" else "down_fee_rate")
+    fee_rate = float(fee_rate_value) if fee_rate_value is not None else 0.0
+    minimum_edge = float(payload.get("minimum_edge") or DASHBOARD_MINIMUM_EDGE)
+    eligible = []
+    for mills in range(1, 1000):
+        price = mills / 1000
+        fee = estimate_taker_fee_usdc(shares=1, price=price, fee_rate=fee_rate)
+        if conservative_probability - price - fee + 1e-12 >= minimum_edge:
+            eligible.append(price)
+    return max(eligible) if eligible else None
+
+
+def _format_contract_price(value: float | None) -> str:
+    if value is None:
+        return "-"
+    return f"{value:.3f}" if value < 0.01 else f"{value:.2f}"
+
+
+def _checkpoint_text(name: str, payload: Mapping[str, object] | None, *, now: datetime) -> Text:
+    if payload is None:
+        passed = _checkpoint_has_passed(name, now)
+        return Text("MISSED" if passed else "PENDING", style="red" if passed else "dim")
+    outcome, probability, ask, edge = _checkpoint_direction(payload)
+    edge_text = "-" if edge is None else f"{edge:+.1%}"
+    text = f"{outcome} {probability:.0%}  a{_format_contract_price(ask)}  e{edge_text}"
+    if payload.get("paper_outcome") == outcome:
+        return Text(text, style="bold green")
+    if payload.get("paper_entry_block_reasons"):
+        return Text(text, style="yellow")
+    return Text(text, style="cyan" if edge is not None and edge > 0 else "dim")
+
+
+def _plain_checkpoint_cell(payload: Mapping[str, object] | None, *, now: datetime) -> str:
+    if payload is None:
+        return "PENDING"
+    outcome, probability, ask, edge = _checkpoint_direction(payload)
+    edge_text = "-" if edge is None else f"{edge:+.1%}"
+    return f"{outcome} {probability:.0%} a{_format_contract_price(ask)} e{edge_text}"
+
+
+def _latest_checkpoint(checkpoints: Mapping[str, Mapping[str, object]]) -> tuple[str, Mapping[str, object]] | None:
+    for name in reversed(CHECKPOINT_NAMES):
+        payload = checkpoints.get(name)
+        if payload is not None:
+            return name, payload
+    return None
+
+
+def _latest_recommendation(checkpoints: Mapping[str, Mapping[str, object]]) -> tuple[str, str]:
+    latest = _latest_checkpoint(checkpoints)
+    if latest is None:
+        return "WAIT", "Waiting for 12:00 EDT"
+    name, payload = latest
+    outcome, _probability, ask, edge = _checkpoint_direction(payload)
+    limit = _recommended_limit(payload, outcome)
+    blocks = payload.get("paper_entry_block_reasons") or []
+    detail = f"{outcome} now {_format_contract_price(ask)} / <= {_format_contract_price(limit)}"
+    if payload.get("paper_outcome") == outcome:
+        suffix = f"  edge {edge:+.1%}" if edge is not None else ""
+        return "ENTER", f"{name[:4]} {detail}{suffix}"
+    if blocks:
+        return "SKIP", f"{name[:4]} {outcome} blocked: {blocks[0]}"
+    return "SKIP", f"{name[:4]} wait {detail}"
+
+
+def _latest_recommendation_text(checkpoints: Mapping[str, Mapping[str, object]]) -> Text:
+    action, detail = _latest_recommendation(checkpoints)
+    style = "bold green" if action == "ENTER" else "yellow" if action == "SKIP" else "dim"
+    return Text(f"{action}  {detail}", style=style)
+
+
+def _plain_latest_recommendation(checkpoints: Mapping[str, Mapping[str, object]], *, now: datetime) -> str:
+    action, detail = _latest_recommendation(checkpoints)
+    return f"{action} {detail}"
 
 
 def _plain_daily_portfolio_summary(
@@ -175,7 +303,8 @@ def _plain_daily_portfolio_summary(
         result = "OPEN" if position.status != "SETTLED" else "WIN" if position.outcome == position.settlement_outcome else "LOSS"
         pnl = "-" if position.realized_pnl is None else f"{position.realized_pnl:+.4f}"
         lines.append(
-            f"  {position.symbol:<6} {position.outcome:<4} ask {position.entry_ask:.2f} "
+            f"  {position.opened_at.astimezone(NEW_YORK):%H:%M} {position.symbol:<6} "
+            f"{position.outcome:<4} ask {position.entry_ask:.2f} "
             f"fair {position.fair_probability:.1%} {result:<4} pnl {pnl}"
         )
     if not today:
@@ -225,6 +354,7 @@ def _daily_portfolio_panel(
         Text(f"All first signals: {total_wins}/{total_settled}  win rate: {all_rate}", style="cyan"),
     )
     entries = Table(expand=True, header_style="bold cyan", box=None, pad_edge=False)
+    entries.add_column("NY Time", style="dim", no_wrap=True)
     entries.add_column("Symbol", style="bold")
     entries.add_column("Side")
     entries.add_column("Ask", justify="right")
@@ -236,6 +366,7 @@ def _daily_portfolio_panel(
         won = settled and position.outcome == position.settlement_outcome
         status = "OPEN" if not settled else f"{position.settlement_outcome} {'WIN' if won else 'LOSS'}"
         entries.add_row(
+            position.opened_at.astimezone(NEW_YORK).strftime("%H:%M"),
             position.symbol, position.outcome, f"{position.entry_ask:.2f}", f"{position.fair_probability:.1%}",
             Text(status, style="yellow" if not settled else "bold green" if won else "bold red"),
             Text(
@@ -244,7 +375,7 @@ def _daily_portfolio_panel(
             ),
         )
     if not today:
-        entries.add_row("-", "-", "-", "-", Text("No selected paper entries", style="dim"), "-")
+        entries.add_row("-", "-", "-", "-", "-", Text("No selected paper entries", style="dim"), "-")
     panel.add_row(entries)
     if sizing is not None:
         panel.add_row(Text(_sizing_summary(sizing), style="yellow"), Text("Raw fair probabilities are research-only", style="dim"))
