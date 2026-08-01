@@ -80,4 +80,3 @@ class StrategyDiagnosticsTests(unittest.TestCase):
         report = exit_horizon_replay((entry, markout), (checkpoint(),), requested_shares=10)[0]
         assert report.liquid_positions == 1
         assert report.total_exit_pnl < report.total_hold_pnl
-
