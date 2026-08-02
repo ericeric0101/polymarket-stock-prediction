@@ -4,12 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, time as wall_time, timedelta
-from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
-import time
 from typing import Mapping
 import uuid
 from zoneinfo import ZoneInfo
@@ -18,6 +16,7 @@ from .fees import estimate_taker_fee_usdc
 from .evaluation_payload import validate as validate_evaluation_payload
 from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 from .quality import observable_equity_market_date
+from .storage.sqlite import database_connection
 
 
 SCHEMA = """
@@ -435,37 +434,8 @@ class StoredSpotObservation:
     published_at: datetime | None = None
 
 
-DATABASE_BUSY_TIMEOUT_MS = 5_000
-DATABASE_COMMIT_RETRY_SECONDS = (0.05, 0.15, 0.45)
-
-
-def _is_database_locked(error: sqlite3.OperationalError) -> bool:
-    return "database is locked" in str(error).lower() or "database is busy" in str(error).lower()
-
-
-@contextmanager
-def _database_connection(path: Path):
-    """Use WAL plus bounded commit retries for independent dashboard/bot processes."""
-
-    connection = sqlite3.connect(path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1000)
-    connection.execute(f"PRAGMA busy_timeout = {DATABASE_BUSY_TIMEOUT_MS}")
-    try:
-        yield connection
-    except BaseException:
-        connection.rollback()
-        raise
-    else:
-        for attempt, delay_seconds in enumerate((0.0, *DATABASE_COMMIT_RETRY_SECONDS)):
-            if delay_seconds:
-                time.sleep(delay_seconds)
-            try:
-                connection.commit()
-                break
-            except sqlite3.OperationalError as error:
-                if not _is_database_locked(error) or attempt == len(DATABASE_COMMIT_RETRY_SECONDS):
-                    raise
-    finally:
-        connection.close()
+# Compatibility alias for external callers during the storage migration.
+_database_connection = database_connection
 
 
 class ShadowJournal:

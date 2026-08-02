@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 from typing import Mapping
 
-from .journal import _database_connection
+from .storage.sqlite import database_connection
 from .price_ladder import PriceLadderContract
 
 
@@ -100,13 +100,13 @@ class PriceLadderJournal:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.executescript(LADDER_SCHEMA)
 
     def upsert_contract(
         self, contract: PriceLadderContract, *, accepted: bool = True, reason: str = "PYTH_CLOSE_ABOVE_TEMPLATE",
     ) -> None:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO price_ladder_contracts (
                     market_id, event_id, event_slug, symbol, strike, market_date, resolves_at, pyth_feed,
@@ -148,7 +148,7 @@ class PriceLadderJournal:
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY market_date, symbol, strike"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(PriceLadderContract(
             market_id=str(row[0]), event_id=str(row[1]), event_slug=str(row[2]), symbol=str(row[3]),
@@ -165,7 +165,7 @@ class PriceLadderJournal:
     ) -> bool:
         if observed_at.tzinfo is None:
             raise ValueError("ladder observed_at must be timezone-aware")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             return connection.execute(
                 """INSERT OR IGNORE INTO price_ladder_snapshots (
                     observed_at, observed_second, market_id, symbol, market_date, checkpoint_name, strike,
@@ -197,7 +197,7 @@ class PriceLadderJournal:
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY observed_at, symbol, strike"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(StoredLadderSnapshot(
             observed_at=datetime.fromisoformat(str(row[0])), market_id=str(row[1]), symbol=str(row[2]),
@@ -209,7 +209,7 @@ class PriceLadderJournal:
         ) for row in rows)
 
     def latest_snapshot_rows(self, market_date: str) -> tuple[StoredLadderSnapshot, ...]:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT observed_at, market_id, symbol, market_date, checkpoint_name, strike,
                     yes_bid, yes_ask, no_bid, no_ask, yes_bid_depth, yes_ask_depth, no_bid_depth, no_ask_depth,
@@ -231,7 +231,7 @@ class PriceLadderJournal:
         required = ("market_id", "symbol", "checkpoint_date", "checkpoint_name", "policy_id", "shadow_action")
         if any(not str(payload.get(key, "")).strip() for key in required):
             raise ValueError("incomplete Above-X veto observation")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             return connection.execute(
                 """INSERT OR IGNORE INTO above_x_veto_observations (
                     market_id, symbol, checkpoint_date, checkpoint_name, policy_id, observed_at, shadow_action, payload_json
@@ -247,14 +247,14 @@ class PriceLadderJournal:
         if market_date:
             query += " WHERE checkpoint_date = ?"; params = (market_date,)
         query += " ORDER BY checkpoint_date, checkpoint_name, symbol"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             return tuple(json.loads(str(row[0])) for row in connection.execute(query, params).fetchall())
 
     def record_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object], *, settled_at: datetime) -> None:
         outcome = winning_outcome.upper()
         if outcome not in {"YES", "NO"} or settled_at.tzinfo is None:
             raise ValueError("invalid ladder settlement")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO price_ladder_settlements (market_id, settled_at, winning_outcome, raw_payload_json)
                 VALUES (?, ?, ?, ?) ON CONFLICT(market_id) DO UPDATE SET settled_at=excluded.settled_at,
