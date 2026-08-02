@@ -435,3 +435,4 @@ order submission, or an intraday exit strategy.
 | Date | Change | Status |
 |---|---|---|
 | 2026-08-02 | Extracted shared SQLite transaction policy, asynchronous journal writer, shared stream router, and long-running CLI handlers. `ShadowJournal` remains the compatibility facade; no live-trading capability was added. | Complete |
+| 2026-08-02 | Moved the CLI entrypoint into `commands/`, extracted journal schema, supervisor settlement reconciliation, and dependency-free shared runtime types. Public CLI and facade imports remain compatible. | Complete |

@@ -4,11 +4,17 @@ This project remains a research-only Polymarket equity observer. It does not sig
 
 ## Runtime boundaries
 
-- `cli.py` owns command parsing and routes commands to focused handlers.
+- `cli.py` is a backward-compatible facade; all command parsing and dispatch live in `commands/entrypoint.py`.
+- `commands/catalog.py` is the stable command-to-domain map used to keep market, data, research, calibration, Above-X, and operations commands discoverable.
 - `cli_runtime.py` owns long-running operator commands: the multi-market supervisor, terminal dashboard, localhost research dashboard, price-ladder collector, and settlement reconciliation.
-- `supervisor.py` owns active-market lifecycle, model evaluation, paper-entry selection, and settlement orchestration.
+- `supervisor.py` owns active-market lifecycle, model evaluation, and paper-entry selection.
+- `supervisor_settlement.py` owns official paper/model outcome reconciliation.
 - `stream_routing.py` owns fan-out from each shared public stream to its active market coordinators.
 - `streaming.py` owns WebSocket protocol handling, freshness tracking, and debouncing only. It has no SQLite-specific retry behavior.
+
+## Shared types
+
+- `domain.py` holds dependency-free runtime types shared across orchestration modules.
 
 ## Storage boundaries
 
