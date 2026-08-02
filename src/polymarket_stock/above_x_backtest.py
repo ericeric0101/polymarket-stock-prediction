@@ -12,7 +12,6 @@ from typing import Mapping
 from zoneinfo import ZoneInfo
 
 from .baseline import DailyClose, annualized_realized_volatility
-from .historical_backtest import UnderlyingSpotPoint
 from .pricing import digital_up_probability
 
 NEW_YORK = ZoneInfo("America/New_York")

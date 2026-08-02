@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from math import exp, log, sqrt
+from math import log, sqrt
 from typing import Literal
 
 from .edge import EdgeAssessment, assess_buy_edge

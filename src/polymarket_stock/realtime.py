@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Iterable, Mapping
 
 from .baseline import DailyBar, DailyClose, annualized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 import csv
-from typing import Callable, Mapping
+from typing import Callable
 
 from .baseline import DailyBar, DailyClose
 from .http import get_json

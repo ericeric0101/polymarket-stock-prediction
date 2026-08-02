@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 import unittest
 
 from polymarket_stock.buffer_sweep import buffer_values, run_buffer_sweep, walk_forward_buffer_sweep

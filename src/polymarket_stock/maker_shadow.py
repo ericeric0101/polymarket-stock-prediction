@@ -33,7 +33,6 @@ def propose_maker_buy_quote(
 
     if best_bid is None or best_ask is None:
         return None
-    values = (fair_probability, best_bid, best_ask, minimum_edge, tick_size)
     if not 0 <= fair_probability <= 1 or not 0 <= best_bid <= best_ask <= 1 or minimum_edge < 0 or tick_size <= 0:
         raise ValueError("invalid maker quote inputs")
 

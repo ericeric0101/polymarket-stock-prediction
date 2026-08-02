@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 import csv
-from typing import Callable, Mapping
+from typing import Callable
 
 from .http import get_json
 

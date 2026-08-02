@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time
 from statistics import mean
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
@@ -39,9 +39,9 @@ class CloseSourceCalibration:
 
     def as_payload(self) -> Mapping[str, object]:
         payload = asdict(self)
-        for field in ("pyth_close_at", "finnhub_observed_at", "pyth_live_observed_at"):
-            value = payload[field]
-            payload[field] = value.isoformat() if value else None
+        for timestamp_field in ("pyth_close_at", "finnhub_observed_at", "pyth_live_observed_at"):
+            value = payload[timestamp_field]
+            payload[timestamp_field] = value.isoformat() if value else None
         return payload
 
 

@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 import json
 from pathlib import Path
 import re
-from typing import Awaitable, Callable, Mapping
+from typing import Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from .baseline import DailyClose, daily_close_data_is_fresh
