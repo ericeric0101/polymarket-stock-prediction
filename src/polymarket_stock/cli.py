@@ -10,11 +10,15 @@ import os
 from pathlib import Path
 import ssl
 
+from .above_x_research import AboveXHistoricalDiscovery, above_x_coverage_report, backfill_above_x_markets, write_above_x_discovery
+from .above_x_backtest import run_above_x_backtest
+from .above_x_veto import historical_observations, sync_live_veto_shadow, walk_forward
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import DailyClose, daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_bars_csv, load_daily_closes_csv
 from .batch_backfill import backfill_discovered_markets
 from .buffer_sweep import buffer_values, run_buffer_sweep, walk_forward_buffer_sweep
 from .checkpoints import CHECKPOINTS
+from .close_source_calibration import calibrate_close_sources
 from .calibration import calibrate_checkpoint_observations, calibrate_market_observations, calibrate_settled_positions, write_calibration_recommendation
 from .clob_history import ClobPriceHistoryClient
 from .config import Settings
@@ -35,12 +39,13 @@ from .probability_calibration import sizing_readiness, stratified_first_signal_c
 from .price_ladder_collector import PriceLadderCollector
 from .price_ladder_journal import PriceLadderJournal
 from .pyth_clob_backtest import run_pyth_clob_backtest
+from .pyth_history import PythHistoryClient
 from .replay import replay_market_observations, replay_settled_positions
 from .reporting import make_event_sink, render_dashboard, run_live_dashboard
 from .research_web import ResearchDashboardServer
 from .realtime import RealtimeBaselineEvaluator
 from .settled_market_data import backfill_settled_market_data
-from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, run_with_reconnect
+from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, SpotQuote, run_with_reconnect
 from .top5_walk_forward import (
     parse_checkpoint_sets, parse_probability_values, top_five_policies, walk_forward_top_five_policy,
 )
@@ -114,6 +119,54 @@ def build_parser() -> argparse.ArgumentParser:
     pyth_clob_parser.add_argument("--minimum-training-trades", type=int, default=10)
     pyth_clob_parser.add_argument("--fee-rate", type=float, default=0.0, help="historical fee-rate assumption; 0 reports pre-fee PnL")
     pyth_clob_parser.add_argument("--output", help="optional JSON report output path")
+    above_x_discovery_parser = subparsers.add_parser(
+        "discover-above-x-history", help="discover closed Pyth closes-above markets for isolated research",
+    )
+    above_x_discovery_parser.add_argument("--symbols", default="TSLA,NVDA")
+    above_x_discovery_parser.add_argument("--date-start", help="inclusive New York market date, YYYY-MM-DD")
+    above_x_discovery_parser.add_argument("--date-end", help="inclusive New York market date, YYYY-MM-DD")
+    above_x_discovery_parser.add_argument("--page-size", type=int, default=500)
+    above_x_discovery_parser.add_argument("--max-pages", type=int, default=100)
+    above_x_discovery_parser.add_argument("--output", default="data/historical/above_x_discovery.json")
+    above_x_backfill_parser = subparsers.add_parser(
+        "backfill-above-x-history", help="download Above-X CLOB price proxies, Pyth final price, and settlement",
+    )
+    above_x_backfill_parser.add_argument("--discovery-json", default="data/historical/above_x_discovery.json")
+    above_x_backfill_parser.add_argument("--output-dir", default="data/historical/above_x")
+    above_x_backfill_parser.add_argument("--max-markets", type=int)
+    above_x_backfill_parser.add_argument("--pause-seconds", type=float, default=0.2)
+    above_x_backfill_parser.add_argument("--pyth-pause-seconds", type=float, default=2.0)
+    above_x_backfill_parser.add_argument("--pyth-data-dir", default="data/historical/90d")
+    above_x_coverage_parser = subparsers.add_parser(
+        "above-x-coverage", help="report isolated Above-X historical data coverage",
+    )
+    above_x_coverage_parser.add_argument("--discovery-json", default="data/historical/above_x_discovery.json")
+    above_x_coverage_parser.add_argument("--data-dir", default="data/historical/above_x")
+    above_x_coverage_parser.add_argument("--spot-data-dir", default="data/historical/90d")
+    above_x_coverage_parser.add_argument("--output", help="optional JSON report output path")
+    above_x_backtest_parser = subparsers.add_parser(
+        "backtest-above-x", help="replay isolated Above-X markets without changing core Up/Down policy",
+    )
+    above_x_backtest_parser.add_argument("--discovery-json", default="data/historical/above_x_discovery.json")
+    above_x_backtest_parser.add_argument("--data-dir", default="data/historical/above_x")
+    above_x_backtest_parser.add_argument("--spot-data-dir", default="data/historical/90d")
+    above_x_backtest_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    above_x_backtest_parser.add_argument("--lookback-days", type=int, default=20)
+    above_x_backtest_parser.add_argument("--output", help="optional JSON report output path")
+    above_x_veto_parser = subparsers.add_parser("walk-forward-above-x-veto", help="research-only Core 12:00 Above-X confirmation/veto walk-forward")
+    above_x_veto_parser.add_argument("--core-data-dir", default="data/historical/90d")
+    above_x_veto_parser.add_argument("--above-x-data-dir", default="data/historical/above_x")
+    above_x_veto_parser.add_argument("--discovery-json", default="data/historical/above_x_discovery.json")
+    above_x_veto_parser.add_argument("--checkpoint", choices=("1200_EDT",), default="1200_EDT")
+    above_x_veto_parser.add_argument("--buffer", type=float, default=0.02)
+    above_x_veto_parser.add_argument("--minimum-edge", type=float, default=0.02)
+    above_x_veto_parser.add_argument("--training-days", type=int, default=6)
+    above_x_veto_parser.add_argument("--validation-days", type=int, default=2)
+    above_x_veto_parser.add_argument("--minimum-training-trades", type=int, default=3)
+    above_x_veto_parser.add_argument("--output", help="optional JSON report output path")
+    above_x_veto_sync_parser = subparsers.add_parser("sync-above-x-veto-shadow", help="persist read-only Above-X Core veto diagnostics")
+    above_x_veto_sync_parser.add_argument("--minimum-strikes", type=int, default=3)
+    above_x_veto_sync_parser.add_argument("--maximum-width", type=float, default=0.30)
     nasdaq_baseline_parser = subparsers.add_parser("evaluate-nasdaq-baseline", help="automatic free Nasdaq realized-vol baseline")
     nasdaq_baseline_parser.add_argument("--market-id", required=True)
     nasdaq_baseline_parser.add_argument("--symbol", required=True)
@@ -130,6 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
     stream_parser.add_argument("--duration-seconds", type=float, default=0, help="0 runs until interrupted")
     supervisor_parser = subparsers.add_parser("supervise-shadow", help="scheduled multi-market shadow observation and paper lifecycle")
     supervisor_parser.add_argument("--spot-provider", choices=("finnhub", "alpaca"), default="finnhub")
+    supervisor_parser.add_argument(
+        "--spot-mode", choices=("PYTH_PRIMARY", "FINNHUB_ONLY"), default="PYTH_PRIMARY",
+        help="PYTH_PRIMARY uses Hermes; FINNHUB_ONLY uses Finnhub spot plus exact or estimated prior-close thresholds",
+    )
+    supervisor_parser.add_argument(
+        "--finnhub-threshold-safety-bps", type=float, default=35.0,
+        help="FINNHUB_ONLY: label an estimated threshold as near when spot is within this many bps",
+    )
     supervisor_parser.add_argument("--volatility-estimator", choices=("CLOSE_TO_CLOSE", "EWMA"), default="CLOSE_TO_CLOSE")
     supervisor_parser.add_argument("--volatility-decay", type=float, default=0.94)
     supervisor_parser.add_argument("--comparison-estimators", default="EWMA", help="comma-separated shadow comparison estimators; default EWMA")
@@ -218,6 +279,12 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics_parser = subparsers.add_parser("strategy-diagnostics", help="model, execution, source, volatility, and exit diagnostics")
     diagnostics_parser.add_argument("--shares", type=float, default=10.0)
     diagnostics_parser.add_argument("--output", help="optional JSON report output path")
+    close_calibration_parser = subparsers.add_parser(
+        "close-source-calibration", help="compare official Pyth final-minute close with captured Finnhub close-window quotes",
+    )
+    close_calibration_parser.add_argument("--market-date", required=True, help="completed New York trading date, YYYY-MM-DD")
+    close_calibration_parser.add_argument("--symbols", help="comma-separated symbols; defaults to locally captured Finnhub symbols")
+    close_calibration_parser.add_argument("--output", help="optional JSON report output path")
     dashboard_parser = subparsers.add_parser("dashboard", help="open the continuously refreshing terminal dashboard")
     dashboard_parser.add_argument("--limit", type=int, default=18)
     dashboard_parser.add_argument("--refresh-seconds", type=float, default=3.0)
@@ -350,6 +417,78 @@ def main() -> None:
         except (OSError, ValueError, PublicApiError) as error:
             raise SystemExit(f"batch-backfill-settled-markets failed: {error}") from error
         print(json.dumps(report.as_payload(), sort_keys=True))
+    elif arguments.command == "discover-above-x-history":
+        symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
+        try:
+            report = AboveXHistoricalDiscovery().discover(
+                symbols=symbols, date_start=arguments.date_start, date_end=arguments.date_end,
+                page_size=arguments.page_size, max_pages=arguments.max_pages,
+            )
+            write_above_x_discovery(Path(arguments.output), report)
+        except (OSError, ValueError, PublicApiError) as error:
+            raise SystemExit(f"discover-above-x-history failed: {error}") from error
+        print(json.dumps({
+            "market_type": "ABOVE_X", "contracts": len(report.contracts),
+            "pages_scanned": report.pages_scanned, "markets_scanned": report.markets_scanned,
+            "rejected_markets": report.rejected_markets, "output": arguments.output,
+        }, sort_keys=True))
+    elif arguments.command == "backfill-above-x-history":
+        try:
+            report = backfill_above_x_markets(
+                discovery_path=Path(arguments.discovery_json), output_dir=Path(arguments.output_dir),
+                pyth_api_key=os.getenv("PYTH_PRO_API_KEY", ""), maximum_markets=arguments.max_markets,
+                pause_seconds=arguments.pause_seconds, pyth_pause_seconds=arguments.pyth_pause_seconds,
+                pyth_data_dir=Path(arguments.pyth_data_dir),
+            )
+        except (OSError, ValueError, PublicApiError) as error:
+            raise SystemExit(f"backfill-above-x-history failed: {error}") from error
+        print(json.dumps(report.as_payload(), sort_keys=True))
+    elif arguments.command == "above-x-coverage":
+        try:
+            report = above_x_coverage_report(
+                discovery_path=Path(arguments.discovery_json), output_dir=Path(arguments.data_dir),
+                spot_data_dir=Path(arguments.spot_data_dir),
+            ).as_payload()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(f"above-x-coverage failed: {error}") from error
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "backtest-above-x":
+        try:
+            report = run_above_x_backtest(
+                discovery_path=Path(arguments.discovery_json), data_dir=Path(arguments.data_dir),
+                spot_data_dir=Path(arguments.spot_data_dir), minimum_edge=arguments.minimum_edge,
+                lookback_days=arguments.lookback_days,
+            ).as_payload()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(f"backtest-above-x failed: {error}") from error
+        _write_optional_json(arguments.output, report)
+        print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "walk-forward-above-x-veto":
+        try:
+            observations = historical_observations(
+                core_dir=Path(arguments.core_data_dir), above_x_dir=Path(arguments.above_x_data_dir),
+                discovery_path=Path(arguments.discovery_json), checkpoint_name=arguments.checkpoint,
+                buffer=arguments.buffer, minimum_edge=arguments.minimum_edge,
+            )
+            report = walk_forward(
+                observations=observations, training_days=arguments.training_days,
+                validation_days=arguments.validation_days, minimum_training_trades=arguments.minimum_training_trades,
+            ).as_payload()
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(f"walk-forward-above-x-veto failed: {error}") from error
+        _write_optional_json(arguments.output, report)
+        print(json.dumps({**report, "observation_count": len(observations)}, sort_keys=True))
+    elif arguments.command == "sync-above-x-veto-shadow":
+        from .above_x_veto import AboveXVetoPolicy
+        try:
+            rows = sync_live_veto_shadow(
+                journal_path=settings.journal_path,
+                policy=AboveXVetoPolicy("VETO_DISAGREEMENT", arguments.minimum_strikes, arguments.maximum_width),
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            raise SystemExit(f"sync-above-x-veto-shadow failed: {error}") from error
+        print(json.dumps({"written": len(rows), "rows": list(rows)}, sort_keys=True, default=str))
     elif arguments.command == "backfill-pyth-intraday-spots":
         api_key = os.getenv("PYTH_PRO_API_KEY", "")
         if not api_key:
@@ -563,6 +702,9 @@ def main() -> None:
             max_per_risk_group=arguments.max_per_risk_group,
             max_same_direction_paper_entries=arguments.max_same_direction_paper_entries,
             pyth_api_key=os.getenv("PYTH_API_KEY", ""),
+            pyth_pro_api_key=os.getenv("PYTH_PRO_API_KEY", ""),
+            spot_mode=arguments.spot_mode,
+            finnhub_threshold_safety_bps=arguments.finnhub_threshold_safety_bps,
             tradier_api_token=os.getenv("TRADIER_API_TOKEN", ""),
             polygon_api_key=os.getenv("POLYGON_API_KEY", ""),
             event_sink=make_event_sink(settings.log_path, arguments.output_format),
@@ -744,6 +886,36 @@ def main() -> None:
         ).as_payload()
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))
+    elif arguments.command == "close-source-calibration":
+        api_key = os.getenv("PYTH_PRO_API_KEY", "")
+        if not api_key:
+            raise SystemExit("close-source-calibration requires PYTH_PRO_API_KEY in .env while the trial is active")
+        try:
+            market_date = date.fromisoformat(arguments.market_date)
+        except ValueError as error:
+            raise SystemExit("close-source-calibration --market-date must be YYYY-MM-DD") from error
+        all_spots = journal.list_spot_observations()
+        finnhub_spots = tuple(
+            SpotQuote(item.source, item.symbol, item.price, item.observed_at, item.published_at)
+            for item in all_spots if item.source == "FINNHUB"
+        )
+        pyth_spots = tuple(
+            SpotQuote(item.source, item.symbol, item.price, item.observed_at, item.published_at)
+            for item in all_spots if item.source == "PYTH_HERMES"
+        )
+        symbols = (
+            tuple(item.strip().upper() for item in arguments.symbols.split(",") if item.strip())
+            if arguments.symbols else tuple(sorted({item.symbol for item in finnhub_spots}))
+        )
+        report = calibrate_close_sources(
+            client=PythHistoryClient(api_key), market_date=market_date, symbols=symbols,
+            finnhub_spots=finnhub_spots, pyth_live_spots=pyth_spots,
+        )
+        payload = report.as_payload()
+        for observation in payload["observations"]:
+            journal.record_close_source_calibration(observation)
+        _write_optional_json(arguments.output, payload)
+        print(json.dumps(payload, sort_keys=True))
     elif arguments.command == "settle-paper-positions":
         supervisor = MultiMarketShadowSupervisor(
             journal=journal, log_path=settings.log_path, spot_provider="finnhub", tradier_api_token=os.getenv("TRADIER_API_TOKEN", "")

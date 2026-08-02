@@ -55,6 +55,14 @@ CREATE TABLE IF NOT EXISTS price_ladder_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_price_ladder_snapshots_symbol_date_checkpoint
     ON price_ladder_snapshots (symbol, market_date, checkpoint_name, observed_at);
+CREATE TABLE IF NOT EXISTS above_x_veto_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_id TEXT NOT NULL, symbol TEXT NOT NULL, checkpoint_date TEXT NOT NULL, checkpoint_name TEXT NOT NULL,
+    policy_id TEXT NOT NULL, observed_at TEXT NOT NULL, shadow_action TEXT NOT NULL, payload_json TEXT NOT NULL,
+    UNIQUE (market_id, checkpoint_date, checkpoint_name, policy_id)
+);
+CREATE INDEX IF NOT EXISTS idx_above_x_veto_checkpoint
+    ON above_x_veto_observations (checkpoint_date, checkpoint_name, symbol);
 CREATE TABLE IF NOT EXISTS price_ladder_settlements (
     market_id TEXT PRIMARY KEY,
     settled_at TEXT NOT NULL,
@@ -218,6 +226,29 @@ class PriceLadderJournal:
             no_bid_depth=float(row[12]), no_ask_depth=float(row[13]), yes_book=json.loads(str(row[14])),
             no_book=json.loads(str(row[15])),
         ) for row in rows)
+
+    def record_veto_observation(self, payload: Mapping[str, object]) -> bool:
+        required = ("market_id", "symbol", "checkpoint_date", "checkpoint_name", "policy_id", "shadow_action")
+        if any(not str(payload.get(key, "")).strip() for key in required):
+            raise ValueError("incomplete Above-X veto observation")
+        with _database_connection(self.path) as connection:
+            return connection.execute(
+                """INSERT OR IGNORE INTO above_x_veto_observations (
+                    market_id, symbol, checkpoint_date, checkpoint_name, policy_id, observed_at, shadow_action, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (str(payload["market_id"]), str(payload["symbol"]), str(payload["checkpoint_date"]),
+                 str(payload["checkpoint_name"]), str(payload["policy_id"]), str(payload.get("observed_at") or datetime.now().isoformat()),
+                 str(payload["shadow_action"]), json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)),
+            ).rowcount == 1
+
+    def list_veto_observations(self, *, market_date: str | None = None) -> tuple[Mapping[str, object], ...]:
+        query = "SELECT payload_json FROM above_x_veto_observations"
+        params: tuple[object, ...] = ()
+        if market_date:
+            query += " WHERE checkpoint_date = ?"; params = (market_date,)
+        query += " ORDER BY checkpoint_date, checkpoint_name, symbol"
+        with _database_connection(self.path) as connection:
+            return tuple(json.loads(str(row[0])) for row in connection.execute(query, params).fetchall())
 
     def record_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object], *, settled_at: datetime) -> None:
         outcome = winning_outcome.upper()

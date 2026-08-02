@@ -63,6 +63,53 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_pyth_primary_risk_reasons(self.now, stale_pyth, 15), ("PYTH_SPOT_STALE",))
         self.assertEqual(_pyth_primary_risk_reasons(self.now, SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now), 15), ())
 
+    def test_finnhub_only_uses_cached_official_pyth_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            journal.record_pyth_daily_close(
+                market_date="2026-07-17", symbol="TSLA", close_price=123.45,
+                candle_at=datetime(2026, 7, 17, 20, tzinfo=UTC), source="TEST",
+            )
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal, log_path=Path(directory) / "events.jsonl", spot_provider="finnhub",
+                finnhub_api_key="test", spot_mode="FINNHUB_ONLY",
+            )
+            contract = parse_daily_equity_close_contract(_candidate("one", "TSLA", self.future))
+            price, reference = supervisor._pyth_price_to_beat(contract)
+            self.assertEqual(price, 123.45)
+            self.assertEqual(reference["source"], "LOCAL_PYTH_FINAL_CANDLE")
+
+    def test_finnhub_only_labels_a_non_pyth_threshold_estimate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal, log_path=Path(directory) / "events.jsonl", spot_provider="finnhub",
+                finnhub_api_key="test", spot_mode="FINNHUB_ONLY",
+            )
+            contract = parse_daily_equity_close_contract(_candidate("one", "TSLA", self.future))
+            price, reference = supervisor._pyth_price_to_beat(contract, [DailyClose("2026-07-17", 121.0)])
+            self.assertEqual(price, 121.0)
+            self.assertTrue(reference["estimated"])
+            self.assertEqual(reference["threshold_quality"], "SINGLE_SOURCE_ESTIMATE")
+
+    def test_finnhub_only_combines_nasdaq_and_yahoo_threshold_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal, log_path=Path(directory) / "events.jsonl", spot_provider="finnhub",
+                finnhub_api_key="test", spot_mode="FINNHUB_ONLY",
+            )
+            contract = parse_daily_equity_close_contract(_candidate("one", "TSLA", self.future))
+            price, reference = supervisor._pyth_price_to_beat(
+                contract, [DailyClose("2026-07-17", 121.0)], (DailyClose("2026-07-17", 120.0),),
+            )
+            self.assertEqual(price, 120.5)
+            self.assertEqual(reference["threshold_quality"], "CALIBRATED_MULTI_SOURCE_MEDIUM")
+            self.assertEqual(reference["source_count"], 2)
+
     def test_fresh_cross_source_difference_adds_bounded_model_buffer(self) -> None:
         pyth = SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now, 0.01)
         finnhub = SpotQuote("FINNHUB", "TSLA", 100.25, self.now, self.now)

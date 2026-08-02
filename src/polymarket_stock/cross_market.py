@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
 from .journal import PaperPosition, ShadowJournal, _database_connection
+from .above_x_research import above_x_coverage_report
 from .price_ladder import (
     CrossMarketDiagnostic, LadderProbabilityPoint, diagnose_cross_market, fit_monotonic_curve, probability_point,
 )
@@ -113,8 +115,31 @@ def research_dashboard_state(
         ),
         "ladder_curves": curves,
         "cross_market": [latest_diagnostic[symbol].as_payload() for symbol in sorted(latest_diagnostic)],
+        "above_x": _above_x_dashboard_payload(),
+        "above_x_veto": ladder.list_veto_observations(market_date=market_date),
         "isolation": {"affects_entries": False, "affects_sizing": False, "research_only": True},
     }
+
+
+def _above_x_dashboard_payload() -> Mapping[str, object]:
+    discovery = Path("data/historical/above_x_discovery.json")
+    if not discovery.is_file():
+        return {"status": "NO_DISCOVERY", "coverage": None, "replay": None}
+    try:
+        coverage = above_x_coverage_report(
+            discovery_path=discovery, output_dir=Path("data/historical/above_x"),
+            spot_data_dir=Path("data/historical/90d"),
+        ).as_payload()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        return {"status": "ERROR", "error": str(error), "coverage": None, "replay": None}
+    replay_path = Path("data/historical/above_x_replay.json")
+    replay = None
+    if replay_path.is_file():
+        try:
+            replay = json.loads(replay_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            replay = None
+    return {"status": "READY", "coverage": coverage, "replay": replay}
 
 
 def _market_status_payload(timestamp: datetime, market_date: str) -> Mapping[str, object]:
@@ -159,6 +184,11 @@ def _live_market_payload(
             "model_up_probability": _optional_float(row.get("fair_up_probability")),
             "spot": _optional_float(row.get("spot")),
             "price_to_beat": _optional_float(row.get("price_to_beat")),
+            "threshold_quality": str(row.get("threshold_quality") or "UNKNOWN"),
+            "threshold_warning": row.get("threshold_warning"),
+            "threshold_source_count": row.get("source_count"),
+            "threshold_calibration_samples": row.get("calibration_samples"),
+            "threshold_estimated_error_bps": row.get("estimated_error_bps"),
             "up_book": row.get("up_book") if isinstance(row.get("up_book"), Mapping) else {},
             "down_book": row.get("down_book") if isinstance(row.get("down_book"), Mapping) else {},
             "skip_reasons": list(row.get("skip_reasons") or ()),

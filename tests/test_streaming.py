@@ -183,7 +183,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         await regular._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
         await regular._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.1, start.replace(second=20)), "TEST")
         await regular.close()
-        self.assertEqual(len(spots), 2)
+        self.assertEqual(len(spots), 1)
         self.assertEqual(gaps[0]["event_type"], "SOURCE_SPOT_GAP_DETECTED")
         self.assertEqual(gaps[0]["gap_seconds"], 20)
 
@@ -195,6 +195,14 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         await after_hours._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
         await after_hours.close()
         self.assertEqual(after_hours_spots, [])
+
+
+    def test_persistence_bucket_keeps_final_five_minutes_per_second(self) -> None:
+        from polymarket_stock.streaming import _persistence_bucket
+        normal = datetime(2026, 7, 31, 19, 0, 20, tzinfo=UTC)
+        close = datetime(2026, 7, 31, 19, 59, 20, tzinfo=UTC)
+        self.assertEqual(_persistence_bucket(normal), "2026-07-31T19:00:00+00:00")
+        self.assertEqual(_persistence_bucket(close), "2026-07-31T19:59:20+00:00")
 
     def test_liveness_helpers_require_actual_price_messages(self) -> None:
         self.assertTrue(_has_finnhub_trade({"type": "trade", "data": [{"s": "TSLA", "p": 100.0}]}))

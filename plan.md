@@ -98,6 +98,33 @@ with the user's own account before marking any source as live-grade.
 - Pyth Pro History was used only for the one-time 61-day one-minute backfill.
   The local key was removed after completion. Routine shadow collection does
   not require Pyth Pro History.
+- During the remaining Pyth Pro trial, `supervise-shadow` performs a once-per-
+  session, post-16:03 ET exact-close calibration. It compares Pyth's final
+  one-minute candle close and prior Pyth close with the locally captured
+  Finnhub 15:59–16:00 quote, records bps error and any Up/Down direction flip,
+  and never changes paper-entry logic. This is the evidence required to decide
+  whether an ongoing Pyth subscription has trading value.
+- Persisted source diagnostics use minute buckets in the normal session and
+  second buckets only from 15:55–16:00 ET. This preserves final-close audit
+  resolution while preventing per-tick database growth; in-memory streaming
+  evaluation remains tick responsive.
+- Added explicit `PYTH_PRIMARY` and `FINNHUB_ONLY` spot modes. The latter
+  removes the Hermes stream and Pyth freshness gate, uses Finnhub plus CLOB,
+  and reads locally cached official Pyth final closes first. If a cache row is
+  absent it uses the latest available Nasdaq daily close as a labelled
+  `SINGLE_SOURCE_ESTIMATE`, adds a model-error buffer, and continues to show a
+  research/paper recommendation. A spot within 35 bps of an estimated threshold
+  receives `NEAR_ESTIMATED_THRESHOLD`; that is a warning, not a hard block.
+- The fallback now combines Nasdaq daily close, Yahoo daily close, and the
+  last locally captured Finnhub regular-session trade when available. It
+  de-biases each source using its observed Pyth-final residual, takes the robust
+  median, records source count/sample count/P90 error, and labels the result
+  `CALIBRATED_MULTI_SOURCE_HIGH`, `CALIBRATED_MULTI_SOURCE_MEDIUM`, or
+  `SINGLE_SOURCE_ESTIMATE`. Missing providers are non-fatal.
+- The fallback permits continued research after Pyth access ends, but it cannot
+  claim exact Pyth settlement alignment until the new per-source calibration has
+  enough out-of-sample validation. The remaining trial sessions should collect
+  these residuals after every 16:03 ET close.
 - At each accepted checkpoint, the journal now stores Pyth threshold, spot,
   fair probability, official fee rate, and reconstructed CLOB top-five bid/ask
   levels for both outcomes. A paper entry stores the same data and schedules
@@ -115,6 +142,47 @@ with the user's own account before marking any source as live-grade.
   A stale Finnhub/Alpaca cross-check remains a quality flag only. `PYTH_API_KEY`
   is optional before the 2026-08-18 authentication change and is used for both
   Hermes and Pyth Benchmarks afterwards.
+
+## Above-X Research Status (2026-08-02)
+
+- Gamma `events/keyset` discovery is implemented with `closed=true`, `stocks`,
+  per-symbol `title_search`, and `end_date_min/max`. The initial scan found 165
+  strict TSLA/NVDA Pyth closes-above contracts from 2026-07-08 through 2026-07-31.
+  Earlier markets in the requested three-month range use other templates or
+  resolution sources and are excluded rather than relabeled.
+- `backfill-above-x-history` writes independent Yes/No CLOB price-history
+  proxies, market metadata, Pyth final references, and Gamma settlements. It
+  reuses local `90d` Pyth references before requiring a Pyth Pro key.
+- `above-x-coverage` reports missing CLOB/Pyth/settlement files and whether a
+  matching one-minute Pyth spot path exists. `backtest-above-x` is isolated from
+  core entries and uses an explicit historical-price proxy assumption.
+- The localhost dashboard now has an `Above-X Research` tab. It displays
+  discovery coverage and replay metrics only; it cannot alter entries or sizing.
+- Final data state: 165/165 complete with Yes/No CLOB history, Pyth final, and
+  Gamma settlement. 115 records reuse local Pyth references and 50 use the
+  unauthenticated Pyth Benchmarks fallback available during this run; no Pro key
+  was required. 50 contracts still lack local intraday spot paths and are
+  excluded from replay observations rather than imputed.
+- The first isolated replay has 345 observations and 236 price-proxy trades at
+  2% minimum edge: 219 wins (92.8%), PnL +23.15, Brier 0.0311, log loss 0.0954.
+  This is not executable-ask performance and is not yet a walk-forward result.
+
+## Above-X Core Veto Plan (2026-08-02)
+
+- `walk-forward-above-x-veto` aligns historical Core and Above-X data only at
+  the same 12:00 EDT checkpoint. It selects among baseline, disagreement veto,
+  and strict confirmation using earlier dates only, then evaluates the next
+  dates without refitting.
+- Current result is exploratory: 12 overlapping dates and 5 eligible Core
+  entries are insufficient to select a policy. The command deliberately returns
+  no selected policy for windows without the configured minimum training trades.
+- `collect-price-ladders` now calls a read-only shadow sync after each poll. It
+  writes `KEEP_CORE`, `VETO`, `UNRELIABLE`, or `NO_CORE_ENTRY` to the isolated
+  `above_x_veto_observations` table only. Core checkpoint payloads, portfolio
+  selection, and paper positions remain unchanged.
+- Live width/depth quality uses stored book snapshots. Historical price-proxy
+  replay cannot tune a spread threshold, so this remains a future live-data
+  validation criterion.
 
 ### Next research gates
 

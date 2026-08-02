@@ -10,6 +10,7 @@ import json
 import ssl
 import sqlite3
 from typing import Awaitable, Callable, Mapping
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
 from .quality import us_equity_session
@@ -348,11 +349,11 @@ class ShadowStreamCoordinator:
     async def _record_spot_if_due(self, quote: SpotQuote) -> None:
         if self.spot_observation_callback is None:
             return
-        second = quote.observed_at.replace(microsecond=0).isoformat()
+        bucket = _persistence_bucket(quote.observed_at)
         key = (quote.source, quote.symbol)
-        if self._persisted_spot_seconds.get(key) == second:
+        if self._persisted_spot_seconds.get(key) == bucket:
             return
-        self._persisted_spot_seconds[key] = second
+        self._persisted_spot_seconds[key] = bucket
         await _emit(self.spot_observation_callback, quote.as_payload())
 
     async def _record_comparison_if_due(self, symbol: str, observed_at: datetime) -> None:
@@ -365,10 +366,10 @@ class ShadowStreamCoordinator:
         pyth = self.latest_quote("PYTH_HERMES", symbol)
         if primary is None or pyth is None or primary.source == pyth.source:
             return
-        second = observed_at.replace(microsecond=0).isoformat()
-        if self._persisted_comparison_seconds.get(symbol) == second:
+        bucket = _persistence_bucket(observed_at)
+        if self._persisted_comparison_seconds.get(symbol) == bucket:
             return
-        self._persisted_comparison_seconds[symbol] = second
+        self._persisted_comparison_seconds[symbol] = bucket
         difference_bps = (primary.price - pyth.price) / pyth.price * 10_000
         await _emit(self.spot_comparison_callback, {
             "observed_at": observed_at.isoformat(), "symbol": symbol,
@@ -381,6 +382,15 @@ class ShadowStreamCoordinator:
 
     async def close(self) -> None:
         await self._debouncer.close()
+
+def _persistence_bucket(observed_at: datetime) -> str:
+    """Keep normal-session diagnostics at one minute, but preserve the final five minutes per second."""
+
+    local = observed_at.astimezone(ZoneInfo("America/New_York"))
+    if (local.hour, local.minute) >= (15, 55):
+        return observed_at.replace(microsecond=0).isoformat()
+    return observed_at.replace(second=0, microsecond=0).isoformat()
+
 
 def _as_probability(value: object) -> float | None:
     try:

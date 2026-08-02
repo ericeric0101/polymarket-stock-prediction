@@ -14,6 +14,7 @@ from .market_discovery import GAMMA_EVENTS_KEYSET_URL, GammaMarketClient, Market
 from .polymarket_data import ClobMarketDataClient, OrderBookSnapshot
 from .price_ladder import PriceLadderContract, PriceLadderContractError, parse_price_ladder_contract
 from .price_ladder_journal import PriceLadderJournal
+from .above_x_veto import sync_live_veto_shadow
 
 
 @dataclass(frozen=True)
@@ -37,12 +38,14 @@ class LadderCollectionReport:
     observed_at: datetime
     contracts: int
     snapshots_written: int
+    veto_diagnostics_written: int
     failures: tuple[Mapping[str, str], ...]
 
     def as_payload(self) -> Mapping[str, object]:
         return {
             "observed_at": self.observed_at.isoformat(), "contracts": self.contracts,
-            "snapshots_written": self.snapshots_written, "failures": [dict(item) for item in self.failures],
+            "snapshots_written": self.snapshots_written, "veto_diagnostics_written": self.veto_diagnostics_written,
+            "failures": [dict(item) for item in self.failures],
         }
 
 
@@ -155,7 +158,13 @@ class PriceLadderCollector:
                 ))
             except Exception as error:  # Keep one bad strike from stopping the isolated sidecar.
                 failures.append({"market_id": contract.market_id, "error": f"{type(error).__name__}: {error}"})
-        return LadderCollectionReport(now, len(items), written, tuple(failures))
+        # A diagnostic failure must never stop independent book collection.
+        try:
+            veto_written = len(sync_live_veto_shadow(journal_path=self.journal.path))
+        except Exception as error:
+            failures.append({"market_id": "ABOVE_X_VETO_SYNC", "error": f"{type(error).__name__}: {error}"})
+            veto_written = 0
+        return LadderCollectionReport(now, len(items), written, veto_written, tuple(failures))
 
     def run(
         self, *, symbols: Iterable[str], interval_seconds: float = 60.0, duration_seconds: float = 0,

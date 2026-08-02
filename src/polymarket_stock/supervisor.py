@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from .baseline import DailyClose, daily_close_data_is_fresh
 from .calibration import CalibrationRecommendation, load_calibration_recommendation
 from .checkpoints import checkpoint_window
+from .close_source_calibration import calibrate_close_sources, official_pyth_final_minute_close
 from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
 from .event_risk import EventCalendarError, EventCalendarUnavailable, FinnhubEarningsCalendarClient, combined_risk_events
 from .fees import PolymarketFeeRateClient
@@ -26,10 +27,13 @@ from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, NasdaqQuote, 
 from .option_iv import OptionIvSurface, OptionSurfaceError, PolygonOptionIvClient, TradierOptionIvClient
 from .portfolio_risk import PaperEntryCandidate, select_diversified_entries
 from .pyth_benchmarks import PythBenchmarksClient
+from .pyth_history import PythHistoryClient
 from .quality import observable_equity_market_date
 from .trading_calendar import previous_nyse_trading_day
+from .threshold_estimation import ThresholdSource, calibrated_threshold_estimate
+from .yahoo_data import YahooChartClient, YahooPayloadError
 from .realtime import RealtimeBaselineEvaluator
-from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, run_with_reconnect
+from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, SpotQuote, run_with_reconnect
 
 
 MODEL_VERSION = "realized-vol-observation-v1-buffer-2pct"
@@ -191,6 +195,9 @@ class MultiMarketShadowSupervisor:
         fee_client: PolymarketFeeRateClient | None = None,
         pyth_client: PythBenchmarksClient | None = None,
         pyth_api_key: str = "",
+        pyth_pro_api_key: str = "",
+        spot_mode: str = "PYTH_PRIMARY",
+        finnhub_threshold_safety_bps: float = 35.0,
         tradier_api_token: str = "",
         polygon_api_key: str = "",
         event_calendar_path: Path = Path("data/event_calendar.json"),
@@ -199,6 +206,13 @@ class MultiMarketShadowSupervisor:
     ) -> None:
         if spot_provider not in {"finnhub", "alpaca"}:
             raise ValueError("spot_provider must be finnhub or alpaca")
+        normalized_spot_mode = spot_mode.upper()
+        if normalized_spot_mode not in {"PYTH_PRIMARY", "FINNHUB_ONLY"}:
+            raise ValueError("spot_mode must be PYTH_PRIMARY or FINNHUB_ONLY")
+        if normalized_spot_mode == "FINNHUB_ONLY" and spot_provider != "finnhub":
+            raise ValueError("FINNHUB_ONLY mode requires --spot-provider finnhub")
+        if finnhub_threshold_safety_bps < 0:
+            raise ValueError("finnhub_threshold_safety_bps must be non-negative")
         if volatility_estimator.upper() not in {"CLOSE_TO_CLOSE", "EWMA"}:
             raise ValueError("supervisor volatility_estimator must be CLOSE_TO_CLOSE or EWMA")
         if not 0 < volatility_decay < 1:
@@ -217,6 +231,8 @@ class MultiMarketShadowSupervisor:
         self.journal = journal
         self.log_path = log_path
         self.spot_provider = spot_provider
+        self.spot_mode = normalized_spot_mode
+        self.finnhub_threshold_safety_bps = finnhub_threshold_safety_bps
         self.volatility_estimator = volatility_estimator.upper()
         self.volatility_decay = volatility_decay
         self.comparison_estimators = normalized_comparisons
@@ -236,6 +252,7 @@ class MultiMarketShadowSupervisor:
         self.daily_client = daily_client or NasdaqBaselineClient()
         self.fee_client = fee_client or PolymarketFeeRateClient()
         self.pyth_api_key = pyth_api_key.strip()
+        self.pyth_pro_api_key = pyth_pro_api_key.strip()
         self.pyth_client = pyth_client or PythBenchmarksClient(api_key=self.pyth_api_key)
         self._pyth_feed_ids: dict[str, str] = {}
         self.earnings_client = FinnhubEarningsCalendarClient(finnhub_api_key)
@@ -253,6 +270,8 @@ class MultiMarketShadowSupervisor:
         self._stream_tasks: list[asyncio.Task[None]] = []
         self._stream_runtimes: dict[str, ActiveMarket] = {}
         self._stream_signature: tuple[tuple[str, ...], tuple[str, ...]] | None = None
+        self._close_calibration_attempted_dates: set[str] = set()
+        self._pyth_close_cache_attempted_dates: set[str] = set()
         self._pending_paper_entries: dict[str, PendingPaperEntry] = {}
         self._paper_batch_task: asyncio.Task[None] | None = None
         self._markout_tasks: set[asyncio.Task[None]] = set()
@@ -320,8 +339,18 @@ class MultiMarketShadowSupervisor:
             except (NasdaqPayloadError, PublicApiError, OSError) as error:
                 self.event_sink("SUPERVISOR_MARKET_SKIPPED", {"market_id": candidate.market_id, "symbol": symbol, "reason": str(error)})
                 continue
+            yahoo_closes: tuple[DailyClose, ...] = ()
+            if self.spot_mode == "FINNHUB_ONLY":
+                try:
+                    yahoo_closes = await asyncio.to_thread(self._yahoo_closes, symbol, contract)
+                except (PublicApiError, YahooPayloadError, OSError, ValueError) as error:
+                    self.event_sink("SUPERVISOR_THRESHOLD_SOURCE_UNAVAILABLE", {
+                        "market_id": candidate.market_id, "symbol": symbol, "source": "YAHOO_DAILY_CLOSE", "error": str(error),
+                    })
             try:
-                price_to_beat, pyth_reference = await asyncio.to_thread(self._pyth_price_to_beat, contract)
+                price_to_beat, pyth_reference = await asyncio.to_thread(
+                    self._pyth_price_to_beat, contract, closes, yahoo_closes,
+                )
             except Exception as error:
                 self.event_sink("SUPERVISOR_MARKET_SKIPPED", {
                     "market_id": candidate.market_id, "symbol": symbol, "reason": "PYTH_REFERENCE_UNAVAILABLE", "error": str(error),
@@ -362,9 +391,39 @@ class MultiMarketShadowSupervisor:
         )
         await self._reconcile_streams()
 
-    def _pyth_price_to_beat(self, contract: DailyEquityCloseContract) -> tuple[float, Mapping[str, object]]:
+    def _pyth_price_to_beat(
+        self,
+        contract: DailyEquityCloseContract,
+        fallback_closes: list[DailyClose] | None = None,
+        yahoo_closes: tuple[DailyClose, ...] = (),
+    ) -> tuple[float, Mapping[str, object]]:
         market_day = contract.resolves_at.astimezone(NEW_YORK).date()
         prior_day = previous_nyse_trading_day(market_day)
+        prior_day_key = prior_day.isoformat()
+        cached = self.journal.get_pyth_daily_close(market_date=prior_day_key, symbol=contract.symbol)
+        if cached is not None:
+            return float(cached["price"]), {**cached, "source": "LOCAL_PYTH_FINAL_CANDLE", "threshold_quality": "EXACT_PYTH", "source_count": 1, "calibration_samples": 0, "estimated_error_bps": 0.0}
+        if self.spot_mode == "FINNHUB_ONLY":
+            sources: list[ThresholdSource] = []
+            nasdaq = _close_for_date(fallback_closes or (), prior_day_key)
+            if nasdaq is not None:
+                sources.append(ThresholdSource("NASDAQ_DAILY_CLOSE", nasdaq))
+            yahoo = _close_for_date(yahoo_closes, prior_day_key)
+            if yahoo is not None:
+                sources.append(ThresholdSource("YAHOO_DAILY_CLOSE", yahoo))
+            finnhub = self.journal.last_regular_spot_observation(
+                source="FINNHUB", symbol=contract.symbol, market_date=prior_day_key,
+            )
+            if finnhub is not None:
+                sources.append(ThresholdSource(
+                    "FINNHUB_LAST_REGULAR_TRADE", float(finnhub["price"]), "FINNHUB_CLOSE_WINDOW",
+                ))
+            estimate = calibrated_threshold_estimate(sources, self.journal.list_close_source_calibrations())
+            return estimate.price, {
+                **estimate.as_payload(), "source": "CALIBRATED_NON_PYTH_THRESHOLD_ESTIMATE",
+                "market_date": prior_day_key,
+                "warning": "Pyth prior close unavailable; this is a calibrated non-settlement estimate",
+            }
         requested_at = datetime.combine(prior_day, datetime.min.time(), tzinfo=NEW_YORK).replace(hour=16).astimezone(UTC)
         feed_id = self._pyth_feed_ids.get(contract.symbol)
         if feed_id is None:
@@ -374,6 +433,13 @@ class MultiMarketShadowSupervisor:
             symbol=contract.symbol, feed_id=feed_id, observed_at=requested_at, maximum_delay_seconds=300,
         )
         return reference.price, reference.as_payload()
+
+    def _yahoo_closes(self, symbol: str, contract: DailyEquityCloseContract) -> tuple[DailyClose, ...]:
+        market_day = contract.resolves_at.astimezone(NEW_YORK).date()
+        prior_day = previous_nyse_trading_day(market_day)
+        return YahooChartClient().daily_closes(
+            symbol, start_date=prior_day, end_date=prior_day,
+        ).closes
 
     def _daily_closes(self, symbol: str, now: datetime) -> tuple[list[DailyClose], str, NasdaqQuote]:
         cache_path = Path("data") / "baseline_cache" / f"{symbol}.json"
@@ -415,7 +481,7 @@ class MultiMarketShadowSupervisor:
         calibrated_minimum_edge = max(0.02, self.calibration.recommended_minimum_edge) if self.calibration and self.calibration.recommended_minimum_edge else 0.02
         evaluator = RealtimeBaselineEvaluator(
             market_id=candidate.market_id, symbol=contract.symbol, resolves_at=contract.resolves_at,
-            closes=closes, spot_provider="PYTH_HERMES", up_fee_rate=up_fee_rate,
+            closes=closes, spot_provider=("PYTH_HERMES" if self.spot_mode == "PYTH_PRIMARY" else "FINNHUB"), up_fee_rate=up_fee_rate,
             volatility_estimator=self.volatility_estimator, volatility_decay=self.volatility_decay,
             comparison_estimators=self.comparison_estimators,
             down_fee_rate=down_fee_rate, base_model_error_buffer=0.02, fallback_buffer=0.0,
@@ -439,7 +505,9 @@ class MultiMarketShadowSupervisor:
             self.event_sink(str(payload["event_type"]), payload)
 
         coordinator = ShadowStreamCoordinator(
-            callback=evaluate_callback, primary_spot_source="PYTH_HERMES", comparison_spot_source=self.spot_provider,
+            callback=evaluate_callback,
+            primary_spot_source=("PYTH_HERMES" if self.spot_mode == "PYTH_PRIMARY" else "FINNHUB"),
+            comparison_spot_source=(self.spot_provider if self.spot_mode == "PYTH_PRIMARY" else None),
             spot_observation_callback=record_spot_observation,
             spot_comparison_callback=record_spot_comparison, source_gap_callback=record_source_gap,
             reevaluation_error_callback=record_reevaluation_error,
@@ -456,14 +524,27 @@ class MultiMarketShadowSupervisor:
         coordinator = runtime.coordinator
         token_ids = runtime.token_ids
         pyth_quote = coordinator.latest_quote("PYTH_HERMES", runtime.symbol)
-        comparison_quote = coordinator.latest_quote(self.spot_provider, runtime.symbol)
-        pyth_primary_risk_reasons = _pyth_primary_risk_reasons(now, pyth_quote, coordinator.max_age_seconds)
-        source_uncertainty_buffer = _cross_source_uncertainty_buffer(
-            now, pyth_quote, comparison_quote, coordinator.max_age_seconds,
+        finnhub_quote = coordinator.latest_quote("FINNHUB", runtime.symbol)
+        primary_quote = pyth_quote if self.spot_mode == "PYTH_PRIMARY" else finnhub_quote
+        comparison_quote = finnhub_quote if self.spot_mode == "PYTH_PRIMARY" else None
+        pyth_primary_risk_reasons = (
+            _pyth_primary_risk_reasons(now, pyth_quote, coordinator.max_age_seconds)
+            if self.spot_mode == "PYTH_PRIMARY" else ()
         )
+        source_uncertainty_buffer = (
+            _cross_source_uncertainty_buffer(now, pyth_quote, comparison_quote, coordinator.max_age_seconds)
+            if self.spot_mode == "PYTH_PRIMARY" else 0.0
+        )
+        fallback_threshold_warning = None
+        threshold_is_estimated = bool(runtime.pyth_reference.get("estimated"))
+        estimated_error_bps = float(runtime.pyth_reference.get("estimated_error_bps") or 0.0)
+        if self.spot_mode == "FINNHUB_ONLY" and primary_quote is not None:
+            distance_bps = abs(primary_quote.price - runtime.price_to_beat) / runtime.price_to_beat * 10_000
+            if distance_bps <= max(self.finnhub_threshold_safety_bps, estimated_error_bps):
+                fallback_threshold_warning = "NEAR_ESTIMATED_THRESHOLD"
         evaluation = runtime.evaluator.evaluate(
             now=now,
-            spot=pyth_quote.price if pyth_quote else None,
+            spot=primary_quote.price if primary_quote else None,
             up_ask=coordinator.latest_best_asks.get(token_ids[0]),
             down_ask=coordinator.latest_best_asks.get(token_ids[1]),
             up_bid=coordinator.latest_best_bids.get(token_ids[0]),
@@ -476,7 +557,10 @@ class MultiMarketShadowSupervisor:
             option_iv_age_seconds=_option_iv_age_seconds(runtime.option_surface, now),
             option_quality_flags=_current_option_quality_flags(runtime.option_surface, runtime.option_quality_flags, now),
             risk_reasons=runtime.risk_reasons + pyth_primary_risk_reasons,
-            additional_model_error_buffer=runtime.additional_model_error_buffer + source_uncertainty_buffer,
+            additional_model_error_buffer=(
+                runtime.additional_model_error_buffer + source_uncertainty_buffer
+                + (min(0.03, max(0.01, estimated_error_bps / 10_000)) if threshold_is_estimated else 0.0)
+            ),
             spot_age_seconds=_age_seconds(now, coordinator.freshness.last_spot_at),
             book_age_seconds=_age_seconds(now, coordinator.freshness.last_book_at),
             stream_ready=coordinator.freshness.ready(now),
@@ -486,8 +570,11 @@ class MultiMarketShadowSupervisor:
         result = {
             **evaluation.as_payload(), "daily_provider": runtime.daily_provider, "model_version": model_version,
             "price_to_beat": runtime.price_to_beat, "pyth_reference": runtime.pyth_reference,
-            "primary_spot_source": "PYTH_HERMES",
-            "primary_spot": pyth_quote.as_payload() if pyth_quote else None,
+            "spot_mode": self.spot_mode,
+            "threshold_quality": runtime.pyth_reference.get("threshold_quality", "EXACT_PYTH"),
+            "threshold_warning": fallback_threshold_warning,
+            "primary_spot_source": "PYTH_HERMES" if self.spot_mode == "PYTH_PRIMARY" else "FINNHUB",
+            "primary_spot": primary_quote.as_payload() if primary_quote else None,
             "pyth_live_spot": pyth_quote.as_payload() if pyth_quote else None,
             "cross_check_spot_source": self.spot_provider.upper(),
             "cross_check_spot": comparison_quote.as_payload() if comparison_quote else None,
@@ -763,9 +850,110 @@ class MultiMarketShadowSupervisor:
         self._stream_tasks = [
             asyncio.create_task(run_with_reconnect("POLYMARKET_MARKET", lambda: PolymarketMarketStream().run(token_ids, router.on_polymarket_message), status_callback)),
             asyncio.create_task(run_with_reconnect(f"{self.spot_provider.upper()}_STOCK", lambda: spot_stream.run(symbols, spot_callback), status_callback)),
-            asyncio.create_task(run_with_reconnect("PYTH_HERMES", lambda: PythHermesStockStream(self.pyth_api_key).run(pyth_feed_ids, router.on_pyth_message), status_callback)),
         ]
+        if self.spot_mode == "PYTH_PRIMARY":
+            self._stream_tasks.append(asyncio.create_task(run_with_reconnect(
+                "PYTH_HERMES", lambda: PythHermesStockStream(self.pyth_api_key).run(pyth_feed_ids, router.on_pyth_message), status_callback,
+            )))
         self._stream_runtimes = dict(self.runtimes)
+
+    def _maybe_record_pyth_daily_close_cache(self) -> None:
+        if not self.pyth_pro_api_key:
+            return
+        now = datetime.now(UTC)
+        local_now = now.astimezone(NEW_YORK)
+        if (local_now.hour, local_now.minute) < (16, 3):
+            return
+        market_date = local_now.date()
+        date_key = market_date.isoformat()
+        if date_key in self._pyth_close_cache_attempted_dates:
+            return
+        symbols = tuple(sorted({runtime.symbol for runtime in self.runtimes.values()}))
+        if not symbols:
+            symbols = tuple(sorted({
+                item.symbol for item in self.journal.list_spot_observations(source="FINNHUB")
+                if item.observed_at.astimezone(NEW_YORK).date() == market_date
+            }))
+        if not symbols:
+            return
+        self._pyth_close_cache_attempted_dates.add(date_key)
+        try:
+            client = PythHistoryClient(self.pyth_pro_api_key)
+            for symbol in symbols:
+                close_price, candle_at = official_pyth_final_minute_close(client, symbol, market_date)
+                self.journal.record_pyth_daily_close(
+                    market_date=date_key, symbol=symbol, close_price=close_price, candle_at=candle_at,
+                    source="PYTH_PRO_HISTORY_FINAL_MINUTE",
+                )
+            self.event_sink("PYTH_DAILY_CLOSE_CACHE_RECORDED", {"market_date": date_key, "symbols": len(symbols)})
+        except Exception as error:
+            self.event_sink("PYTH_DAILY_CLOSE_CACHE_FAILED", {"market_date": date_key, "error": str(error)})
+
+    def _supplemental_close_sources(
+        self, symbols: tuple[str, ...], market_date: datetime.date,
+    ) -> Mapping[str, Mapping[str, float]]:
+        """Best-effort free daily closes to calibrate against Pyth during the trial."""
+        result: dict[str, dict[str, float]] = {"NASDAQ_DAILY_CLOSE": {}, "YAHOO_DAILY_CLOSE": {}}
+        request_now = datetime.combine(market_date, datetime.max.time(), tzinfo=NEW_YORK).astimezone(UTC)
+        for symbol in symbols:
+            try:
+                value = _close_for_date(self.daily_client.daily_closes(symbol, request_now), market_date.isoformat())
+                if value is not None:
+                    result["NASDAQ_DAILY_CLOSE"][symbol] = value
+            except (NasdaqPayloadError, PublicApiError, OSError, ValueError):
+                pass
+            try:
+                value = _close_for_date(
+                    YahooChartClient().daily_closes(symbol, start_date=market_date, end_date=market_date).closes,
+                    market_date.isoformat(),
+                )
+                if value is not None:
+                    result["YAHOO_DAILY_CLOSE"][symbol] = value
+            except (YahooPayloadError, PublicApiError, OSError, ValueError):
+                pass
+        return result
+
+    def _maybe_record_close_source_calibration(self) -> None:
+        """Once after 16:03 ET, persist exact-close source diagnostics when Pro access exists."""
+
+        if not self.pyth_pro_api_key:
+            return
+        now = datetime.now(UTC)
+        local_now = now.astimezone(NEW_YORK)
+        if (local_now.hour, local_now.minute) < (16, 3):
+            return
+        market_date = local_now.date()
+        date_key = market_date.isoformat()
+        if date_key in self._close_calibration_attempted_dates:
+            return
+        all_spots = self.journal.list_spot_observations()
+        finnhub_spots = tuple(
+            SpotQuote(item.source, item.symbol, item.price, item.observed_at, item.published_at)
+            for item in all_spots if item.source == "FINNHUB"
+        )
+        symbols = tuple(sorted({
+            item.symbol for item in finnhub_spots if item.observed_at.astimezone(NEW_YORK).date() == market_date
+        }))
+        if not symbols:
+            return
+        self._close_calibration_attempted_dates.add(date_key)
+        try:
+            pyth_spots = tuple(
+                SpotQuote(item.source, item.symbol, item.price, item.observed_at, item.published_at)
+                for item in all_spots if item.source == "PYTH_HERMES"
+            )
+            report = calibrate_close_sources(
+                client=PythHistoryClient(self.pyth_pro_api_key), market_date=market_date, symbols=symbols,
+                finnhub_spots=finnhub_spots, pyth_live_spots=pyth_spots,
+                supplemental_closes=self._supplemental_close_sources(symbols, market_date),
+            ).as_payload()
+            for observation in report["observations"]:
+                self.journal.record_close_source_calibration(observation)
+            self.event_sink("CLOSE_SOURCE_CALIBRATION_RECORDED", report)
+        except Exception as error:
+            self.event_sink("CLOSE_SOURCE_CALIBRATION_FAILED", {
+                "market_date": date_key, "error": str(error), "recorded_at": now.isoformat(),
+            })
 
     async def _stop_streams(self) -> None:
         for task in self._stream_tasks:
@@ -796,6 +984,8 @@ class MultiMarketShadowSupervisor:
         try:
             while True:
                 await self.refresh()
+                await asyncio.to_thread(self._maybe_record_pyth_daily_close_cache)
+                await asyncio.to_thread(self._maybe_record_close_source_calibration)
                 if duration_seconds and (datetime.now(UTC) - started_at).total_seconds() >= duration_seconds:
                     return
                 wait_seconds = scan_interval_seconds
@@ -871,6 +1061,11 @@ def _maker_quote_payload(quote: object) -> Mapping[str, object]:
         "fair_probability": getattr(quote, "fair_probability"), "theoretical_edge": getattr(quote, "theoretical_edge"),
         "touch_count": getattr(quote, "touch_count"), "cancel_reason": getattr(quote, "cancel_reason"),
     }
+
+
+def _close_for_date(closes: tuple[DailyClose, ...] | list[DailyClose], date_key: str) -> float | None:
+    matching = [item.close for item in closes if item.date == date_key and item.close > 0]
+    return matching[-1] if matching else None
 
 
 def _cross_source_uncertainty_buffer(

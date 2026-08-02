@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time as wall_time
 from contextlib import contextmanager
 import hashlib
 import json
@@ -142,6 +142,27 @@ CREATE TABLE IF NOT EXISTS spot_source_comparisons (
 );
 CREATE INDEX IF NOT EXISTS idx_spot_source_comparisons_symbol_observed
     ON spot_source_comparisons (symbol, observed_at);
+CREATE TABLE IF NOT EXISTS source_close_calibrations (
+    market_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY (market_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_source_close_calibrations_date
+    ON source_close_calibrations (market_date, symbol);
+CREATE TABLE IF NOT EXISTS pyth_daily_closes (
+    market_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    close_price REAL NOT NULL CHECK (close_price > 0),
+    candle_at TEXT NOT NULL,
+    source TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (market_date, symbol)
+);
+CREATE INDEX IF NOT EXISTS idx_pyth_daily_closes_symbol_date
+    ON pyth_daily_closes (symbol, market_date);
 CREATE TABLE IF NOT EXISTS checkpoint_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     market_id TEXT NOT NULL,
@@ -700,6 +721,79 @@ class ShadowJournal:
                     payload.get("pyth_feed_id"), difference_bps,
                 ),
             )
+
+    def record_pyth_daily_close(self, *, market_date: str, symbol: str, close_price: float, candle_at: datetime, source: str) -> None:
+        if not market_date or not symbol.strip() or close_price <= 0 or candle_at.tzinfo is None:
+            raise ValueError("Pyth daily close is invalid")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT INTO pyth_daily_closes (market_date, symbol, close_price, candle_at, source, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(market_date, symbol) DO UPDATE SET close_price=excluded.close_price,
+                    candle_at=excluded.candle_at, source=excluded.source, recorded_at=excluded.recorded_at""",
+                (market_date, symbol.upper(), close_price, candle_at.isoformat(), source, datetime.now(UTC).isoformat()),
+            )
+
+    def get_pyth_daily_close(self, *, market_date: str, symbol: str) -> Mapping[str, object] | None:
+        with _database_connection(self.path) as connection:
+            row = connection.execute(
+                "SELECT close_price, candle_at, source FROM pyth_daily_closes WHERE market_date = ? AND symbol = ?",
+                (market_date, symbol.upper()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"price": float(row[0]), "candle_at": str(row[1]), "source": str(row[2])}
+
+    def record_close_source_calibration(self, payload: Mapping[str, object]) -> None:
+        """Upsert the one exact Pyth-close calibration record per symbol and session."""
+
+        market_date = str(payload.get("market_date", ""))
+        symbol = str(payload.get("symbol", "")).upper()
+        status = str(payload.get("status", ""))
+        if not market_date or not symbol or not status:
+            raise ValueError("close source calibration is invalid")
+        with _database_connection(self.path) as connection:
+            connection.execute(
+                """INSERT INTO source_close_calibrations (
+                    market_date, symbol, recorded_at, status, payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(market_date, symbol) DO UPDATE SET
+                    recorded_at=excluded.recorded_at, status=excluded.status, payload_json=excluded.payload_json""",
+                (
+                    market_date, symbol, datetime.now(UTC).isoformat(), status,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
+            )
+
+    def list_close_source_calibrations(self, *, market_date: str | None = None) -> tuple[Mapping[str, object], ...]:
+        query = "SELECT payload_json FROM source_close_calibrations"
+        parameters: tuple[object, ...] = ()
+        if market_date:
+            query += " WHERE market_date = ?"
+            parameters = (market_date,)
+        query += " ORDER BY market_date, symbol"
+        with _database_connection(self.path) as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(json.loads(str(row[0])) for row in rows)
+
+    def last_regular_spot_observation(
+        self, *, source: str, symbol: str, market_date: str,
+    ) -> Mapping[str, object] | None:
+        """Return the final locally recorded regular-session quote for one date."""
+        local_date = datetime.fromisoformat(market_date).date()
+        new_york = ZoneInfo("America/New_York")
+        start = datetime.combine(local_date, wall_time(9, 30), tzinfo=new_york).astimezone(UTC)
+        end = datetime.combine(local_date, wall_time(16), tzinfo=new_york).astimezone(UTC)
+        with _database_connection(self.path) as connection:
+            row = connection.execute(
+                """SELECT price, observed_at, published_at FROM spot_observations
+                WHERE source = ? AND symbol = ? AND observed_at >= ? AND observed_at <= ?
+                ORDER BY observed_at DESC, id DESC LIMIT 1""",
+                (source.upper(), symbol.upper(), start.isoformat(), end.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"price": float(row[0]), "observed_at": str(row[1]), "published_at": str(row[2]) if row[2] else None}
 
     def record_execution_observation(
         self, *, observed_at: datetime, signal_id: str | None, observation_kind: str, market_id: str,

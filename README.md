@@ -176,6 +176,69 @@ polymarket-stock settle-price-ladders
 polymarket-stock price-ladder-report --date 2026-08-03
 ```
 
+### Isolated Above-X Historical Replay
+
+The `closes above $K` markets are intentionally separate from the core Up/Down
+policy. Gamma historical events are discovered with cursor pagination and
+per-symbol title filters; only markets whose rules explicitly use the Pyth
+close feed are retained.
+
+```zsh
+# Discover closed TSLA/NVDA Above-X markets for the available three-month window.
+polymarket-stock discover-above-x-history \
+  --symbols TSLA,NVDA --date-start 2026-05-04 --date-end 2026-08-02 \
+  --output data/historical/above_x_discovery.json
+
+# Download Yes/No CLOB price-history proxies, Gamma settlement, and Pyth final.
+# Existing local Pyth references are reused; PYTH_PRO_API_KEY is only needed
+# when a matching local final reference is unavailable.
+polymarket-stock backfill-above-x-history \
+  --discovery-json data/historical/above_x_discovery.json \
+  --output-dir data/historical/above_x
+
+# Check missing files before interpreting results.
+polymarket-stock above-x-coverage
+
+# Replay 12:00, 14:00, and 15:30 using a CLOB historical-price proxy.
+polymarket-stock backtest-above-x \
+  --discovery-json data/historical/above_x_discovery.json \
+  --data-dir data/historical/above_x \
+  --spot-data-dir data/historical/90d \
+  --minimum-edge 0.02 --lookback-days 20 \
+  --output data/historical/above_x_replay.json
+```
+
+### Core Above-X Veto Shadow
+
+Above-X does not create a second trading strategy. Its first live role is a
+read-only confirmation/veto diagnostic for an existing Core Up/Down checkpoint
+entry. `VETO` is recorded separately and never changes a Core paper position.
+
+```zsh
+# Historical, non-leaking 12:00 policy selection.
+polymarket-stock walk-forward-above-x-veto \
+  --checkpoint 1200_EDT --buffer 0.02 --minimum-edge 0.02 \
+  --training-days 6 --validation-days 2 \
+  --output data/historical/above_x_veto_walk_forward.json
+
+# Optional manual sync. collect-price-ladders runs this automatically after each poll.
+polymarket-stock sync-above-x-veto-shadow --minimum-strikes 3 --maximum-width 0.30
+```
+
+The historical search considers `BASELINE`, `VETO_DISAGREEMENT`, and
+`REQUIRE_CONFIRMATION` with 3/4/5 valid strikes. It does not tune historical
+spread/width because the CLOB history endpoint lacks historical bid/ask/depth.
+Live snapshots do have that information and label wide or unbracketed curves
+`UNRELIABLE`. Do not promote this diagnostic to a Core gate until it has enough
+fully out-of-sample Core entries.
+
+This replay reports observations, trades, Brier/log loss, win rate, and PnL,
+but historical `prices-history` is a price proxy rather than a recorded
+executable ask/bid/depth. A missing CLOB, Pyth, settlement, or intraday spot
+file causes the contract to be skipped and is visible in `above-x-coverage`;
+it never creates core paper positions. The localhost research dashboard has an
+`Above-X Research` tab showing the same coverage and replay status.
+
 The research UI has separate `Core Up/Down`, `Price Distribution`, and
 `Cross-Market` views. Ladder probabilities are fitted with weighted monotonic
 regression because `P(close > K)` must decrease as `K` rises. The comparison
@@ -225,6 +288,76 @@ because daily-equity contracts settle from Pyth. Missing/stale Pyth data, or a
 fresh Pyth/cross-check difference above 0.5%, blocks paper entry while retaining
 the observation for calibration. A stale Finnhub/Alpaca cross-check alone is a
 quality flag, not an entry block.
+
+### Exact Pyth Close Calibration
+
+Daily Up/Down contracts resolve from Pyth's final regular-session one-minute
+candle, not from Finnhub. During the Pyth Pro trial, set the key only in the
+local `.env` file:
+
+```dotenv
+PYTH_PRO_API_KEY=replace_with_your_trial_key
+```
+
+When `supervise-shadow` remains running, it automatically performs one
+research-only calibration after 16:03 New York time. For every Finnhub symbol
+with a quote captured in the 15:59–16:00 ET window, it downloads the official
+Pyth final-minute close and prior Pyth close, then stores: absolute error in
+basis points, source timestamps, Pyth/Finnhub Up/Down classification, and
+whether the source difference would have flipped the contract outcome. This
+never changes a paper entry or a Core signal.
+
+The post-close command is idempotent and is only needed to retry a date or
+produce a JSON report manually; it is not a fourth always-running terminal:
+
+```zsh
+polymarket-stock close-source-calibration \
+  --market-date 2026-08-03 \
+  --output data/close_source_calibration_2026-08-03.json
+```
+
+After the trial, the supervisor skips this exact-candle diagnostic when the Pro
+key is absent. Finnhub and Polymarket collection continue normally, but new
+exact Pyth-close calibration rows cannot be created.
+
+Normal-session source observations and Pyth/Finnhub comparisons are retained at
+one row per symbol/source/minute. The final 15:55–16:00 ET window remains
+second-level so the exact-close calibration can detect a close-window mismatch.
+This retention policy affects SQLite persistence only: the in-memory streaming
+risk gates and live evaluations still respond to every received update.
+
+### Pyth-Outage / Finnhub-Only Fallback
+
+`PYTH_PRIMARY` remains the default research mode. It uses Pyth Hermes as the
+model spot and Finnhub as a cross-check. `FINNHUB_ONLY` intentionally opens no
+Hermes stream: it uses Finnhub spot plus Polymarket CLOB quotes. A spot within
+35 bps of an *estimated* threshold is labelled `NEAR_ESTIMATED_THRESHOLD` and
+gets an additional model-error buffer; it is not suppressed solely for that
+reason.
+
+```zsh
+# After Pyth access ends: no Hermes stream, no Pyth freshness gate.
+polymarket-stock supervise-shadow \
+  --spot-provider finnhub \
+  --spot-mode FINNHUB_ONLY \
+  --finnhub-threshold-safety-bps 35 \
+  --duration-seconds 0
+```
+
+This is not an exact zero-Pyth replacement. A daily contract's threshold is
+the prior **Pyth final Close**, which Polymarket metadata does not provide as a
+number. While Pro access exists, the supervisor caches every active symbol's
+final Pyth candle after 16:03 ET. Finnhub-only mode reads that cache first. If
+the cache is absent, it combines any available Nasdaq daily close, Yahoo daily
+close, and locally captured Finnhub final regular-session trade. Each source is
+debiased using prior exact Pyth-close observations, and the median becomes the
+threshold. The dashboard shows source count, calibration sample count, estimated
+P90 error, and one of `CALIBRATED_MULTI_SOURCE_HIGH`,
+`CALIBRATED_MULTI_SOURCE_MEDIUM`, or `SINGLE_SOURCE_ESTIMATE`. The model applies
+an uncertainty buffer proportional to that error. Therefore the strategy can
+continue issuing research and paper recommendations after Pyth access ends, but
+it cannot claim exact Pyth threshold alignment until the estimate has enough
+out-of-sample validation.
 
 If Finnhub's earnings-calendar request times out, the supervisor remains running
 and reports `SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE`. Affected markets receive the
