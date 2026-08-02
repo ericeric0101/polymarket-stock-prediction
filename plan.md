@@ -429,3 +429,9 @@ order submission, or an intraday exit strategy.
 | 2026-07-29 | Added selected-side first-signal calibration cohorts with Wilson intervals, no-lookahead probability-calibration walk-forward research, and explicit fixed-small-position-only/Kelly-disabled readiness in the dashboard and CLI. | Complete |
 | 2026-08-01 | Added training-calibrated capped Top-5 walk-forward, incremental direction benchmarks, depth/latency execution diagnostics, fresh Pyth divergence analysis and uncertainty buffer, volatility-model disagreement gate, and executable-bid exit replay. | Complete |
 | 2026-08-01 | Added an isolated TSLA/NVDA fixed-strike price-ladder sidecar: strict Pyth-rule parsing, complementary CLOB books/depth, independent SQLite tables and settlements, monotonic implied close distributions, checkpoint diagnostics, and a localhost research dashboard. | Complete |
+
+### Engineering Maintenance
+
+| Date | Change | Status |
+|---|---|---|
+| 2026-08-02 | Extracted shared SQLite transaction policy, asynchronous journal writer, shared stream router, and long-running CLI handlers. `ShadowJournal` remains the compatibility facade; no live-trading capability was added. | Complete |
