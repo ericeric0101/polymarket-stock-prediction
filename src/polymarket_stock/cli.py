@@ -13,6 +13,7 @@ import ssl
 from .above_x_research import AboveXHistoricalDiscovery, above_x_coverage_report, backfill_above_x_markets, write_above_x_discovery
 from .above_x_backtest import run_above_x_backtest
 from .above_x_veto import historical_observations, sync_live_veto_shadow, walk_forward
+from . import cli_runtime
 from .alpaca_options import AlpacaCredentials, AlpacaIndicativeOptionsClient
 from .baseline import DailyClose, daily_close_data_is_fresh, evaluate_realized_vol_baseline, load_daily_bars_csv, load_daily_closes_csv
 from .batch_backfill import backfill_discovered_markets
@@ -34,15 +35,10 @@ from .market_discovery import GammaMarketClient, MarketCandidate
 from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, load_baseline_cache, save_baseline_cache
 from .option_pricing_validation import OptionPricingInputs, validate_option_quote
 from .polymarket_data import ClobMarketDataClient
-from .paper_reporting import paper_performance
 from .probability_calibration import sizing_readiness, stratified_first_signal_calibration, walk_forward_probability_calibration
-from .price_ladder_collector import PriceLadderCollector
-from .price_ladder_journal import PriceLadderJournal
 from .pyth_clob_backtest import run_pyth_clob_backtest
 from .pyth_history import PythHistoryClient
 from .replay import replay_market_observations, replay_settled_positions
-from .reporting import make_event_sink, render_dashboard, run_live_dashboard
-from .research_web import ResearchDashboardServer
 from .realtime import RealtimeBaselineEvaluator
 from .settled_market_data import backfill_settled_market_data
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, ShadowStreamCoordinator, SpotQuote, run_with_reconnect
@@ -50,7 +46,6 @@ from .top5_walk_forward import (
     parse_checkpoint_sets, parse_probability_values, top_five_policies, walk_forward_top_five_policy,
 )
 from .strategy_diagnostics import strategy_diagnostics
-from .supervisor import MultiMarketShadowSupervisor
 from .yahoo_data import YahooChartClient, YahooPayloadError
 
 
@@ -688,34 +683,7 @@ def main() -> None:
                 "VPN or proxy certificate authority; SSL verification remains enabled."
             ) from error
     elif arguments.command == "supervise-shadow":
-        api_key, api_secret, finnhub_api_key = _stream_credentials(arguments.spot_provider)
-        supervisor = MultiMarketShadowSupervisor(
-            journal=journal, log_path=settings.log_path, spot_provider=arguments.spot_provider,
-            volatility_estimator=arguments.volatility_estimator, volatility_decay=arguments.volatility_decay,
-            comparison_estimators=tuple(item.strip() for item in arguments.comparison_estimators.split(",") if item.strip()),
-            finnhub_api_key=finnhub_api_key, alpaca_api_key=api_key, alpaca_api_secret=api_secret,
-            max_markets=arguments.max_markets, minimum_seconds_to_resolution=arguments.minimum_seconds_to_resolution,
-            maker_minimum_edge=arguments.maker_minimum_edge,
-            maker_reprice_minimum_price_change=arguments.maker_reprice_minimum_price_change,
-            maker_minimum_quote_lifetime_seconds=arguments.maker_minimum_quote_lifetime_seconds,
-            paper_batch_seconds=arguments.paper_batch_seconds, max_daily_paper_entries=arguments.max_daily_paper_entries,
-            max_per_risk_group=arguments.max_per_risk_group,
-            max_same_direction_paper_entries=arguments.max_same_direction_paper_entries,
-            pyth_api_key=os.getenv("PYTH_API_KEY", ""),
-            pyth_pro_api_key=os.getenv("PYTH_PRO_API_KEY", ""),
-            spot_mode=arguments.spot_mode,
-            finnhub_threshold_safety_bps=arguments.finnhub_threshold_safety_bps,
-            tradier_api_token=os.getenv("TRADIER_API_TOKEN", ""),
-            polygon_api_key=os.getenv("POLYGON_API_KEY", ""),
-            event_sink=make_event_sink(settings.log_path, arguments.output_format),
-        )
-        try:
-            _run_async(supervisor.run(arguments.scan_interval_seconds, arguments.duration_seconds))
-        except ssl.SSLCertVerificationError as error:
-            raise SystemExit(
-                "Supervisor TLS verification failed. Set SSL_CERT_FILE in .env to the PEM file for your "
-                "VPN or proxy certificate authority; SSL verification remains enabled."
-            ) from error
+        cli_runtime.supervise_shadow(arguments, settings, journal, _stream_credentials, _run_async)
     elif arguments.command == "paper-positions":
         positions = journal.list_paper_positions(arguments.status)
         print(json.dumps([_paper_position_payload(position) for position in positions], sort_keys=True))
@@ -724,54 +692,17 @@ def main() -> None:
     elif arguments.command == "portfolio-decisions":
         print(json.dumps(journal.list_portfolio_decisions(arguments.limit), sort_keys=True))
     elif arguments.command == "paper-performance":
-        print(json.dumps(paper_performance(journal.list_paper_positions()).as_payload(), sort_keys=True))
+        print(cli_runtime.paper_performance_payload(journal))
     elif arguments.command == "dashboard":
-        positions = journal.list_paper_positions()
-        if arguments.once:
-            print(render_dashboard(
-                journal.dashboard_rows(arguments.limit),
-                sum(item.status == "OPEN" for item in positions),
-                sum(item.status == "SETTLED" for item in positions),
-                positions=positions,
-                signal_performance=journal.first_signal_performance(),
-                sizing=sizing_readiness(journal.list_first_signal_calibration_observations()),
-                daily_entry_limit=arguments.daily_entry_limit,
-            ))
-        else:
-            run_live_dashboard(
-                journal, refresh_seconds=arguments.refresh_seconds, limit=arguments.limit,
-                daily_entry_limit=arguments.daily_entry_limit,
-            )
+        cli_runtime.dashboard(arguments, journal)
     elif arguments.command in {"discover-price-ladders", "collect-price-ladders", "settle-price-ladders"}:
-        symbols = tuple(
-            symbol.strip().upper()
-            for symbol in getattr(arguments, "symbols", "").split(",")
-            if symbol.strip()
-        )
-        ladder_journal = PriceLadderJournal(settings.journal_path)
-        ladder_journal.initialize()
-        collector = PriceLadderCollector(journal=ladder_journal)
-        try:
-            if arguments.command == "discover-price-ladders":
-                print(json.dumps(collector.discover_and_store(symbols=symbols).as_payload(), sort_keys=True))
-            elif arguments.command == "collect-price-ladders":
-                collector.run(
-                    symbols=symbols, interval_seconds=arguments.interval_seconds,
-                    duration_seconds=arguments.duration_seconds,
-                )
-            else:
-                print(json.dumps(collector.settle_stored_contracts(), sort_keys=True))
-        except PublicApiError as error:
-            _report_public_api_failure(settings, "PRICE_LADDER_PUBLIC_API_FAILED", error)
+        cli_runtime.price_ladders(arguments, settings, _report_public_api_failure)
     elif arguments.command == "price-ladder-report":
         report = cross_market_report(settings.journal_path, market_date=arguments.date)
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))
     elif arguments.command == "research-dashboard":
-        ResearchDashboardServer(
-            settings.journal_path, host=arguments.host, port=arguments.port,
-            limit=arguments.limit, daily_entry_limit=arguments.daily_entry_limit,
-        ).serve_forever()
+        cli_runtime.research_dashboard(arguments, settings)
     elif arguments.command == "replay-settled":
         report = replay_settled_positions(journal.list_paper_positions()).as_payload()
         if arguments.output:
@@ -917,10 +848,7 @@ def main() -> None:
         _write_optional_json(arguments.output, payload)
         print(json.dumps(payload, sort_keys=True))
     elif arguments.command == "settle-paper-positions":
-        supervisor = MultiMarketShadowSupervisor(
-            journal=journal, log_path=settings.log_path, spot_provider="finnhub", tradier_api_token=os.getenv("TRADIER_API_TOKEN", "")
-        )
-        _run_async(supervisor.settle_open_positions())
+        cli_runtime.settle_paper_positions(settings, journal, _run_async)
     elif arguments.command == "scan-event":
         symbols = tuple(symbol.strip().upper() for symbol in arguments.symbols.split(",") if symbol.strip())
         try:
