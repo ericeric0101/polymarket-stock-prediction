@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -128,6 +128,19 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(typed_spot.published_at, datetime(2026, 7, 27, 14, tzinfo=UTC))
         self.assertEqual(typed.symbol, "TSLA")
         self.assertAlmostEqual(typed.difference_bps, -24.9376558603)
+
+    def test_spot_observations_filter_market_date_in_sql(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            journal.record_spot_observation({
+                "observed_at": "2026-07-27T04:00:00+00:00", "source": "FINNHUB", "symbol": "TSLA", "price": 100.0,
+            })
+            journal.record_spot_observation({
+                "observed_at": "2026-07-28T04:00:00+00:00", "source": "FINNHUB", "symbol": "TSLA", "price": 101.0,
+            })
+            rows = journal.list_spot_observations(source="FINNHUB", market_date=date(2026, 7, 27))
+        self.assertEqual([row.price for row in rows], [100.0])
 
     def test_contract_review_is_upserted(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

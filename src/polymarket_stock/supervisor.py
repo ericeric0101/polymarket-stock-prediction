@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 import json
@@ -33,6 +34,7 @@ from .trading_calendar import previous_nyse_trading_day
 from .threshold_estimation import ThresholdSource, calibrated_threshold_estimate
 from .yahoo_data import YahooChartClient, YahooPayloadError
 from .realtime import RealtimeBaselineEvaluator
+from .storage.writer import JournalWriter
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, SpotQuote, run_with_reconnect
 
 
@@ -266,6 +268,7 @@ class MultiMarketShadowSupervisor:
         except ValueError:
             self.calibration = None
         self.event_sink = event_sink or self._default_event_sink
+        self._writer = JournalWriter(on_error=self._on_writer_error)
         self.runtimes: dict[str, ActiveMarket] = {}
         self._stream_tasks: list[asyncio.Task[None]] = []
         self._stream_runtimes: dict[str, ActiveMarket] = {}
@@ -372,6 +375,13 @@ class MultiMarketShadowSupervisor:
             },
         )
         await self._reconcile_streams()
+
+    def _on_writer_error(self, error: Exception) -> None:
+        self.event_sink("JOURNAL_WRITE_FAILED", {"error_type": type(error).__name__, "error": str(error)})
+
+    def _submit_write(self, kind: str, operation: Callable[[], None]) -> None:
+        if not self._writer.submit(operation):
+            self.event_sink("JOURNAL_WRITE_BACKPRESSURE", {"kind": kind, "queue": "full"})
 
     async def _resolve_risk_reasons(
         self, *, market_id: str, symbol: str, now: datetime, resolves_at: datetime,
@@ -491,10 +501,10 @@ class MultiMarketShadowSupervisor:
             await self._evaluate_runtime(runtime, payload)
 
         async def record_spot_observation(payload: Mapping[str, object]) -> None:
-            self.journal.record_spot_observation(payload)
+            self._submit_write("SPOT_OBSERVATION", partial(self.journal.record_spot_observation, payload))
 
         async def record_spot_comparison(payload: Mapping[str, object]) -> None:
-            self.journal.record_spot_source_comparison(payload)
+            self._submit_write("SPOT_COMPARISON", partial(self.journal.record_spot_source_comparison, payload))
 
         async def record_source_gap(payload: Mapping[str, object]) -> None:
             self.event_sink("SOURCE_SPOT_GAP_DETECTED", payload)
@@ -583,19 +593,20 @@ class MultiMarketShadowSupervisor:
             "up_book": _book_summary(coordinator, token_ids[0]),
             "down_book": _book_summary(coordinator, token_ids[1]),
         }
-        maker_quotes = self._sync_maker_shadow_quotes(runtime, evaluation, result, now)
+        maker_quotes = await asyncio.to_thread(self._sync_maker_shadow_quotes, runtime, evaluation, result, now)
         result["maker_shadow_quotes"] = maker_quotes
         checkpoint = checkpoint_window(now) if evaluation.market_session == "REGULAR" and evaluation.fair_up_probability is not None else None
         checkpoint_recorded = False
         if checkpoint:
             checkpoint_key = (checkpoint.checkpoint_date, checkpoint.checkpoint_name)
             if checkpoint_key not in runtime.recorded_checkpoint_keys:
-                checkpoint_recorded = self.journal.record_checkpoint_observation(
-                    checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result
+                checkpoint_recorded = await asyncio.to_thread(
+                    self.journal.record_checkpoint_observation,
+                    checkpoint_date=checkpoint.checkpoint_date, checkpoint_name=checkpoint.checkpoint_name, payload=result,
                 )
                 runtime.recorded_checkpoint_keys.add(checkpoint_key)
                 if checkpoint_recorded:
-                    self._record_execution_books(runtime, evaluation, result, now, "CHECKPOINT", None)
+                    await asyncio.to_thread(self._record_execution_books, runtime, evaluation, result, now, "CHECKPOINT", None)
                     self.event_sink("CHECKPOINT_OBSERVATION_RECORDED", {
                         "market_id": runtime.candidate.market_id, "symbol": runtime.symbol,
                         "checkpoint_date": checkpoint.checkpoint_date, "checkpoint_name": checkpoint.checkpoint_name,
@@ -622,7 +633,7 @@ class MultiMarketShadowSupervisor:
                 or (now - runtime.last_evaluation_recorded_at).total_seconds() >= 60
             )
         if should_record:
-            self.journal.record_realtime_evaluation(result)
+            self._submit_write("REALTIME_EVALUATION", partial(self.journal.record_realtime_evaluation, result))
             runtime.last_evaluation_recorded_at = now
             self.event_sink("REALTIME_BASELINE_EVALUATED", result)
         if paper_signal:
@@ -657,7 +668,7 @@ class MultiMarketShadowSupervisor:
         self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], signal_id: str, delay_seconds: int,
     ) -> None:
         await asyncio.sleep(delay_seconds)
-        self._record_execution_books(runtime, evaluation, payload, datetime.now(UTC), f"MARKOUT_{delay_seconds}S", signal_id)
+        await asyncio.to_thread(self._record_execution_books, runtime, evaluation, payload, datetime.now(UTC), f"MARKOUT_{delay_seconds}S", signal_id)
 
     async def _queue_paper_entry(
         self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
@@ -685,8 +696,9 @@ class MultiMarketShadowSupervisor:
             return
         now = datetime.now(UTC)
         today = now.astimezone(NEW_YORK).date()
+        positions = await asyncio.to_thread(self.journal.list_paper_positions)
         existing = tuple(
-            position for position in self.journal.list_paper_positions()
+            position for position in positions
             if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == today
         )
         existing_market_ids = {position.market_id for position in existing}
@@ -700,14 +712,16 @@ class MultiMarketShadowSupervisor:
         )
         pending_by_market = {item.candidate.market_id: item for item in pending}
         for item in rejected_existing:
-            self.journal.record_portfolio_decision(
+            await asyncio.to_thread(
+                self.journal.record_portfolio_decision,
                 batch_id=batch_id, market_id=item.candidate.market_id, symbol=item.candidate.symbol,
                 outcome=item.candidate.outcome, risk_group=item.candidate.risk_group, edge=item.candidate.edge,
                 selected=False, reason="ALREADY_POSITIONED", payload=item.payload, created_at=now,
             )
         for decision in decisions:
             item = pending_by_market[decision.candidate.market_id]
-            self.journal.record_portfolio_decision(
+            await asyncio.to_thread(
+                self.journal.record_portfolio_decision,
                 batch_id=batch_id, market_id=decision.candidate.market_id, symbol=decision.candidate.symbol,
                 outcome=decision.candidate.outcome, risk_group=decision.candidate.risk_group, edge=decision.candidate.edge,
                 selected=decision.accepted, reason=decision.reason, payload=item.payload, created_at=now,
@@ -718,13 +732,14 @@ class MultiMarketShadowSupervisor:
             fee_rate = item.runtime.up_fee_rate if decision.candidate.outcome == "UP" else item.runtime.down_fee_rate
             if fee_rate is None:
                 continue
-            position, created = self.journal.open_paper_position(
+            position, created = await asyncio.to_thread(
+                self.journal.open_paper_position,
                 market_id=decision.candidate.market_id, symbol=decision.candidate.symbol, outcome=decision.candidate.outcome,
                 entry_ask=decision.candidate.entry_ask, fair_probability=decision.candidate.fair_probability,
                 model_version=str(item.payload["model_version"]), payload=item.payload, fee_rate=fee_rate,
             )
             if created:
-                self._record_execution_books(item.runtime, item.payload, item.payload, now, "PAPER_ENTRY", position.position_id)
+                await asyncio.to_thread(self._record_execution_books, item.runtime, item.payload, item.payload, now, "PAPER_ENTRY", position.position_id)
                 self._schedule_markouts(item.runtime, item.payload, item.payload, position.position_id)
                 self.event_sink("PAPER_POSITION_OPENED", {
                     "batch_id": batch_id, "position_id": position.position_id, "market_id": position.market_id,
@@ -781,7 +796,8 @@ class MultiMarketShadowSupervisor:
         return quotes
 
     async def _settle_open_positions(self) -> None:
-        for position in self.journal.list_paper_positions("OPEN"):
+        open_positions = await asyncio.to_thread(self.journal.list_paper_positions, "OPEN")
+        for position in open_positions:
             try:
                 settlement = await asyncio.to_thread(self.gamma.get_market_settlement, position.market_id)
             except Exception as error:  # Public data failures should not stop the supervisor.
@@ -790,16 +806,18 @@ class MultiMarketShadowSupervisor:
             outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
             if not settlement.closed or outcome not in {"UP", "DOWN"}:
                 continue
-            settled = self.journal.settle_paper_position(
+            settled = await asyncio.to_thread(
+                self.journal.settle_paper_position,
                 position.position_id, settlement_outcome=outcome, settlement_payload=settlement.raw_payload,
             )
-            self.journal.cancel_maker_shadow_quotes(position.market_id, "MARKET_SETTLED")
+            await asyncio.to_thread(self.journal.cancel_maker_shadow_quotes, position.market_id, "MARKET_SETTLED")
             self.event_sink("PAPER_POSITION_SETTLED", {"position_id": settled.position_id, "market_id": settled.market_id, "outcome": settled.outcome, "settlement_outcome": outcome, "realized_pnl": settled.realized_pnl})
 
     async def _reconcile_evaluation_settlements(self) -> None:
         """Attach official outcomes to all valid observations, not only paper entries."""
 
-        for market_id in self.journal.pending_evaluation_market_ids():
+        pending_market_ids = await asyncio.to_thread(self.journal.pending_evaluation_market_ids)
+        for market_id in pending_market_ids:
             try:
                 settlement = await asyncio.to_thread(self.gamma.get_market_settlement, market_id)
             except Exception as error:
@@ -807,8 +825,8 @@ class MultiMarketShadowSupervisor:
                 continue
             outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
             if settlement.closed and outcome in {"UP", "DOWN"}:
-                self.journal.record_market_settlement(market_id, outcome, settlement.raw_payload)
-                self.journal.cancel_maker_shadow_quotes(market_id, "MARKET_SETTLED")
+                await asyncio.to_thread(self.journal.record_market_settlement, market_id, outcome, settlement.raw_payload)
+                await asyncio.to_thread(self.journal.cancel_maker_shadow_quotes, market_id, "MARKET_SETTLED")
                 self.event_sink("EVALUATION_MARKET_SETTLED", {"market_id": market_id, "settlement_outcome": outcome})
 
     async def settle_open_positions(self) -> None:
@@ -869,8 +887,7 @@ class MultiMarketShadowSupervisor:
         symbols = tuple(sorted({runtime.symbol for runtime in self.runtimes.values()}))
         if not symbols:
             symbols = tuple(sorted({
-                item.symbol for item in self.journal.list_spot_observations(source="FINNHUB")
-                if item.observed_at.astimezone(NEW_YORK).date() == market_date
+                item.symbol for item in self.journal.list_spot_observations(source="FINNHUB", market_date=market_date)
             }))
         if not symbols:
             return
@@ -924,7 +941,7 @@ class MultiMarketShadowSupervisor:
         date_key = market_date.isoformat()
         if date_key in self._close_calibration_attempted_dates:
             return
-        all_spots = self.journal.list_spot_observations()
+        all_spots = self.journal.list_spot_observations(market_date=market_date)
         finnhub_spots = tuple(
             SpotQuote(item.source, item.symbol, item.price, item.observed_at, item.published_at)
             for item in all_spots if item.source == "FINNHUB"
@@ -979,6 +996,7 @@ class MultiMarketShadowSupervisor:
         if scan_interval_seconds <= 0 or duration_seconds < 0:
             raise ValueError("invalid supervisor timing")
         started_at = datetime.now(UTC)
+        await self._writer.start()
         try:
             while True:
                 await self.refresh()
@@ -996,6 +1014,7 @@ class MultiMarketShadowSupervisor:
         finally:
             await self._stop_paper_batch()
             await self._stop_streams()
+            await self._writer.close()
             # Stop producers before final network reconciliation so a slow Gamma
             # response cannot leave streams writing while shutdown is in progress.
             try:

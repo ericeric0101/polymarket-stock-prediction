@@ -8,7 +8,6 @@ from datetime import UTC, datetime, timedelta
 import inspect
 import json
 import ssl
-import sqlite3
 from typing import Awaitable, Callable, Mapping
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
@@ -68,12 +67,6 @@ async def run_with_reconnect(
         delay_seconds = min(maximum_delay_seconds, delay_seconds * 2)
 
 
-DATABASE_LOCK_RETRY_SECONDS = (0.05, 0.15, 0.45)
-
-
-def _is_database_locked(error: sqlite3.OperationalError) -> bool:
-    return "database is locked" in str(error).lower() or "database is busy" in str(error).lower()
-
 
 class DebouncedReevaluation:
     def __init__(
@@ -103,39 +96,22 @@ class DebouncedReevaluation:
                 return
             reasons = sorted(self._reasons)
             self._reasons.clear()
-            payload = {
+            await _emit(self._callback, {
                 "event_type": "SHADOW_REEVALUATION_REQUESTED", "reasons": reasons,
                 "recorded_at": datetime.now(UTC).isoformat(),
-            }
-            for attempt, delay_seconds in enumerate((0.0, *DATABASE_LOCK_RETRY_SECONDS), start=1):
-                if delay_seconds:
-                    await asyncio.sleep(delay_seconds)
-                try:
-                    await _emit(self._callback, payload)
-                    return
-                except sqlite3.OperationalError as error:
-                    if not _is_database_locked(error):
-                        raise
-                    final_attempt = attempt == len(DATABASE_LOCK_RETRY_SECONDS) + 1
-                    if self._error_callback is not None:
-                        await _emit(self._error_callback, {
-                            "event_type": (
-                                "SHADOW_REEVALUATION_DATABASE_LOCKED" if final_attempt
-                                else "SHADOW_REEVALUATION_DATABASE_LOCK_RETRYING"
-                            ),
-                            "attempt": attempt, "attempts": attempt, "error": str(error),
-                            "reasons": reasons,
-                            "retry_in_seconds": None if final_attempt else DATABASE_LOCK_RETRY_SECONDS[attempt - 1],
-                            "recorded_at": datetime.now(UTC).isoformat(),
-                        })
-                    if final_attempt:
-                        return
+            })
         except asyncio.CancelledError:
             return
         except KeyboardInterrupt:
-            # A second Ctrl+C can interrupt a callback while asyncio is draining
-            # stream tasks. It is a normal shutdown path, not an unhandled task error.
             return
+        except Exception as error:
+            if self._error_callback is not None:
+                await _emit(self._error_callback, {
+                    "event_type": "SHADOW_REEVALUATION_FAILED",
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                })
 
     async def close(self) -> None:
         self._closed = True

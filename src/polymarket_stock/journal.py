@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime, time as wall_time
+from datetime import UTC, date, datetime, time as wall_time, timedelta
 from contextlib import contextmanager
 import hashlib
 import json
@@ -1068,7 +1068,8 @@ class ShadowJournal:
         ) for row in rows)
 
     def list_spot_observations(
-        self, *, source: str | None = None, sample_every_seconds: int = 1,
+        self, *, source: str | None = None, market_date: date | None = None,
+        sample_every_seconds: int = 1,
     ) -> tuple[StoredSpotObservation, ...]:
         if sample_every_seconds < 1:
             raise ValueError("sample_every_seconds must be positive")
@@ -1078,6 +1079,12 @@ class ShadowJournal:
         if source:
             conditions.append("source = ?")
             parameters.append(source.upper())
+        if market_date is not None:
+            new_york = ZoneInfo("America/New_York")
+            start = datetime.combine(market_date, wall_time.min, tzinfo=new_york).astimezone(UTC)
+            end = datetime.combine(market_date + timedelta(days=1), wall_time.min, tzinfo=new_york).astimezone(UTC)
+            conditions.extend(("observed_at >= ?", "observed_at < ?"))
+            parameters.extend((start.isoformat(), end.isoformat()))
         if sample_every_seconds > 1:
             conditions.append("unixepoch(observed_at) % ? = 0")
             parameters.append(sample_every_seconds)
