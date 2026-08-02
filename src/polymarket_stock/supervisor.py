@@ -10,8 +10,8 @@ import json
 from pathlib import Path
 import re
 from typing import Callable, Mapping
-from zoneinfo import ZoneInfo
 
+from .domain import EventSink, NEW_YORK
 from .baseline import DailyClose, daily_close_data_is_fresh
 from .calibration import CalibrationRecommendation, load_calibration_recommendation
 from .checkpoints import checkpoint_window
@@ -41,9 +41,6 @@ from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarke
 MODEL_VERSION = "realized-vol-observation-v1-buffer-2pct"
 IV_MODEL_VERSION = "iv-blend-v1-buffer-2pct"
 MAX_OPTION_IV_AGE_SECONDS = 900.0
-EventSink = Callable[[str, Mapping[str, object]], None]
-NEW_YORK = ZoneInfo("America/New_York")
-
 
 def symbol_from_candidate(candidate: MarketCandidate) -> str | None:
     """Daily equity templates publish the ticker in parentheses in the question."""
