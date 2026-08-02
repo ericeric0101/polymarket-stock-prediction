@@ -11,12 +11,26 @@ class ConfigurationError(ValueError):
     """Raised when configuration would weaken the Phase 0 safety boundary."""
 
 
-def _load_dotenv(path: Path = Path(".env")) -> None:
+def repo_root() -> Path:
+    """Return the canonical repository root, with an explicit override for deployments."""
+    override = os.getenv("POLYMARKET_STOCK_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else (repo_root() / path).resolve()
+
+
+def _load_dotenv(path: Path | None = None) -> None:
     """Load simple KEY=VALUE pairs without overriding the invoking environment."""
 
-    if not path.is_file():
+    dotenv_path = path or (repo_root() / ".env")
+    if not dotenv_path.is_file():
         return
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for line_number, raw_line in enumerate(dotenv_path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -58,6 +72,6 @@ class Settings:
         return cls(
             shadow_mode=_required_bool("SHADOW_MODE", expected=True),
             live_trading_enabled=_required_bool("LIVE_TRADING_ENABLED", expected=False),
-            journal_path=Path(os.getenv("JOURNAL_PATH", "data/shadow_journal.db")),
-            log_path=Path(os.getenv("LOG_PATH", "logs/shadow_bot.jsonl")),
+            journal_path=_resolve_path(os.getenv("JOURNAL_PATH", "data/shadow_journal.db")),
+            log_path=_resolve_path(os.getenv("LOG_PATH", "logs/shadow_bot.jsonl")),
         )

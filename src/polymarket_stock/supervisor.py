@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import json
 from pathlib import Path
 import re
@@ -313,25 +313,16 @@ class MultiMarketShadowSupervisor:
             existing = self.runtimes.get(candidate.market_id)
             if existing and existing.symbol == symbol and existing.candidate.end_date == candidate.end_date and existing.token_ids == (candidate.outcome_a_token_id, candidate.outcome_b_token_id):
                 existing.up_fee_rate, existing.down_fee_rate = await asyncio.to_thread(self._fee_rates, candidate)
-                existing.option_surface, existing.option_quality_flags = await asyncio.to_thread(
-                    self._option_surface, symbol, existing.reference_spot, now, contract.resolves_at
+                live_quote = existing.coordinator.latest_quote(
+                    "PYTH_HERMES" if self.spot_mode == "PYTH_PRIMARY" else "FINNHUB", symbol,
                 )
-                try:
-                    events = await asyncio.to_thread(
-                        combined_risk_events,
-                        self.event_calendar_path,
-                        symbol,
-                        now,
-                        contract.resolves_at,
-                        self.finnhub_api_key,
-                        self.earnings_client,
-                    )
-                    existing.risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
-                except EventCalendarUnavailable as error:
-                    existing.risk_reasons = ("EVENT_CALENDAR_UNAVAILABLE",)
-                    self.event_sink("SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE", {"market_id": candidate.market_id, "error": str(error)})
-                except EventCalendarError:
-                    existing.risk_reasons = ("EVENT_CALENDAR_INVALID",)
+                spot_for_options = live_quote.price if live_quote else existing.reference_spot
+                existing.option_surface, existing.option_quality_flags = await asyncio.to_thread(
+                    self._option_surface, symbol, spot_for_options, now, contract.resolves_at
+                )
+                existing.risk_reasons = await self._resolve_risk_reasons(
+                    market_id=candidate.market_id, symbol=symbol, now=now, resolves_at=contract.resolves_at,
+                )
                 runtimes[candidate.market_id] = existing
                 continue
             try:
@@ -351,32 +342,23 @@ class MultiMarketShadowSupervisor:
                 price_to_beat, pyth_reference = await asyncio.to_thread(
                     self._pyth_price_to_beat, contract, closes, yahoo_closes,
                 )
-            except Exception as error:
+            except (PublicApiError, YahooPayloadError, NasdaqPayloadError, OSError, ValueError) as error:
                 self.event_sink("SUPERVISOR_MARKET_SKIPPED", {
                     "market_id": candidate.market_id, "symbol": symbol, "reason": "PYTH_REFERENCE_UNAVAILABLE", "error": str(error),
+                })
+                continue
+            except Exception as error:
+                self.event_sink("SUPERVISOR_INTERNAL_ERROR", {
+                    "market_id": candidate.market_id, "symbol": symbol, "stage": "price_to_beat", "error_type": type(error).__name__, "error": str(error),
                 })
                 continue
             up_fee_rate, down_fee_rate = await asyncio.to_thread(self._fee_rates, candidate)
             option_surface, option_flags = await asyncio.to_thread(
                 self._option_surface, symbol, reference_quote.price, now, contract.resolves_at
             )
-            try:
-                events = await asyncio.to_thread(
-                    combined_risk_events,
-                    self.event_calendar_path,
-                    symbol,
-                    now,
-                    contract.resolves_at,
-                    self.finnhub_api_key,
-                    self.earnings_client,
-                )
-                risk_reasons = tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
-            except EventCalendarUnavailable as error:
-                risk_reasons = ("EVENT_CALENDAR_UNAVAILABLE",)
-                self.event_sink("SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE", {"market_id": candidate.market_id, "error": str(error)})
-            except EventCalendarError as error:
-                risk_reasons = ("EVENT_CALENDAR_INVALID",)
-                self.event_sink("SUPERVISOR_EVENT_CALENDAR_ERROR", {"market_id": candidate.market_id, "error": str(error)})
+            risk_reasons = await self._resolve_risk_reasons(
+                market_id=candidate.market_id, symbol=symbol, now=now, resolves_at=contract.resolves_at,
+            )
             runtimes[candidate.market_id] = self._make_runtime(
                 candidate, contract, closes, provider, reference_quote, price_to_beat, pyth_reference, up_fee_rate, down_fee_rate,
                 option_surface, option_flags, risk_reasons
@@ -390,6 +372,22 @@ class MultiMarketShadowSupervisor:
             },
         )
         await self._reconcile_streams()
+
+    async def _resolve_risk_reasons(
+        self, *, market_id: str, symbol: str, now: datetime, resolves_at: datetime,
+    ) -> tuple[str, ...]:
+        try:
+            events = await asyncio.to_thread(
+                combined_risk_events, self.event_calendar_path, symbol, now, resolves_at,
+                self.finnhub_api_key, self.earnings_client,
+            )
+        except EventCalendarUnavailable as error:
+            self.event_sink("SUPERVISOR_EVENT_CALENDAR_UNAVAILABLE", {"market_id": market_id, "error": str(error)})
+            return ("EVENT_CALENDAR_UNAVAILABLE",)
+        except EventCalendarError as error:
+            self.event_sink("SUPERVISOR_EVENT_CALENDAR_ERROR", {"market_id": market_id, "error": str(error)})
+            return ("EVENT_CALENDAR_INVALID",)
+        return tuple(f"BLOCKING_EVENT:{event.kind.upper()}" for event in events if event.blocking)
 
     def _pyth_price_to_beat(
         self,
@@ -890,7 +888,7 @@ class MultiMarketShadowSupervisor:
             self.event_sink("PYTH_DAILY_CLOSE_CACHE_FAILED", {"market_date": date_key, "error": str(error)})
 
     def _supplemental_close_sources(
-        self, symbols: tuple[str, ...], market_date: datetime.date,
+        self, symbols: tuple[str, ...], market_date: date,
     ) -> Mapping[str, Mapping[str, float]]:
         """Best-effort free daily closes to calibrate against Pyth during the trial."""
         result: dict[str, dict[str, float]] = {"NASDAQ_DAILY_CLOSE": {}, "YAHOO_DAILY_CLOSE": {}}

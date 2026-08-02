@@ -15,6 +15,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from .fees import estimate_taker_fee_usdc
+from .evaluation_payload import validate as validate_evaluation_payload
 from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 from .quality import observable_equity_market_date
 
@@ -914,10 +915,7 @@ class ShadowJournal:
     def record_realtime_evaluation(self, payload: Mapping[str, object]) -> None:
         """Persist every fresh or rejected real-time shadow evaluation for calibration."""
 
-        required = {"evaluated_at", "market_id", "symbol", "signal_status", "skip_reasons"}
-        missing = required.difference(payload)
-        if missing:
-            raise ValueError(f"realtime evaluation is missing: {', '.join(sorted(missing))}")
+        validate_evaluation_payload(payload)
         with _database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO realtime_evaluations (

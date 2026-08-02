@@ -8,6 +8,7 @@ from typing import Iterable, Mapping
 
 from .baseline import DailyBar, DailyClose, annualized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline
 from .quality import relative_price_difference, us_equity_session
+from .evaluation_payload import PAYLOAD_VERSION
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class RealtimeEvaluation:
 
     def as_payload(self) -> Mapping[str, object]:
         payload = asdict(self)
+        payload["payload_version"] = PAYLOAD_VERSION
         payload["evaluated_at"] = self.evaluated_at.isoformat()
         payload["trigger_reasons"] = list(self.trigger_reasons)
         payload["quality_flags"] = list(self.quality_flags)

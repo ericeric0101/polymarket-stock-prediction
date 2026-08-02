@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Mapping
@@ -237,7 +237,7 @@ class PriceLadderJournal:
                     market_id, symbol, checkpoint_date, checkpoint_name, policy_id, observed_at, shadow_action, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (str(payload["market_id"]), str(payload["symbol"]), str(payload["checkpoint_date"]),
-                 str(payload["checkpoint_name"]), str(payload["policy_id"]), str(payload.get("observed_at") or datetime.now().isoformat()),
+                 str(payload["checkpoint_name"]), str(payload["policy_id"]), str(payload.get("observed_at") or datetime.now(UTC).isoformat()),
                  str(payload["shadow_action"]), json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)),
             ).rowcount == 1
 
