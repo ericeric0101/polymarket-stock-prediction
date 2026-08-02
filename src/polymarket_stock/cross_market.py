@@ -14,6 +14,7 @@ from .price_ladder import (
 )
 from .price_ladder_journal import PriceLadderJournal, StoredLadderSnapshot
 from .probability_calibration import sizing_readiness
+from .quality import observable_equity_market_date, us_equity_session
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -71,8 +72,9 @@ def research_dashboard_state(
     if limit < 1 or daily_entry_limit < 1:
         raise ValueError("research dashboard limits must be positive")
     timestamp = now or datetime.now(UTC)
-    market_date = timestamp.astimezone(NEW_YORK).date().isoformat()
+    market_date = observable_equity_market_date(timestamp).isoformat()
     core = ShadowJournal(journal_path)
+    core_rows = list(core.dashboard_rows(limit, now=timestamp))
     ladder = PriceLadderJournal(journal_path)
     ladder.initialize()
     latest = ladder.latest_snapshot_rows(market_date)
@@ -101,7 +103,9 @@ def research_dashboard_state(
             latest_diagnostic[item.symbol] = item
     return {
         "generated_at": timestamp.isoformat(), "market_date": market_date,
-        "core_rows": list(core.dashboard_rows(limit, now=timestamp)),
+        "core_rows": core_rows,
+        "live_markets": _live_market_payload(core_rows, timestamp),
+        "market_status": _market_status_payload(timestamp, market_date),
         "paper_portfolio": _paper_portfolio_payload(
             core.list_paper_positions(), core.first_signal_performance(),
             sizing_readiness(core.list_first_signal_calibration_observations()).as_payload(),
@@ -111,6 +115,55 @@ def research_dashboard_state(
         "cross_market": [latest_diagnostic[symbol].as_payload() for symbol in sorted(latest_diagnostic)],
         "isolation": {"affects_entries": False, "affects_sizing": False, "research_only": True},
     }
+
+
+def _market_status_payload(timestamp: datetime, market_date: str) -> Mapping[str, object]:
+    session = us_equity_session(timestamp)
+    decision_enabled = session == "REGULAR"
+    return {
+        "equity_session": session,
+        "observation_market_date": market_date,
+        "decision_enabled": decision_enabled,
+        "message": (
+            "Regular session: model decisions may be evaluated."
+            if decision_enabled
+            else "US equities closed: Polymarket observation continues; entries are disabled."
+        ),
+    }
+
+
+def _live_market_payload(
+    rows: Iterable[Mapping[str, object]], timestamp: datetime,
+) -> list[Mapping[str, object]]:
+    live_rows = []
+    for row in rows:
+        observed_at = _optional_datetime(row.get("evaluated_at"))
+        book_age = _optional_float(row.get("book_age_seconds"))
+        if observed_at is not None:
+            book_age = max(book_age or 0.0, (timestamp - observed_at).total_seconds())
+        up_bid, up_ask = _optional_float(row.get("up_bid")), _optional_float(row.get("up_ask"))
+        down_bid, down_ask = _optional_float(row.get("down_bid")), _optional_float(row.get("down_ask"))
+        complete = all(value is not None for value in (up_bid, up_ask, down_bid, down_ask))
+        state = (
+            "LIVE" if complete and book_age is not None and book_age <= 30
+            else "STALE" if complete else "INCOMPLETE"
+        )
+        live_rows.append({
+            "market_id": row.get("market_id"), "symbol": row.get("symbol"),
+            "observed_at": observed_at.isoformat() if observed_at else None,
+            "book_age_seconds": book_age, "state": state,
+            "up_bid": up_bid, "up_ask": up_ask, "down_bid": down_bid, "down_ask": down_ask,
+            "up_spread": up_ask - up_bid if up_bid is not None and up_ask is not None else None,
+            "down_spread": down_ask - down_bid if down_bid is not None and down_ask is not None else None,
+            "market_up_probability": _up_down_market_probability(row),
+            "model_up_probability": _optional_float(row.get("fair_up_probability")),
+            "spot": _optional_float(row.get("spot")),
+            "price_to_beat": _optional_float(row.get("price_to_beat")),
+            "up_book": row.get("up_book") if isinstance(row.get("up_book"), Mapping) else {},
+            "down_book": row.get("down_book") if isinstance(row.get("down_book"), Mapping) else {},
+            "skip_reasons": list(row.get("skip_reasons") or ()),
+        })
+    return live_rows
 
 
 def _paper_portfolio_payload(
@@ -196,3 +249,11 @@ def _optional_float(value: object) -> float | None:
         return float(value) if value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _optional_datetime(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value)) if value else None
+    except ValueError:
+        return None
+    return parsed if parsed is not None and parsed.tzinfo is not None else None

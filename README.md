@@ -421,6 +421,12 @@ localhost 的 Core 頁面已包含原本 Rich dashboard 的 checkpoint matrix、
 Daily Paper Portfolio、OPEN/SETTLED、W/L/PnL、全部 first-signal 勝率與 sizing readiness。
 因此日常運行可以不開 Terminal 4；Terminal 4 只保留作為純文字備援。
 
+主 bot 在週末、NYSE 假日與盤後會自動觀察下一個 NYSE 交易日的 Polymarket Up/Down 合約，
+localhost 仍會顯示市場隱含 Up 機率、Up/Down top-of-book、頂層數量、資料年齡與狀態。
+此時 `Decision mode` 會明確標示 `OBSERVATION ONLY`，不建立 checkpoint 或 paper entry；沒有新的
+underlying spot 時，model probability 顯示 `UNAVAILABLE`。localhost 本身是唯讀頁面，因此要取得
+持續變動的 order book，Terminal 1 的 `supervise-shadow` 仍必須保持運作。
+
 ### 市場掃描與訂單簿觀察
 
 ```zsh

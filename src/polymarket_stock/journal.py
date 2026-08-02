@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from .fees import estimate_taker_fee_usdc
 from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
+from .quality import observable_equity_market_date
 
 
 SCHEMA = """
@@ -106,6 +107,10 @@ CREATE TABLE IF NOT EXISTS realtime_evaluations (
 );
 CREATE INDEX IF NOT EXISTS idx_realtime_evaluations_market_evaluated
     ON realtime_evaluations (market_id, evaluated_at);
+CREATE INDEX IF NOT EXISTS idx_realtime_evaluations_signal_market_evaluated
+    ON realtime_evaluations (market_id, evaluated_at)
+    WHERE fair_up_probability IS NOT NULL
+      AND signal_status IN ('PAPER_UP', 'PAPER_DOWN', 'OBSERVATION_ONLY_UP', 'OBSERVATION_ONLY_DOWN');
 CREATE TABLE IF NOT EXISTS spot_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     observed_at TEXT NOT NULL,
@@ -1091,24 +1096,26 @@ class ShadowJournal:
         so calibration measures the probability the policy actually acted on.
         """
 
-        query = """WITH ranked AS (
-            SELECT evaluated_at, market_id, symbol, fair_up_probability, up_ask, down_ask, payload_json,
-                ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY evaluated_at) AS row_number
-            FROM realtime_evaluations
-            WHERE fair_up_probability IS NOT NULL
-              AND json_extract(payload_json, '$.model_outcome') IN ('UP', 'DOWN')
-        ) SELECT ranked.evaluated_at, ranked.market_id, ranked.symbol, ranked.fair_up_probability,
-            ranked.up_ask, ranked.down_ask, ranked.payload_json, settlement.winning_outcome
-          FROM ranked
-          JOIN market_settlements AS settlement USING (market_id)
-          WHERE ranked.row_number = 1
-          ORDER BY ranked.evaluated_at, ranked.market_id"""
+        query = """SELECT evaluation.evaluated_at, evaluation.market_id, evaluation.symbol,
+                evaluation.fair_up_probability, evaluation.up_ask, evaluation.down_ask,
+                evaluation.signal_status, evaluation.payload_json, settlement.winning_outcome
+            FROM market_settlements AS settlement
+            JOIN realtime_evaluations AS evaluation ON evaluation.id = (
+                SELECT first_signal.id FROM realtime_evaluations AS first_signal
+                WHERE first_signal.market_id = settlement.market_id
+                  AND first_signal.fair_up_probability IS NOT NULL
+                  AND first_signal.signal_status IN (
+                      'PAPER_UP', 'PAPER_DOWN', 'OBSERVATION_ONLY_UP', 'OBSERVATION_ONLY_DOWN'
+                  )
+                ORDER BY first_signal.evaluated_at, first_signal.id LIMIT 1
+            )
+            ORDER BY evaluation.evaluated_at, evaluation.market_id"""
         with _database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
         observations = []
         for row in rows:
-            payload = json.loads(str(row[6]))
-            outcome = str(payload["model_outcome"])
+            payload = json.loads(str(row[7]))
+            outcome = "UP" if str(row[6]) in {"PAPER_UP", "OBSERVATION_ONLY_UP"} else "DOWN"
             fair_up = float(row[3])
             entry_ask = float(row[4] if outcome == "UP" else row[5])
             entry_fee_value = payload.get("up_taker_fee") if outcome == "UP" else payload.get("down_taker_fee")
@@ -1123,7 +1130,7 @@ class ShadowJournal:
                 model_outcome=outcome,
                 selected_fair_probability=fair_up if outcome == "UP" else 1.0 - fair_up,
                 entry_ask=entry_ask, entry_fee=float(entry_fee_value) if entry_fee_value is not None else None,
-                winning_outcome=str(row[7]), model_version=str(payload.get("model_version") or "unknown"),
+                winning_outcome=str(row[8]), model_version=str(payload.get("model_version") or "unknown"),
                 option_iv_status=option_iv_status,
                 iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
                 spot_provider=str(payload.get("spot_provider") or "unknown"),
@@ -1135,15 +1142,21 @@ class ShadowJournal:
     def first_signal_performance(self) -> Mapping[str, object]:
         """Summarize one first model signal per officially settled market."""
 
-        query = """WITH ranked AS (
-            SELECT market_id, json_extract(payload_json, '$.model_outcome') AS prediction,
-                ROW_NUMBER() OVER (PARTITION BY market_id ORDER BY evaluated_at) AS row_number
-            FROM realtime_evaluations
-            WHERE json_extract(payload_json, '$.model_outcome') IN ('UP', 'DOWN')
-        ) SELECT COUNT(*), SUM(ranked.prediction = settlement.winning_outcome)
-          FROM ranked
-          JOIN market_settlements AS settlement USING (market_id)
-          WHERE ranked.row_number = 1"""
+        query = """SELECT COUNT(*), SUM(
+                CASE
+                    WHEN evaluation.signal_status IN ('PAPER_UP', 'OBSERVATION_ONLY_UP') THEN 'UP'
+                    ELSE 'DOWN'
+                END = settlement.winning_outcome
+            ) FROM market_settlements AS settlement
+            JOIN realtime_evaluations AS evaluation ON evaluation.id = (
+                SELECT first_signal.id FROM realtime_evaluations AS first_signal
+                WHERE first_signal.market_id = settlement.market_id
+                  AND first_signal.fair_up_probability IS NOT NULL
+                  AND first_signal.signal_status IN (
+                      'PAPER_UP', 'PAPER_DOWN', 'OBSERVATION_ONLY_UP', 'OBSERVATION_ONLY_DOWN'
+                  )
+                ORDER BY first_signal.evaluated_at, first_signal.id LIMIT 1
+            )"""
         with _database_connection(self.path) as connection:
             count, wins = connection.execute(query).fetchone()
         settled_markets = int(count or 0)
@@ -1161,7 +1174,8 @@ class ShadowJournal:
         """Return stable symbol rows with immutable same-day checkpoint decisions."""
         if limit < 1:
             raise ValueError("dashboard limit must be positive")
-        ny_date = (now or datetime.now(UTC)).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+        timestamp = now or datetime.now(UTC)
+        ny_date = observable_equity_market_date(timestamp).isoformat()
         with _database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT evaluation.payload_json FROM realtime_evaluations AS evaluation

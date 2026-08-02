@@ -7,6 +7,7 @@ import unittest
 
 from polymarket_stock.cross_market import cross_market_diagnostics, research_dashboard_state
 from polymarket_stock.journal import ShadowJournal
+from polymarket_stock.market_discovery import MarketCandidate
 from polymarket_stock.price_ladder import PriceLadderContract
 from polymarket_stock.price_ladder_journal import PriceLadderJournal
 from polymarket_stock.research_web import HTML, ResearchDashboardServer
@@ -22,6 +23,39 @@ def contract(strike: float) -> PriceLadderContract:
 
 
 class CrossMarketResearchTests(unittest.TestCase):
+    def test_weekend_state_exposes_next_contract_live_book_without_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            core = ShadowJournal(path)
+            core.initialize()
+            candidate = MarketCandidate.from_gamma_payload({
+                "id": "monday", "question": "Tesla (TSLA) Up or Down on August 3?",
+                "slug": "tsla-up-down", "description": "Pyth daily close",
+                "resolutionSource": "https://pyth.network/price-feeds/Equity.US.TSLA%2FUSD",
+                "endDate": "2026-08-03T20:00:00+00:00", "outcomes": '["Up", "Down"]',
+                "clobTokenIds": ["up-token", "down-token"],
+            })
+            core.upsert_market_candidate(candidate)
+            core.record_realtime_evaluation({
+                "evaluated_at": "2026-08-01T16:00:00+00:00", "market_id": "monday", "symbol": "TSLA",
+                "spot": None, "price_to_beat": 310, "up_bid": 0.54, "up_ask": 0.56,
+                "down_bid": 0.44, "down_ask": 0.46, "fair_up_probability": None,
+                "up_book": {"best_bid_size": 20, "best_ask_size": 15},
+                "down_book": {"best_bid_size": 30, "best_ask_size": 25},
+                "book_age_seconds": 1, "market_session": "WEEKEND",
+                "signal_status": "NO_PAPER_TRADE",
+                "skip_reasons": ["NON_REGULAR_SESSION:WEEKEND"],
+            })
+            state = research_dashboard_state(
+                path, now=datetime(2026, 8, 1, 16, 0, 5, tzinfo=UTC),
+            )
+        self.assertEqual(state["market_date"], "2026-08-03")
+        self.assertFalse(state["market_status"]["decision_enabled"])
+        self.assertEqual(len(state["live_markets"]), 1)
+        self.assertAlmostEqual(state["live_markets"][0]["market_up_probability"], 0.55)
+        self.assertEqual(state["live_markets"][0]["state"], "LIVE")
+        self.assertIsNone(state["live_markets"][0]["model_up_probability"])
+
     def test_checkpoint_join_produces_read_only_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "journal.db"
@@ -97,6 +131,8 @@ class CrossMarketResearchTests(unittest.TestCase):
         self.assertIn("Top Recommendations", HTML)
         self.assertIn("Daily Paper Portfolio", HTML)
         self.assertIn("portfolio-summary", HTML)
+        self.assertIn("Live Polymarket Up/Down", HTML)
+        self.assertIn("OBSERVATION ONLY", HTML)
         self.assertIn("Asia/Taipei", HTML)
         self.assertIn("America/New_York", HTML)
         self.assertIn("taipei-time", HTML)

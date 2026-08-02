@@ -26,6 +26,7 @@ from .nasdaq_data import NasdaqBaselineClient, NasdaqPayloadError, NasdaqQuote, 
 from .option_iv import OptionIvSurface, OptionSurfaceError, PolygonOptionIvClient, TradierOptionIvClient
 from .portfolio_risk import PaperEntryCandidate, select_diversified_entries
 from .pyth_benchmarks import PythBenchmarksClient
+from .quality import observable_equity_market_date
 from .trading_calendar import previous_nyse_trading_day
 from .realtime import RealtimeBaselineEvaluator
 from .streaming import AlpacaIexStockStream, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream, ShadowStreamCoordinator, run_with_reconnect
@@ -51,13 +52,15 @@ def select_active_candidates(
     if now.tzinfo is None or max_markets < 1 or minimum_seconds_to_resolution < 0:
         raise ValueError("invalid active-universe selection inputs")
     selected: list[MarketCandidate] = []
+    observation_date = observable_equity_market_date(now)
     for candidate in sorted(candidates, key=lambda item: (item.end_date, item.market_id)):
         try:
             resolves_at = datetime.fromisoformat(candidate.end_date.replace("Z", "+00:00"))
         except ValueError:
             continue
-        # A daily contract belongs to the New York calendar date of its close.
-        if now.astimezone(NEW_YORK).date() != resolves_at.astimezone(NEW_YORK).date():
+        # Outside the regular session, observe the next tradable contract so the
+        # Polymarket book remains visible without enabling a stock-model decision.
+        if observation_date != resolves_at.astimezone(NEW_YORK).date():
             continue
         if not symbol_from_candidate(candidate) or (resolves_at - now).total_seconds() < minimum_seconds_to_resolution:
             continue
@@ -492,6 +495,8 @@ class MultiMarketShadowSupervisor:
             "cross_source_model_error_buffer": source_uncertainty_buffer,
             "contract": runtime.contract.as_payload(),
             "option_surface": runtime.option_surface.as_payload() if runtime.option_surface else None,
+            "up_book": _book_summary(coordinator, token_ids[0]),
+            "down_book": _book_summary(coordinator, token_ids[1]),
         }
         maker_quotes = self._sync_maker_shadow_quotes(runtime, evaluation, result, now)
         result["maker_shadow_quotes"] = maker_quotes
@@ -801,15 +806,36 @@ class MultiMarketShadowSupervisor:
                     return
                 await asyncio.sleep(wait_seconds)
         finally:
-            # A process stopped after the close should still persist any official
-            # resolution already published before its next scheduled refresh.
-            await self.reconcile_settlements()
             await self._stop_paper_batch()
             await self._stop_streams()
+            # Stop producers before final network reconciliation so a slow Gamma
+            # response cannot leave streams writing while shutdown is in progress.
+            try:
+                await asyncio.wait_for(self.reconcile_settlements(), timeout=15.0)
+            except TimeoutError:
+                self.event_sink(
+                    "SUPERVISOR_FINAL_RECONCILIATION_TIMED_OUT",
+                    {"timeout_seconds": 15.0, "recorded_at": datetime.now(UTC).isoformat()},
+                )
 
 
 def _evaluation_value(evaluation: object, name: str) -> object:
     return evaluation.get(name) if isinstance(evaluation, Mapping) else getattr(evaluation, name)
+
+
+def _book_summary(coordinator: ShadowStreamCoordinator, token_id: str) -> Mapping[str, object]:
+    levels = coordinator.latest_book_levels.get(token_id, {"bids": {}, "asks": {}})
+    bids = levels.get("bids", {})
+    asks = levels.get("asks", {})
+    best_bid = coordinator.latest_best_bids.get(token_id)
+    best_ask = coordinator.latest_best_asks.get(token_id)
+    return {
+        "best_bid": best_bid, "best_ask": best_ask,
+        "best_bid_size": bids.get(best_bid) if best_bid is not None else None,
+        "best_ask_size": asks.get(best_ask) if best_ask is not None else None,
+        "bid_depth": sum(bids.values()), "ask_depth": sum(asks.values()),
+        "levels": coordinator.latest_books.get(token_id, {}),
+    }
 
 
 def _age_seconds(now: datetime, observed_at: datetime | None) -> float | None:

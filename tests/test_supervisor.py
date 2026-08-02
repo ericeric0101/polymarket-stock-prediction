@@ -49,6 +49,14 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([candidate.market_id for candidate in selected], ["current"])
         self.assertEqual(symbol_from_candidate(selected[0]), "TSLA")
 
+    def test_weekend_universe_selects_next_nyse_trading_day(self) -> None:
+        saturday = datetime(2026, 8, 1, 16, tzinfo=UTC)
+        monday = _candidate("monday", "TSLA", datetime(2026, 8, 3, 20, tzinfo=UTC).isoformat())
+        selected = select_active_candidates(
+            (monday,), now=saturday, max_markets=10, minimum_seconds_to_resolution=900,
+        )
+        self.assertEqual([candidate.market_id for candidate in selected], ["monday"])
+
     def test_pyth_primary_gate_requires_only_a_fresh_pyth_price(self) -> None:
         stale_pyth = SpotQuote("PYTH_HERMES", "TSLA", 100.0, self.now, self.now - timedelta(seconds=16))
         self.assertEqual(_pyth_primary_risk_reasons(self.now, None, 15), ("PYTH_SPOT_UNAVAILABLE",))
@@ -111,3 +119,32 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled.status, "SETTLED")
         self.assertEqual(settled.settlement_outcome, "UP")
         self.assertEqual(outcome, "UP")
+
+    async def test_run_stops_producers_before_final_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal, log_path=Path(directory) / "events.jsonl",
+                spot_provider="finnhub",
+            )
+            calls = []
+
+            async def refresh() -> None:
+                calls.append("refresh")
+
+            async def stop_paper() -> None:
+                calls.append("stop_paper")
+
+            async def stop_streams() -> None:
+                calls.append("stop_streams")
+
+            async def reconcile() -> None:
+                calls.append("reconcile")
+
+            supervisor.refresh = refresh
+            supervisor._stop_paper_batch = stop_paper
+            supervisor._stop_streams = stop_streams
+            supervisor.reconcile_settlements = reconcile
+            await supervisor.run(scan_interval_seconds=1, duration_seconds=0.001)
+        self.assertEqual(calls[-3:], ["stop_paper", "stop_streams", "reconcile"])

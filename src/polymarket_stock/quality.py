@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
-from .trading_calendar import nyse_holiday_name
+from .trading_calendar import next_nyse_trading_day, nyse_holiday_name
 
 
 NEW_YORK = ZoneInfo("America/New_York")
@@ -27,6 +27,17 @@ def us_equity_session(now: datetime) -> str:
     if local.time() < REGULAR_OPEN:
         return "PREMARKET"
     return "AFTER_HOURS"
+
+
+def observable_equity_market_date(now: datetime) -> date:
+    """Choose the contract date worth observing even when US equities are closed."""
+
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    local = now.astimezone(NEW_YORK)
+    if us_equity_session(now) in {"PREMARKET", "REGULAR"}:
+        return local.date()
+    return next_nyse_trading_day(local.date())
 
 
 def relative_price_difference(primary: float, reference: float) -> float:
