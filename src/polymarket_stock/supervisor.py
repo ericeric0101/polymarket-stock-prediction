@@ -743,47 +743,17 @@ class MultiMarketShadowSupervisor:
         return quotes
 
     async def _settle_open_positions(self) -> None:
-        open_positions = await asyncio.to_thread(self.journal.list_paper_positions, "OPEN")
-        for position in open_positions:
-            try:
-                settlement = await asyncio.to_thread(self.gamma.get_market_settlement, position.market_id)
-            except Exception as error:  # Public data failures should not stop the supervisor.
-                self.event_sink("PAPER_SETTLEMENT_CHECK_FAILED", {"position_id": position.position_id, "market_id": position.market_id, "error": str(error)})
-                continue
-            outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
-            if not settlement.closed or outcome not in {"UP", "DOWN"}:
-                continue
-            settled = await asyncio.to_thread(
-                self.journal.settle_paper_position,
-                position.position_id, settlement_outcome=outcome, settlement_payload=settlement.raw_payload,
-            )
-            await asyncio.to_thread(self.journal.cancel_maker_shadow_quotes, position.market_id, "MARKET_SETTLED")
-            self.event_sink("PAPER_POSITION_SETTLED", {"position_id": settled.position_id, "market_id": settled.market_id, "outcome": settled.outcome, "settlement_outcome": outcome, "realized_pnl": settled.realized_pnl})
+        from .supervisor_settlement import settle_open_positions
+        await settle_open_positions(self)
 
     async def _reconcile_evaluation_settlements(self) -> None:
-        """Attach official outcomes to all valid observations, not only paper entries."""
-
-        pending_market_ids = await asyncio.to_thread(self.journal.pending_evaluation_market_ids)
-        for market_id in pending_market_ids:
-            try:
-                settlement = await asyncio.to_thread(self.gamma.get_market_settlement, market_id)
-            except Exception as error:
-                self.event_sink("EVALUATION_SETTLEMENT_CHECK_FAILED", {"market_id": market_id, "error": str(error)})
-                continue
-            outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
-            if settlement.closed and outcome in {"UP", "DOWN"}:
-                await asyncio.to_thread(self.journal.record_market_settlement, market_id, outcome, settlement.raw_payload)
-                await asyncio.to_thread(self.journal.cancel_maker_shadow_quotes, market_id, "MARKET_SETTLED")
-                self.event_sink("EVALUATION_MARKET_SETTLED", {"market_id": market_id, "settlement_outcome": outcome})
+        from .supervisor_settlement import reconcile_evaluation_settlements
+        await reconcile_evaluation_settlements(self)
 
     async def settle_open_positions(self) -> None:
-        """Backward-compatible entry point for a full official settlement reconciliation."""
-
         await self.reconcile_settlements()
 
     async def reconcile_settlements(self) -> None:
-        """Reconcile open paper positions and all eligible model observations."""
-
         await self._settle_open_positions()
         await self._reconcile_evaluation_settlements()
 
