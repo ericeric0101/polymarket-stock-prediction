@@ -145,3 +145,15 @@ module = ["polymarket_stock.evaluation_payload", "polymarket_stock.storage.*"]
 ignore_errors = false
 disallow_untyped_defs = true
 disallow_any_explicit = true
+
+# Existing journal payload/row coercions remain untyped while repository extraction preserves behavior.
+# Remove this override once each repository has explicit SQLite row adapters.
+[[tool.mypy.overrides]]
+module = [
+    "polymarket_stock.storage.journal_core",
+    "polymarket_stock.storage.journal_helpers",
+    "polymarket_stock.storage.journal_observations",
+    "polymarket_stock.storage.journal_paper",
+    "polymarket_stock.storage.journal_research",
+]
+ignore_errors = true
