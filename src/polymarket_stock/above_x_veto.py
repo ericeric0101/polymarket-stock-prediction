@@ -3,14 +3,14 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, time
-import csv, json, sqlite3
+import csv, json
 from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 from .baseline import DailyClose, annualized_realized_volatility
 from .price_ladder import LadderProbabilityPoint, diagnose_cross_market, fit_monotonic_curve, probability_point
 from .pyth_clob_backtest import _load_records, _read_price_history, _read_spots, _latest_at_or_before
-from .journal import _database_connection
+from .storage.sqlite import DatabaseOperationalError, database_connection
 from .price_ladder_journal import PriceLadderJournal
 from .pricing import digital_up_probability
 
@@ -313,17 +313,21 @@ def sync_live_veto_shadow(
         if snapshot.checkpoint_name:
             grouped.setdefault((snapshot.market_date, snapshot.checkpoint_name, snapshot.symbol), []).append(snapshot)
     try:
-        with _database_connection(journal_path) as connection:
+        with database_connection(journal_path) as connection:
             rows = connection.execute(
                 "SELECT market_id, symbol, checkpoint_date, checkpoint_name, payload_json FROM checkpoint_observations"
             ).fetchall()
-    except sqlite3.OperationalError:
+    except DatabaseOperationalError:
         # The independent collector may run before the Core journal is initialized.
         return ()
     written = []
-    for market_id, symbol, day, checkpoint, payload_json in rows:
-        payload = json.loads(str(payload_json))
-        key = (str(day), str(checkpoint), str(symbol).upper())
+    for row in rows:
+        market_id = str(row["market_id"])
+        symbol = str(row["symbol"])
+        day = str(row["checkpoint_date"])
+        checkpoint = str(row["checkpoint_name"])
+        payload = json.loads(str(row["payload_json"]))
+        key = (day, checkpoint, symbol.upper())
         books = grouped.get(key, ())
         if not books:
             continue

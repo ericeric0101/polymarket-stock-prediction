@@ -9,6 +9,8 @@ import sqlite3
 import time
 
 
+DatabaseOperationalError = sqlite3.OperationalError
+
 DATABASE_BUSY_TIMEOUT_MS = 5_000
 DATABASE_COMMIT_RETRY_SECONDS = (0.05, 0.15, 0.45)
 

@@ -7,7 +7,6 @@ from datetime import UTC, date, datetime, time as wall_time, timedelta
 import hashlib
 import json
 from pathlib import Path
-import sqlite3
 from typing import Mapping
 
 from .alpaca_options import IndicativeOptionQuote
@@ -20,6 +19,7 @@ from .fees import estimate_taker_fee_usdc
 from .evaluation_payload import read_spot, read_threshold, validate_for_write
 from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 from .quality import observable_equity_market_date
+from .storage.migrations import initialize_database
 from .storage.sqlite import database_connection
 
 
@@ -224,106 +224,12 @@ class StoredSpotObservation:
     published_at: datetime | None = None
 
 
-# Compatibility alias for external callers during the storage migration.
-_database_connection = database_connection
-
-
 class ShadowJournal:
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with _database_connection(self.path) as connection:
-            current_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
-            if current_mode != "wal":
-                connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(SCHEMA)
-            self._migrate_market_candidate_columns(connection)
-            self._migrate_paper_position_columns(connection)
-            self._migrate_checkpoint_observation_columns(connection)
-            self._exclude_precontract_day_paper_positions(connection)
-
-    @staticmethod
-    def _migrate_checkpoint_observation_columns(connection: sqlite3.Connection) -> None:
-        columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(checkpoint_observations)")}
-        if "checkpoint_target_at" not in columns:
-            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN checkpoint_target_at TEXT")
-        if "checkpoint_delay_seconds" not in columns:
-            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN checkpoint_delay_seconds REAL")
-        if "eligible_for_calibration" not in columns:
-            connection.execute(
-                "ALTER TABLE checkpoint_observations ADD COLUMN eligible_for_calibration INTEGER NOT NULL DEFAULT 1"
-            )
-        rows = connection.execute(
-            """SELECT id, checkpoint_date, checkpoint_name, evaluated_at
-            FROM checkpoint_observations WHERE checkpoint_target_at IS NULL OR checkpoint_delay_seconds IS NULL"""
-        ).fetchall()
-        for row in rows:
-            target_at = checkpoint_target_at(str(row[1]), str(row[2]))
-            evaluated_at = datetime.fromisoformat(str(row[3]))
-            delay_seconds = max(0.0, (evaluated_at - target_at).total_seconds())
-            connection.execute(
-                """UPDATE checkpoint_observations
-                SET checkpoint_target_at = ?, checkpoint_delay_seconds = ?, eligible_for_calibration = ?
-                WHERE id = ?""",
-                (
-                    target_at.isoformat(),
-                    delay_seconds,
-                    int(delay_seconds <= DEFAULT_MAXIMUM_DELAY_SECONDS),
-                    int(row[0]),
-                ),
-            )
-
-    @staticmethod
-    def _migrate_market_candidate_columns(connection: sqlite3.Connection) -> None:
-        """Keep the Phase 1 journal compatible with the earlier Yes/No-only schema."""
-
-        existing_columns = {row[1] for row in connection.execute("PRAGMA table_info(market_candidates)")}
-        required_columns = {
-            "outcome_a_label": "TEXT NOT NULL DEFAULT ''",
-            "outcome_b_label": "TEXT NOT NULL DEFAULT ''",
-            "outcome_a_token_id": "TEXT NOT NULL DEFAULT ''",
-            "outcome_b_token_id": "TEXT NOT NULL DEFAULT ''",
-        }
-        for column, definition in required_columns.items():
-            if column not in existing_columns:
-                connection.execute(f"ALTER TABLE market_candidates ADD COLUMN {column} {definition}")
-
-    @staticmethod
-    def _migrate_paper_position_columns(connection: sqlite3.Connection) -> None:
-        existing_columns = {row[1] for row in connection.execute("PRAGMA table_info(paper_positions)")}
-        required_columns = {
-            "included_in_calibration": "INTEGER NOT NULL DEFAULT 1",
-            "exclusion_reason": "TEXT",
-        }
-        for column, definition in required_columns.items():
-            if column not in existing_columns:
-                connection.execute(f"ALTER TABLE paper_positions ADD COLUMN {column} {definition}")
-
-    @staticmethod
-    def _exclude_precontract_day_paper_positions(connection: sqlite3.Connection) -> None:
-        """Preserve, but exclude, entries opened before the contract's NY trading date."""
-
-        rows = connection.execute(
-            """SELECT position.position_id, position.opened_at, candidate.end_date
-            FROM paper_positions AS position
-            JOIN market_candidates AS candidate ON candidate.market_id = position.market_id
-            WHERE position.included_in_calibration = 1"""
-        ).fetchall()
-        new_york = ZoneInfo("America/New_York")
-        for position_id, opened_at, end_date in rows:
-            try:
-                opened_day = datetime.fromisoformat(str(opened_at)).astimezone(new_york).date()
-                contract_day = datetime.fromisoformat(str(end_date).replace("Z", "+00:00")).astimezone(new_york).date()
-            except ValueError:
-                continue
-            if opened_day < contract_day:
-                connection.execute(
-                    """UPDATE paper_positions SET included_in_calibration = 0,
-                    exclusion_reason = 'PRECONTRACT_TRADE_DATE' WHERE position_id = ?""",
-                    (position_id,),
-                )
+        initialize_database(self.path)
 
     def record_decision(
         self,
@@ -346,7 +252,7 @@ class ShadowJournal:
         digest_source = f"{timestamp.isoformat()}|{market_id}|{outcome}|{payload_json}"
         decision_id = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()
 
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO shadow_decisions (
@@ -383,7 +289,7 @@ class ShadowJournal:
             candidate.review_status,
             json.dumps(candidate.raw_payload, sort_keys=True, separators=(",", ":"), default=str),
         )
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO market_candidates (
@@ -425,7 +331,7 @@ class ShadowJournal:
             )
 
     def record_order_book_snapshot(self, market_id: str, snapshot: OrderBookSnapshot) -> None:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO order_book_snapshots (
@@ -457,7 +363,7 @@ class ShadowJournal:
             raise ValueError("spot observation is invalid")
         published_at = payload.get("published_at")
         confidence = payload.get("confidence")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO spot_observations (
                     observed_at, observed_second, source, symbol, price, published_at, confidence, feed_id
@@ -488,7 +394,7 @@ class ShadowJournal:
             raise ValueError("spot source comparison is invalid") from error
         if observed_at.tzinfo is None or not symbol or not primary_source or min(primary_price, pyth_price) <= 0:
             raise ValueError("spot source comparison is invalid")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT OR IGNORE INTO spot_source_comparisons (
                     observed_at, observed_second, symbol, primary_source, primary_price, primary_published_at,
@@ -514,7 +420,7 @@ class ShadowJournal:
     ) -> None:
         if not market_date or not symbol.strip() or close_price <= 0 or candle_at.tzinfo is None:
             raise ValueError("Pyth daily close is invalid")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO pyth_daily_closes (market_date, symbol, close_price, candle_at, source, recorded_at)
                 VALUES (?, ?, ?, ?, ?, ?)
@@ -531,7 +437,7 @@ class ShadowJournal:
             )
 
     def get_pyth_daily_close(self, *, market_date: str, symbol: str) -> Mapping[str, object] | None:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT close_price, candle_at, source FROM pyth_daily_closes WHERE market_date = ? AND symbol = ?",
                 (market_date, symbol.upper()),
@@ -548,7 +454,7 @@ class ShadowJournal:
         status = str(payload.get("status", ""))
         if not market_date or not symbol or not status:
             raise ValueError("close source calibration is invalid")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO source_close_calibrations (
                     market_date, symbol, recorded_at, status, payload_json
@@ -571,7 +477,7 @@ class ShadowJournal:
             query += " WHERE market_date = ?"
             parameters = (market_date,)
         query += " ORDER BY market_date, symbol"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(json.loads(str(row[0])) for row in rows)
 
@@ -587,7 +493,7 @@ class ShadowJournal:
         new_york = ZoneInfo("America/New_York")
         start = datetime.combine(local_date, wall_time(9, 30), tzinfo=new_york).astimezone(UTC)
         end = datetime.combine(local_date, wall_time(16), tzinfo=new_york).astimezone(UTC)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT price, observed_at, published_at FROM spot_observations
                 WHERE source = ? AND symbol = ? AND observed_at >= ? AND observed_at <= ?
@@ -619,7 +525,7 @@ class ShadowJournal:
     ) -> None:
         if outcome not in {"UP", "DOWN"}:
             raise ValueError("execution observation outcome must be UP or DOWN")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO execution_observations (
                     observed_at, signal_id, observation_kind, market_id, symbol, outcome, token_id,
@@ -648,7 +554,7 @@ class ShadowJournal:
     def get_market_outcome_tokens(self, market_id: str) -> tuple[StoredOutcomeToken, StoredOutcomeToken]:
         """Return both outcome tokens for a discovered market."""
 
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """
                 SELECT outcome_a_label, outcome_a_token_id, outcome_b_label, outcome_b_token_id
@@ -676,12 +582,12 @@ class ShadowJournal:
             query += " WHERE UPPER(question) LIKE ?"
             parameters = (f"%{normalized_symbol}%",)
         query += " ORDER BY end_date ASC, market_id ASC"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(StoredMarketCandidate(*row) for row in rows)
 
     def get_market_candidate(self, market_id: str) -> StoredMarketCandidate:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT market_id, question, slug, end_date, outcome_a_label, outcome_b_label, review_status
                 FROM market_candidates WHERE market_id = ?""",
@@ -694,7 +600,7 @@ class ShadowJournal:
     def get_market_candidate_raw_payload(self, market_id: str) -> Mapping[str, object]:
         """Return the persisted Gamma payload so contract terms can be revalidated."""
 
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT raw_payload_json FROM market_candidates WHERE market_id = ?", (market_id,)
             ).fetchone()
@@ -708,7 +614,7 @@ class ShadowJournal:
     def get_latest_outcome_asks(self, market_id: str) -> tuple[float, float]:
         outcomes = self.get_market_outcome_tokens(market_id)
         asks: list[float] = []
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             for outcome in outcomes:
                 row = connection.execute(
                     """SELECT best_ask FROM order_book_snapshots
@@ -721,7 +627,7 @@ class ShadowJournal:
         return asks[0], asks[1]
 
     def record_alpaca_indicative_option_quote(self, quote: IndicativeOptionQuote) -> None:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """
                 INSERT INTO alpaca_indicative_option_quotes (
@@ -742,7 +648,7 @@ class ShadowJournal:
         """Persist every fresh or rejected real-time shadow evaluation for calibration."""
 
         validate_for_write(payload)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO realtime_evaluations (
                     evaluated_at, market_id, symbol, spot, up_ask, down_ask,
@@ -780,7 +686,7 @@ class ShadowJournal:
         target_at = checkpoint_target_at(checkpoint_date, checkpoint_name)
         delay_seconds = max(0.0, (evaluated_at - target_at).total_seconds())
         eligible = delay_seconds <= maximum_delay_seconds
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             return (
                 connection.execute(
                     """INSERT OR IGNORE INTO checkpoint_observations (
@@ -825,7 +731,7 @@ class ShadowJournal:
         if outcome not in {"UP", "DOWN"}:
             raise ValueError("portfolio decision outcome must be UP or DOWN")
         timestamp = created_at or datetime.now(UTC)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO portfolio_decisions (
                     created_at, batch_id, market_id, symbol, outcome, risk_group, edge, status, reason, payload_json
@@ -851,7 +757,7 @@ class ShadowJournal:
         if created_at.tzinfo is None:
             raise ValueError("created_at must be timezone-aware")
         results: list[PaperBatchResult] = []
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             for entry in entries:
                 if entry.outcome not in {"UP", "DOWN"}:
                     raise ValueError("paper batch outcome must be UP or DOWN")
@@ -921,7 +827,7 @@ class ShadowJournal:
     def list_portfolio_decisions(self, limit: int = 100) -> tuple[Mapping[str, object], ...]:
         if limit < 1:
             raise ValueError("portfolio decision limit must be positive")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT created_at, batch_id, market_id, symbol, outcome, risk_group, edge, status, reason, payload_json
                 FROM portfolio_decisions ORDER BY id DESC LIMIT ?""",
@@ -953,7 +859,7 @@ class ShadowJournal:
           JOIN market_settlements AS settlement ON settlement.market_id = checkpoint.market_id
           WHERE (? = 0 OR checkpoint.eligible_for_calibration = 1)
           ORDER BY checkpoint.checkpoint_date, checkpoint.checkpoint_name, checkpoint.market_id"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, (int(eligible_only),)).fetchall()
         return tuple(
             CheckpointObservation(
@@ -985,7 +891,7 @@ class ShadowJournal:
           JOIN market_settlements AS settlement ON settlement.market_id = checkpoint.market_id
           WHERE checkpoint.eligible_for_calibration = 1
           ORDER BY checkpoint.checkpoint_date, checkpoint.evaluated_at, checkpoint.market_id"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
         observations = []
         for row in rows:
@@ -1023,7 +929,7 @@ class ShadowJournal:
             spot, price_to_beat, fair_probability, best_bid, best_ask, fee_rate,
             book_payload_json, evaluation_payload_json
           FROM execution_observations ORDER BY observed_at, id"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
         return tuple(
             ExecutionObservation(
@@ -1073,7 +979,7 @@ class ShadowJournal:
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY observed_at, id"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(
             StoredSpotObservation(
@@ -1096,7 +1002,7 @@ class ShadowJournal:
             query += " WHERE unixepoch(observed_at) % ? = 0"
             parameters = (sample_every_seconds,)
         query += " ORDER BY observed_at, id"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(
             SpotSourceComparison(
@@ -1116,7 +1022,7 @@ class ShadowJournal:
     def record_contract_review(
         self, market_id: str, *, accepted: bool, reason: str, contract: Mapping[str, object] | None = None
     ) -> None:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO market_contract_reviews (market_id, reviewed_at, status, reason, contract_json)
                 VALUES (?, ?, ?, ?, ?)
@@ -1134,7 +1040,7 @@ class ShadowJournal:
     def get_market_settlement_outcome(self, market_id: str) -> str:
         """Return the previously reconciled official market outcome."""
 
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 "SELECT winning_outcome FROM market_settlements WHERE market_id = ?", (market_id,)
             ).fetchone()
@@ -1145,7 +1051,7 @@ class ShadowJournal:
     def record_market_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object]) -> None:
         if winning_outcome not in {"UP", "DOWN"}:
             raise ValueError("winning_outcome must be UP or DOWN")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO market_settlements (market_id, settled_at, winning_outcome, payload_json)
                 VALUES (?, ?, ?, ?)
@@ -1160,7 +1066,7 @@ class ShadowJournal:
             )
 
     def pending_evaluation_market_ids(self, limit: int = 100) -> tuple[str, ...]:
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT DISTINCT market_id FROM realtime_evaluations
                 WHERE fair_up_probability IS NOT NULL
@@ -1183,7 +1089,7 @@ class ShadowJournal:
             ON evaluation.market_id = latest.market_id AND evaluation.evaluated_at = latest.evaluated_at
           JOIN market_settlements AS settlement ON settlement.market_id = evaluation.market_id
           ORDER BY evaluation.evaluated_at ASC"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
         return tuple(
             ReplayObservation(
@@ -1219,7 +1125,7 @@ class ShadowJournal:
                 ORDER BY first_signal.evaluated_at, first_signal.id LIMIT 1
             )
             ORDER BY evaluation.evaluated_at, evaluation.market_id"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
         observations = []
         for row in rows:
@@ -1272,7 +1178,7 @@ class ShadowJournal:
                   )
                 ORDER BY first_signal.evaluated_at, first_signal.id LIMIT 1
             )"""
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             count, wins = connection.execute(query).fetchone()
         settled_markets = int(count or 0)
         correct = int(wins or 0)
@@ -1294,7 +1200,7 @@ class ShadowJournal:
             raise ValueError("dashboard limit must be positive")
         timestamp = now or datetime.now(UTC)
         ny_date = observable_equity_market_date(timestamp).isoformat()
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT evaluation.payload_json FROM realtime_evaluations AS evaluation
                 JOIN market_candidates AS candidate ON candidate.market_id = evaluation.market_id
@@ -1367,7 +1273,7 @@ class ShadowJournal:
         position_id = hashlib.sha256(f"{market_id}|{outcome}".encode("utf-8")).hexdigest()
         entry_fee = estimate_taker_fee_usdc(shares=contracts, price=entry_ask, fee_rate=fee_rate)
         entry_slippage = 0.0
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             open_row = connection.execute(
                 """SELECT position_id, opened_at, market_id, symbol, outcome, status, contracts,
                     entry_ask, entry_fee, entry_slippage, fair_probability, model_version,
@@ -1445,7 +1351,7 @@ class ShadowJournal:
                 and 0 <= float(best_bid) <= float(best_ask) <= 1
             ):
                 raise ValueError("invalid maker quote proposal")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT quote_id, created_at, last_observed_at, market_id, symbol, outcome, status,
                     limit_price, fair_probability, theoretical_edge, best_bid, best_ask, touch_count,
@@ -1559,7 +1465,7 @@ class ShadowJournal:
         if outcome not in {"UP", "DOWN"} or not 0 <= current_ask <= 1:
             raise ValueError("invalid maker touch inputs")
         timestamp = observed_at or datetime.now(UTC)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT quote_id, limit_price FROM maker_shadow_quotes
                 WHERE market_id = ? AND outcome = ? AND status = 'ACTIVE'""",
@@ -1582,7 +1488,7 @@ class ShadowJournal:
 
     def cancel_maker_shadow_quotes(self, market_id: str, reason: str, cancelled_at: datetime | None = None) -> int:
         timestamp = cancelled_at or datetime.now(UTC)
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             return connection.execute(
                 """UPDATE maker_shadow_quotes SET status = 'CANCELLED', cancelled_at = ?, cancel_reason = ?,
                 last_observed_at = ? WHERE market_id = ? AND status = 'ACTIVE'""",
@@ -1600,7 +1506,7 @@ class ShadowJournal:
             query += " WHERE status = ?"
             parameters = (status,)
         query += " ORDER BY created_at DESC"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(_maker_shadow_quote_from_row(row) for row in rows)
 
@@ -1616,7 +1522,7 @@ class ShadowJournal:
             query += " WHERE status = ?"
             parameters = (status,)
         query += " ORDER BY opened_at ASC"
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(_paper_position_from_row(row) for row in rows)
 
@@ -1633,7 +1539,7 @@ class ShadowJournal:
         timestamp = settled_at or datetime.now(UTC)
         if timestamp.tzinfo is None:
             raise ValueError("settled_at must be timezone-aware")
-        with _database_connection(self.path) as connection:
+        with database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT position_id, opened_at, market_id, symbol, outcome, status, contracts,
                     entry_ask, entry_fee, entry_slippage, fair_probability, model_version,

@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
-from .journal import PaperPosition, ShadowJournal, _database_connection
+from .journal import PaperPosition, ShadowJournal
 from .above_x_research import above_x_coverage_report
+from .storage.sqlite import database_connection
 from .price_ladder import (
     CrossMarketDiagnostic,
     LadderProbabilityPoint,
@@ -46,7 +47,7 @@ def cross_market_diagnostics(
     query += " ORDER BY checkpoint_date, checkpoint_name, symbol"
     import json
 
-    with _database_connection(journal_path) as connection:
+    with database_connection(journal_path) as connection:
         rows = connection.execute(query, parameters).fetchall()
     diagnostics = []
     for checkpoint_date, checkpoint_name, symbol, payload_json in rows:

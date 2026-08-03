@@ -25,7 +25,7 @@ from .event_risk import (
 )
 from .fees import PolymarketFeeRateClient
 from .http import PublicApiError
-from .journal import PaperBatchEntry, ShadowJournal
+from .journal import MakerShadowQuote, PaperBatchEntry, ShadowJournal
 from .logging import log_event
 from .market_discovery import GammaMarketClient, MarketCandidate
 from .maker_shadow import MakerQuoteProposal, propose_maker_buy_quote
@@ -119,6 +119,7 @@ class ActiveMarket:
 class PendingPaperEntry:
     candidate: PaperEntryCandidate
     runtime: ActiveMarket
+    evaluation: RealtimeEvaluation
     payload: Mapping[str, object]
     created_at: datetime
 
@@ -716,7 +717,14 @@ class MultiMarketShadowSupervisor:
                 runtime.recorded_checkpoint_keys.add(checkpoint_key)
                 if checkpoint_recorded:
                     await asyncio.to_thread(
-                        self._record_execution_books, runtime, evaluation, result, now, "CHECKPOINT", None
+                        self._record_execution_books,
+                        runtime,
+                        spot=evaluation.spot,
+                        fair_up_probability=evaluation.fair_up_probability,
+                        payload=result,
+                        observed_at=now,
+                        observation_kind="CHECKPOINT",
+                        signal_id=None,
                     )
                     self.event_sink(
                         "CHECKPOINT_OBSERVATION_RECORDED",
@@ -758,13 +766,15 @@ class MultiMarketShadowSupervisor:
     def _record_execution_books(
         self,
         runtime: ActiveMarket,
-        evaluation: object,
+        *,
+        spot: float | None,
+        fair_up_probability: float | None,
         payload: Mapping[str, object],
         observed_at: datetime,
         observation_kind: str,
         signal_id: str | None,
     ) -> None:
-        fair_up = evaluation.fair_up_probability
+        fair_up = fair_up_probability
         for outcome, token_id, fee_rate, fair_probability in (
             ("UP", runtime.token_ids[0], runtime.up_fee_rate, fair_up),
             ("DOWN", runtime.token_ids[1], runtime.down_fee_rate, 1 - fair_up if fair_up is not None else None),
@@ -778,7 +788,7 @@ class MultiMarketShadowSupervisor:
                 symbol=runtime.symbol,
                 outcome=outcome,
                 token_id=token_id,
-                spot=_evaluation_value(evaluation, "spot"),
+                spot=spot,
                 price_to_beat=runtime.price_to_beat,
                 fair_probability=fair_probability,
                 best_bid=runtime.coordinator.latest_best_bids.get(token_id),
@@ -789,7 +799,11 @@ class MultiMarketShadowSupervisor:
             )
 
     def _schedule_markouts(
-        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], signal_id: str
+        self,
+        runtime: ActiveMarket,
+        evaluation: RealtimeEvaluation,
+        payload: Mapping[str, object],
+        signal_id: str,
     ) -> None:
         for delay_seconds in (60, 300, 900, 1800):
             task = asyncio.create_task(
@@ -801,7 +815,7 @@ class MultiMarketShadowSupervisor:
     async def _record_markout_after_delay(
         self,
         runtime: ActiveMarket,
-        evaluation: object,
+        evaluation: RealtimeEvaluation,
         payload: Mapping[str, object],
         signal_id: str,
         delay_seconds: int,
@@ -810,11 +824,12 @@ class MultiMarketShadowSupervisor:
         await asyncio.to_thread(
             self._record_execution_books,
             runtime,
-            evaluation,
-            payload,
-            datetime.now(UTC),
-            f"MARKOUT_{delay_seconds}S",
-            signal_id,
+            spot=evaluation.spot,
+            fair_up_probability=evaluation.fair_up_probability,
+            payload=payload,
+            observed_at=datetime.now(UTC),
+            observation_kind=f"MARKOUT_{delay_seconds}S",
+            signal_id=signal_id,
         )
 
     async def _queue_paper_entry(
@@ -832,6 +847,7 @@ class MultiMarketShadowSupervisor:
                 runtime.candidate.market_id, runtime.symbol, outcome, float(entry_ask), fair_probability, float(edge)
             ),
             runtime,
+            evaluation,
             dict(payload),
             now,
         )
@@ -919,13 +935,14 @@ class MultiMarketShadowSupervisor:
             await asyncio.to_thread(
                 self._record_execution_books,
                 item.runtime,
-                item.payload,
-                item.payload,
-                now,
-                "PAPER_ENTRY",
-                position.position_id,
+                spot=item.evaluation.spot,
+                fair_up_probability=item.evaluation.fair_up_probability,
+                payload=item.payload,
+                observed_at=now,
+                observation_kind="PAPER_ENTRY",
+                signal_id=position.position_id,
             )
-            self._schedule_markouts(item.runtime, item.payload, item.payload, position.position_id)
+            self._schedule_markouts(item.runtime, item.evaluation, item.payload, position.position_id)
             self.event_sink(
                 "PAPER_POSITION_OPENED",
                 {
@@ -944,7 +961,7 @@ class MultiMarketShadowSupervisor:
         """Maintain research-only passive quotes; touches never become assumed fills."""
 
         quotes: list[Mapping[str, object]] = []
-        fair_up = _evaluation_value(evaluation, "fair_up_probability")
+        fair_up = evaluation.fair_up_probability
         proposals: tuple[MakerQuoteProposal | None, MakerQuoteProposal | None]
         if fair_up is None or evaluation.skip_reasons:
             proposals = (None, None)
@@ -1252,10 +1269,6 @@ class MultiMarketShadowSupervisor:
                 )
 
 
-def _evaluation_value(evaluation: object, name: str) -> object:
-    return evaluation.get(name) if isinstance(evaluation, Mapping) else getattr(evaluation, name)
-
-
 def _book_summary(coordinator: ShadowStreamCoordinator, token_id: str) -> Mapping[str, object]:
     levels = coordinator.latest_book_levels.get(token_id, {"bids": {}, "asks": {}})
     bids = levels.get("bids", {})
@@ -1298,18 +1311,18 @@ def _usable_option_iv(surface: OptionIvSurface | None, now: datetime) -> float |
     return None
 
 
-def _maker_quote_payload(quote: object) -> Mapping[str, object]:
+def _maker_quote_payload(quote: MakerShadowQuote) -> Mapping[str, object]:
     return {
-        "quote_id": getattr(quote, "quote_id"),
-        "market_id": getattr(quote, "market_id"),
-        "symbol": getattr(quote, "symbol"),
-        "outcome": getattr(quote, "outcome"),
-        "status": getattr(quote, "status"),
-        "limit_price": getattr(quote, "limit_price"),
-        "fair_probability": getattr(quote, "fair_probability"),
-        "theoretical_edge": getattr(quote, "theoretical_edge"),
-        "touch_count": getattr(quote, "touch_count"),
-        "cancel_reason": getattr(quote, "cancel_reason"),
+        "quote_id": quote.quote_id,
+        "market_id": quote.market_id,
+        "symbol": quote.symbol,
+        "outcome": quote.outcome,
+        "status": quote.status,
+        "limit_price": quote.limit_price,
+        "fair_probability": quote.fair_probability,
+        "theoretical_edge": quote.theoretical_edge,
+        "touch_count": quote.touch_count,
+        "cancel_reason": quote.cancel_reason,
     }
 
 
@@ -1320,8 +1333,8 @@ def _close_for_date(closes: tuple[DailyClose, ...] | list[DailyClose], date_key:
 
 def _cross_source_uncertainty_buffer(
     now: datetime,
-    pyth_quote: object | None,
-    comparison_quote: object | None,
+    pyth_quote: SpotQuote | None,
+    comparison_quote: SpotQuote | None,
     maximum_age_seconds: float,
 ) -> float:
     """Convert fresh sub-gate source disagreement into a bounded probability penalty."""
@@ -1332,15 +1345,17 @@ def _cross_source_uncertainty_buffer(
         now, comparison_quote, maximum_age_seconds
     ):
         return 0.0
-    pyth_price = float(getattr(pyth_quote, "price"))
-    comparison_price = float(getattr(comparison_quote, "price"))
+    pyth_price = pyth_quote.price
+    comparison_price = comparison_quote.price
     relative_difference = abs(comparison_price - pyth_price) / pyth_price
-    confidence = getattr(pyth_quote, "confidence", None)
+    confidence = pyth_quote.confidence
     confidence_ratio = float(confidence) / pyth_price if confidence is not None else 0.0
     return min(0.02, relative_difference + min(0.005, 3 * confidence_ratio))
 
 
-def _pyth_primary_risk_reasons(now: datetime, pyth_quote: object | None, maximum_age_seconds: float) -> tuple[str, ...]:
+def _pyth_primary_risk_reasons(
+    now: datetime, pyth_quote: SpotQuote | None, maximum_age_seconds: float
+) -> tuple[str, ...]:
     """Pyth is the hard spot gate because it is the contract resolution source."""
 
     if pyth_quote is None:
@@ -1350,11 +1365,10 @@ def _pyth_primary_risk_reasons(now: datetime, pyth_quote: object | None, maximum
     return ()
 
 
-def _quote_age_seconds(now: datetime, quote: object) -> float | None:
-    published_at = getattr(quote, "published_at", None)
-    return _age_seconds(now, published_at or getattr(quote, "observed_at", None))
+def _quote_age_seconds(now: datetime, quote: SpotQuote) -> float | None:
+    return _age_seconds(now, quote.published_at or quote.observed_at)
 
 
-def _quote_is_stale(now: datetime, quote: object, maximum_age_seconds: float) -> bool:
+def _quote_is_stale(now: datetime, quote: SpotQuote, maximum_age_seconds: float) -> bool:
     age = _quote_age_seconds(now, quote)
     return age is None or age > maximum_age_seconds
