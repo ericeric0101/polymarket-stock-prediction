@@ -9,6 +9,10 @@ import json
 from pathlib import Path
 import sqlite3
 from typing import Mapping
+
+from .alpaca_options import IndicativeOptionQuote
+from .market_discovery import MarketCandidate
+from .polymarket_data import OrderBookSnapshot
 import uuid
 from zoneinfo import ZoneInfo
 
@@ -341,21 +345,20 @@ class ShadowJournal:
             )
         return decision_id
 
-    def upsert_market_candidate(self, candidate: object) -> None:
+    def upsert_market_candidate(self, candidate: MarketCandidate) -> None:
         """Persist raw terms for human review; accepts the discovery dataclass lazily."""
 
-        raw_payload = getattr(candidate, "raw_payload")
         values = (
-            getattr(candidate, "market_id"),
+            candidate.market_id,
             datetime.now(UTC).isoformat(),
-            getattr(candidate, "question"),
-            getattr(candidate, "slug"),
-            getattr(candidate, "end_date"),
-            getattr(candidate, "resolution_source"),
-            getattr(candidate, "outcome_a_token_id"),
-            getattr(candidate, "outcome_b_token_id"),
-            getattr(candidate, "review_status"),
-            json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str),
+            candidate.question,
+            candidate.slug,
+            candidate.end_date,
+            candidate.resolution_source,
+            candidate.outcome_a_token_id,
+            candidate.outcome_b_token_id,
+            candidate.review_status,
+            json.dumps(candidate.raw_payload, sort_keys=True, separators=(",", ":"), default=str),
         )
         with _database_connection(self.path) as connection:
             connection.execute(
@@ -389,17 +392,16 @@ class ShadowJournal:
                     values[5],
                     values[6],
                     values[7],
-                    getattr(candidate, "outcome_a_label"),
-                    getattr(candidate, "outcome_b_label"),
-                    getattr(candidate, "outcome_a_token_id"),
-                    getattr(candidate, "outcome_b_token_id"),
+                    candidate.outcome_a_label,
+                    candidate.outcome_b_label,
+                    candidate.outcome_a_token_id,
+                    candidate.outcome_b_token_id,
                     values[8],
                     values[9],
                 ),
             )
 
-    def record_order_book_snapshot(self, market_id: str, snapshot: object) -> None:
-        raw_payload = getattr(snapshot, "raw_payload")
+    def record_order_book_snapshot(self, market_id: str, snapshot: OrderBookSnapshot) -> None:
         with _database_connection(self.path) as connection:
             connection.execute(
                 """
@@ -408,13 +410,13 @@ class ShadowJournal:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    getattr(snapshot, "observed_at").isoformat(),
+                    snapshot.observed_at.isoformat(),
                     market_id,
-                    getattr(snapshot, "token_id"),
-                    getattr(snapshot, "best_bid"),
-                    getattr(snapshot, "best_ask"),
-                    getattr(snapshot, "midpoint"),
-                    json.dumps(raw_payload, sort_keys=True, separators=(",", ":"), default=str),
+                    snapshot.token_id,
+                    snapshot.best_bid,
+                    snapshot.best_ask,
+                    snapshot.midpoint,
+                    json.dumps(snapshot.raw_payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
 
@@ -695,7 +697,7 @@ class ShadowJournal:
                 asks.append(float(row[0]))
         return asks[0], asks[1]
 
-    def record_alpaca_indicative_option_quote(self, quote: object) -> None:
+    def record_alpaca_indicative_option_quote(self, quote: IndicativeOptionQuote) -> None:
         with _database_connection(self.path) as connection:
             connection.execute(
                 """
@@ -704,12 +706,12 @@ class ShadowJournal:
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    getattr(quote, "observed_at").isoformat(),
-                    getattr(quote, "symbol"),
-                    getattr(quote, "bid_price"),
-                    getattr(quote, "ask_price"),
-                    getattr(quote, "feed"),
-                    getattr(quote, "quality_label"),
+                    quote.observed_at.isoformat(),
+                    quote.symbol,
+                    quote.bid_price,
+                    quote.ask_price,
+                    quote.feed,
+                    quote.quality_label,
                 ),
             )
 

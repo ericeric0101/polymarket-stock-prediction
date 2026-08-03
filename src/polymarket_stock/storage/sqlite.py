@@ -23,6 +23,7 @@ def database_connection(path: Path) -> Iterator[sqlite3.Connection]:
     """Open one transactional SQLite connection with bounded lock retries."""
 
     connection = sqlite3.connect(path, timeout=DATABASE_BUSY_TIMEOUT_MS / 1000)
+    connection.row_factory = sqlite3.Row
     connection.execute(f"PRAGMA busy_timeout = {DATABASE_BUSY_TIMEOUT_MS}")
     try:
         yield connection
