@@ -25,7 +25,7 @@ from .event_risk import (
 )
 from .fees import PolymarketFeeRateClient
 from .http import PublicApiError
-from .journal import ShadowJournal
+from .journal import PaperBatchEntry, ShadowJournal
 from .logging import log_event
 from .market_discovery import GammaMarketClient, MarketCandidate
 from .maker_shadow import MakerQuoteProposal, propose_maker_buy_quote
@@ -865,77 +865,78 @@ class MultiMarketShadowSupervisor:
             max_same_direction=self.max_same_direction_paper_entries,
         )
         pending_by_market = {item.candidate.market_id: item for item in pending}
+        batch_entries: list[PaperBatchEntry] = []
         for item in rejected_existing:
-            await asyncio.to_thread(
-                self.journal.record_portfolio_decision,
-                batch_id=batch_id,
-                market_id=item.candidate.market_id,
-                symbol=item.candidate.symbol,
-                outcome=item.candidate.outcome,
-                risk_group=item.candidate.risk_group,
-                edge=item.candidate.edge,
-                selected=False,
-                reason="ALREADY_POSITIONED",
-                payload=item.payload,
-                created_at=now,
+            batch_entries.append(
+                PaperBatchEntry(
+                    market_id=item.candidate.market_id,
+                    symbol=item.candidate.symbol,
+                    outcome=item.candidate.outcome,
+                    risk_group=item.candidate.risk_group,
+                    edge=item.candidate.edge,
+                    selected=False,
+                    reason="ALREADY_POSITIONED",
+                    payload=item.payload,
+                )
             )
         for decision in decisions:
             item = pending_by_market[decision.candidate.market_id]
-            await asyncio.to_thread(
-                self.journal.record_portfolio_decision,
-                batch_id=batch_id,
-                market_id=decision.candidate.market_id,
-                symbol=decision.candidate.symbol,
-                outcome=decision.candidate.outcome,
-                risk_group=decision.candidate.risk_group,
-                edge=decision.candidate.edge,
-                selected=decision.accepted,
-                reason=decision.reason,
-                payload=item.payload,
-                created_at=now,
+            fee_rate = item.runtime.up_fee_rate if decision.candidate.outcome == "UP" else item.runtime.down_fee_rate
+            batch_entries.append(
+                PaperBatchEntry(
+                    market_id=decision.candidate.market_id,
+                    symbol=decision.candidate.symbol,
+                    outcome=decision.candidate.outcome,
+                    risk_group=decision.candidate.risk_group,
+                    edge=decision.candidate.edge,
+                    selected=decision.accepted,
+                    reason=decision.reason,
+                    payload=item.payload,
+                    entry_ask=decision.candidate.entry_ask if decision.accepted else None,
+                    fair_probability=decision.candidate.fair_probability if decision.accepted else None,
+                    model_version=str(item.payload["model_version"])
+                    if decision.accepted and fee_rate is not None
+                    else None,
+                    fee_rate=fee_rate if decision.accepted else None,
+                )
             )
+        results = await asyncio.to_thread(
+            self.journal.commit_paper_batch, batch_id=batch_id, entries=tuple(batch_entries), created_at=now
+        )
+        results_by_market = {result.market_id: result for result in results}
+        for decision in decisions:
+            item = pending_by_market[decision.candidate.market_id]
             if not decision.accepted:
                 self.event_sink(
                     "PAPER_ENTRY_REJECTED",
                     {"batch_id": batch_id, "market_id": decision.candidate.market_id, "reason": decision.reason},
                 )
                 continue
-            fee_rate = item.runtime.up_fee_rate if decision.candidate.outcome == "UP" else item.runtime.down_fee_rate
-            if fee_rate is None:
+            result = results_by_market[decision.candidate.market_id]
+            if not result.created or result.position is None:
                 continue
-            position, created = await asyncio.to_thread(
-                self.journal.open_paper_position,
-                market_id=decision.candidate.market_id,
-                symbol=decision.candidate.symbol,
-                outcome=decision.candidate.outcome,
-                entry_ask=decision.candidate.entry_ask,
-                fair_probability=decision.candidate.fair_probability,
-                model_version=str(item.payload["model_version"]),
-                payload=item.payload,
-                fee_rate=fee_rate,
+            position = result.position
+            await asyncio.to_thread(
+                self._record_execution_books,
+                item.runtime,
+                item.payload,
+                item.payload,
+                now,
+                "PAPER_ENTRY",
+                position.position_id,
             )
-            if created:
-                await asyncio.to_thread(
-                    self._record_execution_books,
-                    item.runtime,
-                    item.payload,
-                    item.payload,
-                    now,
-                    "PAPER_ENTRY",
-                    position.position_id,
-                )
-                self._schedule_markouts(item.runtime, item.payload, item.payload, position.position_id)
-                self.event_sink(
-                    "PAPER_POSITION_OPENED",
-                    {
-                        "batch_id": batch_id,
-                        "position_id": position.position_id,
-                        "market_id": position.market_id,
-                        "symbol": position.symbol,
-                        "outcome": position.outcome,
-                        "entry_ask": position.entry_ask,
-                    },
-                )
+            self._schedule_markouts(item.runtime, item.payload, item.payload, position.position_id)
+            self.event_sink(
+                "PAPER_POSITION_OPENED",
+                {
+                    "batch_id": batch_id,
+                    "position_id": position.position_id,
+                    "market_id": position.market_id,
+                    "symbol": position.symbol,
+                    "outcome": position.outcome,
+                    "entry_ask": position.entry_ask,
+                },
+            )
 
     def _sync_maker_shadow_quotes(
         self, runtime: ActiveMarket, evaluation: RealtimeEvaluation, payload: Mapping[str, object], now: datetime

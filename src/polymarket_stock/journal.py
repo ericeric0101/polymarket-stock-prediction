@@ -69,6 +69,29 @@ class PaperPosition:
 
 
 @dataclass(frozen=True)
+class PaperBatchEntry:
+    market_id: str
+    symbol: str
+    outcome: str
+    risk_group: str
+    edge: float
+    selected: bool
+    reason: str
+    payload: Mapping[str, object]
+    entry_ask: float | None = None
+    fair_probability: float | None = None
+    model_version: str | None = None
+    fee_rate: float | None = None
+
+
+@dataclass(frozen=True)
+class PaperBatchResult:
+    market_id: str
+    position: PaperPosition | None
+    created: bool
+
+
+@dataclass(frozen=True)
 class MakerShadowQuote:
     quote_id: str
     created_at: datetime
@@ -820,6 +843,80 @@ class ShadowJournal:
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
+
+    def commit_paper_batch(
+        self, *, batch_id: str, entries: tuple[PaperBatchEntry, ...], created_at: datetime
+    ) -> tuple[PaperBatchResult, ...]:
+        """Atomically record portfolio decisions and create selected paper positions."""
+        if created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+        results: list[PaperBatchResult] = []
+        with _database_connection(self.path) as connection:
+            for entry in entries:
+                if entry.outcome not in {"UP", "DOWN"}:
+                    raise ValueError("paper batch outcome must be UP or DOWN")
+                connection.execute(
+                    """INSERT INTO portfolio_decisions (
+                        created_at, batch_id, market_id, symbol, outcome, risk_group, edge, status, reason, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        created_at.isoformat(),
+                        batch_id,
+                        entry.market_id,
+                        entry.symbol.upper(),
+                        entry.outcome,
+                        entry.risk_group,
+                        entry.edge,
+                        "SELECTED" if entry.selected else "REJECTED",
+                        entry.reason,
+                        json.dumps(entry.payload, sort_keys=True, separators=(",", ":"), default=str),
+                    ),
+                )
+                if not entry.selected or None in (
+                    entry.entry_ask,
+                    entry.fair_probability,
+                    entry.model_version,
+                    entry.fee_rate,
+                ):
+                    results.append(PaperBatchResult(entry.market_id, None, False))
+                    continue
+                open_row = connection.execute(
+                    "SELECT position_id, opened_at, market_id, symbol, outcome, status, contracts, entry_ask, entry_fee, entry_slippage, fair_probability, model_version, settled_at, settlement_outcome, payout, realized_pnl, included_in_calibration, exclusion_reason FROM paper_positions WHERE market_id = ? AND status = 'OPEN'",
+                    (entry.market_id,),
+                ).fetchone()
+                if open_row is not None:
+                    results.append(PaperBatchResult(entry.market_id, _paper_position_from_row(open_row), False))
+                    continue
+                position_id = hashlib.sha256(f"{entry.market_id}|{entry.outcome}".encode("utf-8")).hexdigest()
+                entry_fee = estimate_taker_fee_usdc(
+                    shares=1.0, price=float(entry.entry_ask), fee_rate=float(entry.fee_rate)
+                )
+                inserted = (
+                    connection.execute(
+                        """INSERT OR IGNORE INTO paper_positions (position_id, opened_at, market_id, symbol, outcome, status, contracts, entry_ask, entry_fee, entry_slippage, fair_probability, model_version, entry_payload_json) VALUES (?, ?, ?, ?, ?, 'OPEN', 1.0, ?, ?, 0.0, ?, ?, ?)""",
+                        (
+                            position_id,
+                            created_at.isoformat(),
+                            entry.market_id,
+                            entry.symbol.upper(),
+                            entry.outcome,
+                            entry.entry_ask,
+                            entry_fee,
+                            entry.fair_probability,
+                            entry.model_version,
+                            json.dumps(entry.payload, sort_keys=True, separators=(",", ":"), default=str),
+                        ),
+                    ).rowcount
+                    == 1
+                )
+                row = connection.execute(
+                    "SELECT position_id, opened_at, market_id, symbol, outcome, status, contracts, entry_ask, entry_fee, entry_slippage, fair_probability, model_version, settled_at, settlement_outcome, payout, realized_pnl, included_in_calibration, exclusion_reason FROM paper_positions WHERE position_id = ?",
+                    (position_id,),
+                ).fetchone()
+                results.append(
+                    PaperBatchResult(entry.market_id, _paper_position_from_row(row) if row else None, inserted)
+                )
+        return tuple(results)
 
     def list_portfolio_decisions(self, limit: int = 100) -> tuple[Mapping[str, object], ...]:
         if limit < 1:

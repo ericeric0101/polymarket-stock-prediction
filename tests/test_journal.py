@@ -425,3 +425,30 @@ class JournalTests(unittest.TestCase):
             decision = journal.list_portfolio_decisions()[0]
         self.assertEqual(decision["reason"], "CORRELATION_LIMIT")
         self.assertEqual(decision["status"], "REJECTED")
+
+    def test_paper_batch_rolls_back_decisions_when_position_insert_fails(self) -> None:
+        from polymarket_stock.journal import PaperBatchEntry
+
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            entry = PaperBatchEntry(
+                market_id="market",
+                symbol="TSLA",
+                outcome="UP",
+                risk_group="EV_AUTO",
+                edge=0.1,
+                selected=True,
+                reason="SELECTED",
+                payload={},
+                entry_ask=0.5,
+                fair_probability=0.6,
+                model_version="test",
+                fee_rate=-1.0,
+            )
+            with self.assertRaises(ValueError):
+                journal.commit_paper_batch(
+                    batch_id="batch", entries=(entry,), created_at=datetime(2026, 8, 3, tzinfo=UTC)
+                )
+            self.assertEqual(journal.list_portfolio_decisions(), ())
+            self.assertEqual(journal.list_paper_positions(), ())
