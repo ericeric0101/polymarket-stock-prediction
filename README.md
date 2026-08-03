@@ -299,6 +299,11 @@ local `.env` file:
 PYTH_PRO_API_KEY=replace_with_your_trial_key
 ```
 
+`PYTH_PRO_API_KEY` is also used for the server-side Hermes stream when
+`PYTH_API_KEY` is not set. Set `PYTH_API_KEY` only when using a separate
+Core/Hermes credential.
+
+
 When `supervise-shadow` remains running, it automatically performs one
 research-only calibration after 16:03 New York time. For every Finnhub symbol
 with a quote captured in the 15:59–16:00 ET window, it downloads the official

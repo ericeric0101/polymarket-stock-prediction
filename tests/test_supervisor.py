@@ -48,6 +48,26 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.now = datetime(2026, 7, 20, 12, tzinfo=UTC)
         self.future = (self.now + timedelta(hours=8)).isoformat()
 
+    def test_pyth_pro_key_is_the_live_stream_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            fallback = MultiMarketShadowSupervisor(
+                journal=journal,
+                log_path=Path(directory) / "events.jsonl",
+                spot_provider="finnhub",
+                pyth_pro_api_key="pro-key",
+            )
+            override = MultiMarketShadowSupervisor(
+                journal=journal,
+                log_path=Path(directory) / "events.jsonl",
+                spot_provider="finnhub",
+                pyth_api_key="core-key",
+                pyth_pro_api_key="pro-key",
+            )
+        self.assertEqual(fallback.pyth_live_api_key, "pro-key")
+        self.assertEqual(override.pyth_live_api_key, "core-key")
+
     def test_universe_selection_uses_ticker_and_resolution_window(self) -> None:
         candidates = (
             _candidate("one", "TSLA", self.future),

@@ -221,7 +221,10 @@ class MultiMarketShadowSupervisor:
         self.fee_client = fee_client or PolymarketFeeRateClient()
         self.pyth_api_key = pyth_api_key.strip()
         self.pyth_pro_api_key = pyth_pro_api_key.strip()
-        self.pyth_client = pyth_client or PythBenchmarksClient(api_key=self.pyth_api_key)
+        # Pyth Pro credentials authenticate Hermes too. Keep PYTH_API_KEY as an
+        # explicit override for a distinct Core/Hermes credential.
+        self.pyth_live_api_key = self.pyth_api_key or self.pyth_pro_api_key
+        self.pyth_client = pyth_client or PythBenchmarksClient(api_key=self.pyth_live_api_key)
         self._pyth_feed_ids: dict[str, str] = {}
         self.earnings_client = FinnhubEarningsCalendarClient(finnhub_api_key)
         # Polygon/Massive is preferred when configured because it is a data-only
@@ -1087,7 +1090,9 @@ class MultiMarketShadowSupervisor:
                 asyncio.create_task(
                     run_with_reconnect(
                         "PYTH_HERMES",
-                        lambda: PythHermesStockStream(self.pyth_api_key).run(pyth_feed_ids, router.on_pyth_message),
+                        lambda: PythHermesStockStream(self.pyth_live_api_key).run(
+                            pyth_feed_ids, router.on_pyth_message
+                        ),
                         status_callback,
                     )
                 )
