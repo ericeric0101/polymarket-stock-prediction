@@ -182,7 +182,10 @@ class RealtimeBaselineEvaluator:
             skip_reasons.append("CROSSED_DOWN_BOOK")
         if not daily_data_is_fresh:
             skip_reasons.append("STALE_DAILY_BASELINE")
-        skip_reasons.extend(f"RISK_GATE:{reason}" for reason in risk_reasons)
+        # Risk gates constrain entry, not probability estimation. A usable spot,
+        # book, and volatility history should remain observable when, for example,
+        # a supplemental earnings-calendar request is temporarily unavailable.
+        entry_risk_reasons = [f"RISK_GATE:{reason}" for reason in risk_reasons]
         quality_flags.extend(option_quality_flags)
         if option_iv is None:
             quality_flags.append("OPTION_IV_FALLBACK_REALIZED_VOL")
@@ -334,7 +337,7 @@ class RealtimeBaselineEvaluator:
                     "model_error_buffer": comparison.model_error_buffer,
                 }
             )
-        entry_block_reasons: list[str] = []
+        entry_block_reasons = list(entry_risk_reasons)
         if model_outcome and option_iv_status != "IV_VALID":
             volatility_disagreement = volatility_models_disagree(
                 assessment.fair_up_probability,
@@ -361,7 +364,7 @@ class RealtimeBaselineEvaluator:
             paper_entry_block_reasons=tuple(entry_block_reasons),
             quality_flags=tuple(sorted(set(quality_flags))),
             trigger_reasons=trigger_reasons,
-            skip_reasons=(),
+            skip_reasons=tuple(entry_risk_reasons),
         )
 
 

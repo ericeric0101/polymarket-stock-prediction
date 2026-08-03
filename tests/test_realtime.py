@@ -121,6 +121,27 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertIn("CROSS_SOURCE_SPOT_DIVERGENCE", result.skip_reasons)
         self.assertAlmostEqual(result.cross_source_difference or 0, 1 / 101)
 
+    def test_entry_risk_gate_preserves_model_signal(self) -> None:
+        result = self.evaluator.evaluate(
+            now=self.now,
+            spot=101.0,
+            up_ask=0.01,
+            down_ask=0.99,
+            up_bid=0.005,
+            down_bid=0.98,
+            spot_age_seconds=0.2,
+            book_age_seconds=0.1,
+            stream_ready=True,
+            trigger_reasons=("FINNHUB_TRADE",),
+            risk_reasons=("EVENT_CALENDAR_UNAVAILABLE",),
+        )
+        self.assertIsNotNone(result.fair_up_probability)
+        self.assertEqual(result.model_outcome, "UP")
+        self.assertIsNone(result.paper_outcome)
+        self.assertFalse(result.paper_entry_eligible)
+        self.assertIn("RISK_GATE:EVENT_CALENDAR_UNAVAILABLE", result.skip_reasons)
+        self.assertIn("RISK_GATE:EVENT_CALENDAR_UNAVAILABLE", result.paper_entry_block_reasons)
+
     def test_unavailable_option_iv_uses_labeled_realized_volatility_fallback(self) -> None:
         result = self.evaluator.evaluate(
             now=self.now,
