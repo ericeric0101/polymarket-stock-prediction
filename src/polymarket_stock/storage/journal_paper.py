@@ -244,7 +244,7 @@ class JournalPaperRepository:
                     FROM maker_shadow_quotes WHERE market_id = ? AND outcome = ? AND status = 'ACTIVE'""",
                 (market_id, outcome),
             ).fetchone()
-            active = _maker_shadow_quote_from_row(row) if row is not None else None  # noqa: F821
+            active = _maker_shadow_quote_from_row(row) if row is not None else None
             if not has_proposal:
                 if active is None:
                     return None, None
@@ -340,7 +340,7 @@ class JournalPaperRepository:
             ).fetchone()
         if row is None:
             raise RuntimeError("maker quote insert did not return a row")
-        return _maker_shadow_quote_from_row(row), action  # noqa: F821
+        return _maker_shadow_quote_from_row(row), action
 
     def record_maker_shadow_touch(
         self, *, market_id: str, outcome: str, current_ask: float, observed_at: datetime | None = None
@@ -356,18 +356,18 @@ class JournalPaperRepository:
                     WHERE market_id = ? AND outcome = ? AND status = 'ACTIVE'""",
                 (market_id, outcome),
             ).fetchone()
-            if row is None or current_ask > float(row[1]):
+            if row is None or current_ask > float(row["limit_price"]):
                 return None
             connection.execute(
                 """UPDATE maker_shadow_quotes SET touch_count = touch_count + 1,
                         last_touched_at = ?, last_observed_at = ? WHERE quote_id = ?""",
-                (timestamp.isoformat(), timestamp.isoformat(), str(row[0])),
+                (timestamp.isoformat(), timestamp.isoformat(), str(row["quote_id"])),
             )
             updated = connection.execute(
                 """SELECT quote_id, created_at, last_observed_at, market_id, symbol, outcome, status,
                         limit_price, fair_probability, theoretical_edge, best_bid, best_ask, touch_count,
                         last_touched_at, cancelled_at, cancel_reason FROM maker_shadow_quotes WHERE quote_id = ?""",
-                (str(row[0]),),
+                (str(row["quote_id"]),),
             ).fetchone()
         return _maker_shadow_quote_from_row(updated) if updated is not None else None  # noqa: F821
 
