@@ -17,11 +17,12 @@ from .journal_models import (
     StoredMarketCandidate,
     StoredOutcomeToken,
 )
+from .journal_repository import JournalRepository
 from .migrations import initialize_database
 from .sqlite import database_connection
 
 
-class JournalCoreRepository:
+class JournalCoreRepository(JournalRepository):
     def __init__(self, path: Path) -> None:
         self.path = path
 
@@ -241,7 +242,7 @@ class JournalCoreRepository:
             ).fetchone()
         if row is None:
             return None
-        return {"price": float(row[0]), "candle_at": str(row[1]), "source": str(row[2])}
+        return {"price": float(row["close_price"]), "candle_at": str(row["candle_at"]), "source": str(row["source"])}
 
     def record_close_source_calibration(self, payload: Mapping[str, object]) -> None:
         """Upsert the one exact Pyth-close calibration record per symbol and session."""
@@ -276,7 +277,7 @@ class JournalCoreRepository:
         query += " ORDER BY market_date, symbol"
         with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
-        return tuple(json.loads(str(row[0])) for row in rows)
+        return tuple(json.loads(str(row["payload_json"])) for row in rows)
 
     def last_regular_spot_observation(
         self,
@@ -299,7 +300,11 @@ class JournalCoreRepository:
             ).fetchone()
         if row is None:
             return None
-        return {"price": float(row[0]), "observed_at": str(row[1]), "published_at": str(row[2]) if row[2] else None}
+        return {
+            "price": float(row["price"]),
+            "observed_at": str(row["observed_at"]),
+            "published_at": str(row["published_at"]) if row["published_at"] else None,
+        }
 
     def record_execution_observation(
         self,
@@ -362,8 +367,8 @@ class JournalCoreRepository:
         if row is None or not all(row):
             raise KeyError(f"market {market_id} is not present in the local candidate journal")
         return (
-            StoredOutcomeToken(label=row[0], token_id=row[1]),
-            StoredOutcomeToken(label=row[2], token_id=row[3]),
+            StoredOutcomeToken(label=str(row["outcome_a_label"]), token_id=str(row["outcome_a_token_id"])),
+            StoredOutcomeToken(label=str(row["outcome_b_label"]), token_id=str(row["outcome_b_token_id"])),
         )
 
     def list_market_candidates(self, symbol: str | None = None) -> tuple[StoredMarketCandidate, ...]:
@@ -381,7 +386,18 @@ class JournalCoreRepository:
         query += " ORDER BY end_date ASC, market_id ASC"
         with database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
-        return tuple(StoredMarketCandidate(*row) for row in rows)
+        return tuple(
+            StoredMarketCandidate(
+                market_id=str(row["market_id"]),
+                question=str(row["question"]),
+                slug=str(row["slug"]),
+                end_date=str(row["end_date"]),
+                outcome_a_label=str(row["outcome_a_label"]),
+                outcome_b_label=str(row["outcome_b_label"]),
+                review_status=str(row["review_status"]),
+            )
+            for row in rows
+        )
 
     def get_market_candidate(self, market_id: str) -> StoredMarketCandidate:
         with database_connection(self.path) as connection:
@@ -392,7 +408,15 @@ class JournalCoreRepository:
             ).fetchone()
         if row is None:
             raise KeyError(f"market {market_id} is not present in the local candidate journal")
-        return StoredMarketCandidate(*row)
+        return StoredMarketCandidate(
+            market_id=str(row["market_id"]),
+            question=str(row["question"]),
+            slug=str(row["slug"]),
+            end_date=str(row["end_date"]),
+            outcome_a_label=str(row["outcome_a_label"]),
+            outcome_b_label=str(row["outcome_b_label"]),
+            review_status=str(row["review_status"]),
+        )
 
     def get_market_candidate_raw_payload(self, market_id: str) -> Mapping[str, object]:
         """Return the persisted Gamma payload so contract terms can be revalidated."""
@@ -403,7 +427,7 @@ class JournalCoreRepository:
             ).fetchone()
         if row is None:
             raise KeyError(f"market {market_id} is not present in the local candidate journal")
-        payload = json.loads(str(row[0]))
+        payload = json.loads(str(row["raw_payload_json"]))
         if not isinstance(payload, dict):
             raise ValueError(f"market {market_id} has an invalid persisted raw payload")
         return payload
@@ -418,9 +442,9 @@ class JournalCoreRepository:
                         WHERE market_id = ? AND token_id = ? ORDER BY id DESC LIMIT 1""",
                     (market_id, outcome.token_id),
                 ).fetchone()
-                if row is None or row[0] is None:
+                if row is None or row["best_ask"] is None:
                     raise KeyError(f"market {market_id} has no stored ask for {outcome.label}")
-                asks.append(float(row[0]))
+                asks.append(float(row["best_ask"]))
         return asks[0], asks[1]
 
     def record_alpaca_indicative_option_quote(self, quote: IndicativeOptionQuote) -> None:

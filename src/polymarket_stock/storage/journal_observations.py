@@ -18,10 +18,11 @@ from .journal_models import (
     SpotSourceComparison,
     StoredSpotObservation,
 )
+from .journal_repository import JournalRepository
 from .sqlite import database_connection
 
 
-class JournalObservationRepository:
+class JournalObservationRepository(JournalRepository):
     def record_realtime_evaluation(self, payload: Mapping[str, object]) -> None:
         """Persist every fresh or rejected real-time shadow evaluation for calibration."""
 
@@ -103,16 +104,16 @@ class JournalObservationRepository:
             ).fetchall()
         return tuple(
             {
-                "created_at": str(row[0]),
-                "batch_id": str(row[1]),
-                "market_id": str(row[2]),
-                "symbol": str(row[3]),
-                "outcome": str(row[4]),
-                "risk_group": str(row[5]),
-                "edge": float(row[6]),
-                "status": str(row[7]),
-                "reason": str(row[8]),
-                "payload": json.loads(str(row[9])),
+                "created_at": str(row["created_at"]),
+                "batch_id": str(row["batch_id"]),
+                "market_id": str(row["market_id"]),
+                "symbol": str(row["symbol"]),
+                "outcome": str(row["outcome"]),
+                "risk_group": str(row["risk_group"]),
+                "edge": float(row["edge"]),
+                "status": str(row["status"]),
+                "reason": str(row["reason"]),
+                "payload": json.loads(str(row["payload_json"])),
             }
             for row in rows
         )
@@ -131,20 +132,20 @@ class JournalObservationRepository:
             rows = connection.execute(query, (int(eligible_only),)).fetchall()
         return tuple(
             CheckpointObservation(
-                market_id=str(row[0]),
-                symbol=str(row[1]),
-                checkpoint_date=str(row[2]),
-                checkpoint_name=str(row[3]),
-                evaluated_at=datetime.fromisoformat(str(row[4])),
-                fair_up_probability=float(row[5]),
-                up_ask=float(row[6]) if row[6] is not None else None,
-                down_ask=float(row[7]) if row[7] is not None else None,
-                model_version=str(row[8]),
-                option_iv=float(row[9]) if row[9] is not None else None,
-                winning_outcome=str(row[10]),
-                checkpoint_target_at=datetime.fromisoformat(str(row[11])),
-                checkpoint_delay_seconds=float(row[12]),
-                eligible_for_calibration=bool(row[13]),
+                market_id=str(row["market_id"]),
+                symbol=str(row["symbol"]),
+                checkpoint_date=str(row["checkpoint_date"]),
+                checkpoint_name=str(row["checkpoint_name"]),
+                evaluated_at=datetime.fromisoformat(str(row["evaluated_at"])),
+                fair_up_probability=float(row["fair_up_probability"]),
+                up_ask=float(row["up_ask"]) if row["up_ask"] is not None else None,
+                down_ask=float(row["down_ask"]) if row["down_ask"] is not None else None,
+                model_version=str(row["model_version"]),
+                option_iv=float(row["option_iv"]) if row["option_iv"] is not None else None,
+                winning_outcome=str(row["winning_outcome"]),
+                checkpoint_target_at=datetime.fromisoformat(str(row["checkpoint_target_at"])),
+                checkpoint_delay_seconds=float(row["checkpoint_delay_seconds"]),
+                eligible_for_calibration=bool(row["eligible_for_calibration"]),
             )
             for row in rows
         )
@@ -163,21 +164,21 @@ class JournalObservationRepository:
             rows = connection.execute(query).fetchall()
         observations = []
         for row in rows:
-            payload = json.loads(str(row[8]))
+            payload = json.loads(str(row["payload_json"]))
             comparison_models = payload.get("comparison_models")
             observations.append(
                 BufferSweepObservation(
-                    market_id=str(row[0]),
-                    symbol=str(row[1]),
-                    checkpoint_date=str(row[2]),
-                    checkpoint_name=str(row[3]),
-                    evaluated_at=datetime.fromisoformat(str(row[4])),
-                    fair_up_probability=float(row[5]),
-                    up_ask=float(row[6]) if row[6] is not None else None,
-                    down_ask=float(row[7]) if row[7] is not None else None,
+                    market_id=str(row["market_id"]),
+                    symbol=str(row["symbol"]),
+                    checkpoint_date=str(row["checkpoint_date"]),
+                    checkpoint_name=str(row["checkpoint_name"]),
+                    evaluated_at=datetime.fromisoformat(str(row["evaluated_at"])),
+                    fair_up_probability=float(row["fair_up_probability"]),
+                    up_ask=float(row["up_ask"]) if row["up_ask"] is not None else None,
+                    down_ask=float(row["down_ask"]) if row["down_ask"] is not None else None,
                     up_taker_fee=_payload_execution_fee(payload, "up"),
                     down_taker_fee=_payload_execution_fee(payload, "down"),
-                    winning_outcome=str(row[9]),
+                    winning_outcome=str(row["winning_outcome"]),
                     spot=read_spot(payload),
                     price_to_beat=read_threshold(payload),
                     up_bid=_optional_float(payload.get("up_bid")),
@@ -201,21 +202,21 @@ class JournalObservationRepository:
             rows = connection.execute(query).fetchall()
         return tuple(
             ExecutionObservation(
-                observed_at=datetime.fromisoformat(str(row[0])),
-                signal_id=str(row[1]) if row[1] else None,
-                observation_kind=str(row[2]),
-                market_id=str(row[3]),
-                symbol=str(row[4]),
-                outcome=str(row[5]),
-                token_id=str(row[6]),
-                spot=_optional_float(row[7]),
-                price_to_beat=_optional_float(row[8]),
-                fair_probability=_optional_float(row[9]),
-                best_bid=_optional_float(row[10]),
-                best_ask=_optional_float(row[11]),
-                fee_rate=_optional_float(row[12]),
-                book_payload=json.loads(str(row[13])),
-                evaluation_payload=json.loads(str(row[14])),
+                observed_at=datetime.fromisoformat(str(row["observed_at"])),
+                signal_id=str(row["signal_id"]) if row["signal_id"] else None,
+                observation_kind=str(row["observation_kind"]),
+                market_id=str(row["market_id"]),
+                symbol=str(row["symbol"]),
+                outcome=str(row["outcome"]),
+                token_id=str(row["token_id"]),
+                spot=_optional_float(row["spot"]),
+                price_to_beat=_optional_float(row["price_to_beat"]),
+                fair_probability=_optional_float(row["fair_probability"]),
+                best_bid=_optional_float(row["best_bid"]),
+                best_ask=_optional_float(row["best_ask"]),
+                fee_rate=_optional_float(row["fee_rate"]),
+                book_payload=json.loads(str(row["book_payload_json"])),
+                evaluation_payload=json.loads(str(row["evaluation_payload_json"])),
             )
             for row in rows
         )
@@ -251,11 +252,11 @@ class JournalObservationRepository:
             rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(
             StoredSpotObservation(
-                observed_at=datetime.fromisoformat(str(row[0])),
-                source=str(row[1]),
-                symbol=str(row[2]),
-                price=float(row[3]),
-                published_at=datetime.fromisoformat(str(row[4])) if row[4] else None,
+                observed_at=datetime.fromisoformat(str(row["observed_at"])),
+                source=str(row["source"]),
+                symbol=str(row["symbol"]),
+                price=float(row["price"]),
+                published_at=datetime.fromisoformat(str(row["published_at"])) if row["published_at"] else None,
             )
             for row in rows
         )
@@ -274,15 +275,19 @@ class JournalObservationRepository:
             rows = connection.execute(query, parameters).fetchall()
         return tuple(
             SpotSourceComparison(
-                observed_at=datetime.fromisoformat(str(row[0])),
-                symbol=str(row[1]),
-                primary_source=str(row[2]),
-                primary_price=float(row[3]),
-                pyth_price=float(row[4]),
-                pyth_confidence=_optional_float(row[5]),
-                difference_bps=float(row[6]),
-                primary_published_at=datetime.fromisoformat(str(row[7])) if row[7] else None,
-                pyth_published_at=datetime.fromisoformat(str(row[8])) if row[8] else None,
+                observed_at=datetime.fromisoformat(str(row["observed_at"])),
+                symbol=str(row["symbol"]),
+                primary_source=str(row["primary_source"]),
+                primary_price=float(row["primary_price"]),
+                pyth_price=float(row["pyth_price"]),
+                pyth_confidence=_optional_float(row["pyth_confidence"]),
+                difference_bps=float(row["difference_bps"]),
+                primary_published_at=datetime.fromisoformat(str(row["primary_published_at"]))
+                if row["primary_published_at"]
+                else None,
+                pyth_published_at=datetime.fromisoformat(str(row["pyth_published_at"]))
+                if row["pyth_published_at"]
+                else None,
             )
             for row in rows
         )

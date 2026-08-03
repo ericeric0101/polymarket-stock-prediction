@@ -12,10 +12,11 @@ from .journal_models import (
     FirstSignalCalibrationObservation,
     ReplayObservation,
 )
+from .journal_repository import JournalRepository
 from .sqlite import database_connection
 
 
-class JournalResearchRepository:
+class JournalResearchRepository(JournalRepository):
     def record_contract_review(
         self, market_id: str, *, accepted: bool, reason: str, contract: Mapping[str, object] | None = None
     ) -> None:
@@ -43,7 +44,7 @@ class JournalResearchRepository:
             ).fetchone()
         if row is None:
             raise KeyError(market_id)
-        return str(row[0])
+        return str(row["winning_outcome"])
 
     def record_market_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object]) -> None:
         if winning_outcome not in {"UP", "DOWN"}:
@@ -71,7 +72,7 @@ class JournalResearchRepository:
                     ORDER BY market_id LIMIT ?""",
                 (limit,),
             ).fetchall()
-        return tuple(str(row[0]) for row in rows)
+        return tuple(str(row["market_id"]) for row in rows)
 
     def list_replay_observations(self) -> tuple[ReplayObservation, ...]:
         """Return one latest valid model observation per officially settled market."""
@@ -90,13 +91,13 @@ class JournalResearchRepository:
             rows = connection.execute(query).fetchall()
         return tuple(
             ReplayObservation(
-                market_id=str(row[0]),
-                symbol=str(row[1]),
-                evaluated_at=datetime.fromisoformat(str(row[2])),
-                fair_up_probability=float(row[3]),
-                up_ask=float(row[4]) if row[4] is not None else None,
-                down_ask=float(row[5]) if row[5] is not None else None,
-                winning_outcome=str(row[6]),
+                market_id=str(row["market_id"]),
+                symbol=str(row["symbol"]),
+                evaluated_at=datetime.fromisoformat(str(row["evaluated_at"])),
+                fair_up_probability=float(row["fair_up_probability"]),
+                up_ask=float(row["up_ask"]) if row["up_ask"] is not None else None,
+                down_ask=float(row["down_ask"]) if row["down_ask"] is not None else None,
+                winning_outcome=str(row["winning_outcome"]),
             )
             for row in rows
         )
@@ -126,10 +127,10 @@ class JournalResearchRepository:
             rows = connection.execute(query).fetchall()
         observations = []
         for row in rows:
-            payload = json.loads(str(row[7]))
-            outcome = "UP" if str(row[6]) in {"PAPER_UP", "OBSERVATION_ONLY_UP"} else "DOWN"
-            fair_up = float(row[3])
-            entry_ask = float(row[4] if outcome == "UP" else row[5])
+            payload = json.loads(str(row["payload_json"]))
+            outcome = "UP" if str(row["signal_status"]) in {"PAPER_UP", "OBSERVATION_ONLY_UP"} else "DOWN"
+            fair_up = float(row["fair_up_probability"])
+            entry_ask = float(row["up_ask"] if outcome == "UP" else row["down_ask"])
             entry_fee_value = payload.get("up_taker_fee") if outcome == "UP" else payload.get("down_taker_fee")
             spot = read_spot(payload)
             threshold = read_threshold(payload)
@@ -139,14 +140,14 @@ class JournalResearchRepository:
             option_iv_status = str(payload.get("option_iv_status") or "IV_UNAVAILABLE")
             observations.append(
                 FirstSignalCalibrationObservation(
-                    market_id=str(row[1]),
-                    symbol=str(row[2]),
-                    evaluated_at=datetime.fromisoformat(str(row[0])),
+                    market_id=str(row["market_id"]),
+                    symbol=str(row["symbol"]),
+                    evaluated_at=datetime.fromisoformat(str(row["evaluated_at"])),
                     model_outcome=outcome,
                     selected_fair_probability=fair_up if outcome == "UP" else 1.0 - fair_up,
                     entry_ask=entry_ask,
                     entry_fee=float(entry_fee_value) if entry_fee_value is not None else None,
-                    winning_outcome=str(row[8]),
+                    winning_outcome=str(row["winning_outcome"]),
                     model_version=str(payload.get("model_version") or "unknown"),
                     option_iv_status=option_iv_status,
                     iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
@@ -160,12 +161,12 @@ class JournalResearchRepository:
     def first_signal_performance(self) -> Mapping[str, object]:
         """Summarize one first model signal per officially settled market."""
 
-        query = """SELECT COUNT(*), SUM(
+        query = """SELECT COUNT(*) AS settled_markets, SUM(
                     CASE
                         WHEN evaluation.signal_status IN ('PAPER_UP', 'OBSERVATION_ONLY_UP') THEN 'UP'
                         ELSE 'DOWN'
                     END = settlement.winning_outcome
-                ) FROM market_settlements AS settlement
+                ) AS wins FROM market_settlements AS settlement
                 JOIN realtime_evaluations AS evaluation ON evaluation.id = (
                     SELECT first_signal.id FROM realtime_evaluations AS first_signal
                     WHERE first_signal.market_id = settlement.market_id
@@ -176,9 +177,9 @@ class JournalResearchRepository:
                     ORDER BY first_signal.evaluated_at, first_signal.id LIMIT 1
                 )"""
         with database_connection(self.path) as connection:
-            count, wins = connection.execute(query).fetchone()
-        settled_markets = int(count or 0)
-        correct = int(wins or 0)
+            summary = connection.execute(query).fetchone()
+        settled_markets = int(summary["settled_markets"] or 0) if summary else 0
+        correct = int(summary["wins"] or 0) if summary else 0
         return {
             "settled_markets": settled_markets,
             "wins": correct,
@@ -218,7 +219,7 @@ class JournalResearchRepository:
         # Keep one stable row per symbol and prefer the regular-session contract.
         by_symbol: dict[str, dict[str, object]] = {}
         for row in rows:
-            payload = json.loads(str(row[0]))
+            payload = json.loads(str(row["payload_json"]))
             symbol = str(payload.get("symbol") or "").upper()
             if not symbol:
                 continue
@@ -233,8 +234,10 @@ class JournalResearchRepository:
                 by_symbol[symbol] = payload
 
         checkpoints_by_market: dict[str, dict[str, Mapping[str, object]]] = {}
-        for market_id, checkpoint_name, payload_json in checkpoint_rows:
-            checkpoints_by_market.setdefault(str(market_id), {})[str(checkpoint_name)] = json.loads(str(payload_json))
+        for row in checkpoint_rows:
+            checkpoints_by_market.setdefault(str(row["market_id"]), {})[str(row["checkpoint_name"])] = json.loads(
+                str(row["payload_json"])
+            )
         selected = []
         for symbol in sorted(by_symbol)[:limit]:
             payload = dict(by_symbol[symbol])
