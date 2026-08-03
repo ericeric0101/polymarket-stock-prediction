@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from ..alpaca_options import IndicativeOptionQuote
 from ..market_discovery import MarketCandidate
 from ..polymarket_data import OrderBookSnapshot
+from .journal_helpers import _required_float
 from .journal_models import (
     StoredMarketCandidate,
     StoredOutcomeToken,
@@ -154,7 +155,7 @@ class JournalCoreRepository(JournalRepository):
             observed_at = datetime.fromisoformat(str(payload["observed_at"]))
             source = str(payload["source"]).upper()
             symbol = str(payload["symbol"]).upper()
-            price = float(payload["price"])
+            price = _required_float(payload["price"], "price")
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("spot observation is invalid") from error
         if observed_at.tzinfo is None or not source or not symbol or price <= 0:
@@ -173,7 +174,7 @@ class JournalCoreRepository(JournalRepository):
                     symbol,
                     price,
                     str(published_at) if published_at else None,
-                    float(confidence) if confidence is not None else None,
+                    _required_float(confidence, "confidence") if confidence is not None else None,
                     str(payload["feed_id"]) if payload.get("feed_id") else None,
                 ),
             )
@@ -185,9 +186,9 @@ class JournalCoreRepository(JournalRepository):
             observed_at = datetime.fromisoformat(str(payload["observed_at"]))
             symbol = str(payload["symbol"]).upper()
             primary_source = str(payload["primary_source"]).upper()
-            primary_price = float(payload["primary_price"])
-            pyth_price = float(payload["pyth_price"])
-            difference_bps = float(payload["difference_bps"])
+            primary_price = _required_float(payload["primary_price"], "primary_price")
+            pyth_price = _required_float(payload["pyth_price"], "pyth_price")
+            difference_bps = _required_float(payload["difference_bps"], "difference_bps")
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError("spot source comparison is invalid") from error
         if observed_at.tzinfo is None or not symbol or not primary_source or min(primary_price, pyth_price) <= 0:
@@ -207,7 +208,9 @@ class JournalCoreRepository(JournalRepository):
                     payload.get("primary_published_at"),
                     pyth_price,
                     payload.get("pyth_published_at"),
-                    float(payload["pyth_confidence"]) if payload.get("pyth_confidence") is not None else None,
+                    _required_float(payload["pyth_confidence"], "pyth_confidence")
+                    if payload.get("pyth_confidence") is not None
+                    else None,
                     payload.get("pyth_feed_id"),
                     difference_bps,
                 ),

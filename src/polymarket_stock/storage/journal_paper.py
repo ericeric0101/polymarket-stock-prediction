@@ -17,10 +17,11 @@ from .journal_models import (
     PaperBatchResult,
     PaperPosition,
 )
+from .journal_repository import JournalRepository
 from .sqlite import database_connection
 
 
-class JournalPaperRepository:
+class JournalPaperRepository(JournalRepository):
     def record_portfolio_decision(
         self,
         *,
@@ -85,11 +86,16 @@ class JournalPaperRepository:
                         json.dumps(entry.payload, sort_keys=True, separators=(",", ":"), default=str),
                     ),
                 )
-                if not entry.selected or None in (
-                    entry.entry_ask,
-                    entry.fair_probability,
-                    entry.model_version,
-                    entry.fee_rate,
+                entry_ask = entry.entry_ask
+                fair_probability = entry.fair_probability
+                model_version = entry.model_version
+                fee_rate = entry.fee_rate
+                if (
+                    not entry.selected
+                    or entry_ask is None
+                    or fair_probability is None
+                    or model_version is None
+                    or fee_rate is None
                 ):
                     results.append(PaperBatchResult(entry.market_id, None, False))
                     continue
@@ -101,9 +107,7 @@ class JournalPaperRepository:
                     results.append(PaperBatchResult(entry.market_id, _paper_position_from_row(open_row), False))
                     continue
                 position_id = hashlib.sha256(f"{entry.market_id}|{entry.outcome}".encode()).hexdigest()
-                entry_fee = estimate_taker_fee_usdc(
-                    shares=1.0, price=float(entry.entry_ask), fee_rate=float(entry.fee_rate)
-                )
+                entry_fee = estimate_taker_fee_usdc(shares=1.0, price=entry_ask, fee_rate=fee_rate)
                 inserted = (
                     connection.execute(
                         """INSERT OR IGNORE INTO paper_positions (position_id, opened_at, market_id, symbol, outcome, status, contracts, entry_ask, entry_fee, entry_slippage, fair_probability, model_version, entry_payload_json) VALUES (?, ?, ?, ?, ?, 'OPEN', 1.0, ?, ?, 0.0, ?, ?, ?)""",  # noqa: E501
@@ -113,10 +117,10 @@ class JournalPaperRepository:
                             entry.market_id,
                             entry.symbol.upper(),
                             entry.outcome,
-                            entry.entry_ask,
+                            entry_ask,
                             entry_fee,
-                            entry.fair_probability,
-                            entry.model_version,
+                            fair_probability,
+                            model_version,
                             json.dumps(entry.payload, sort_keys=True, separators=(",", ":"), default=str),
                         ),
                     ).rowcount
@@ -230,10 +234,13 @@ class JournalPaperRepository:
         if timestamp.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
         has_proposal = None not in (limit_price, fair_probability, theoretical_edge, best_bid, best_ask)
-        if has_proposal and not (
-            0 < float(limit_price) < 1
-            and 0 <= float(fair_probability) <= 1
-            and 0 <= float(best_bid) <= float(best_ask) <= 1
+        if (
+            has_proposal
+            and limit_price is not None
+            and fair_probability is not None
+            and best_bid is not None
+            and best_ask is not None
+            and not (0 < limit_price < 1 and 0 <= fair_probability <= 1 and 0 <= best_bid <= best_ask <= 1)
         ):
             raise ValueError("invalid maker quote proposal")
         with database_connection(self.path) as connection:
@@ -245,7 +252,13 @@ class JournalPaperRepository:
                 (market_id, outcome),
             ).fetchone()
             active = _maker_shadow_quote_from_row(row) if row is not None else None
-            if not has_proposal:
+            if (
+                limit_price is None
+                or fair_probability is None
+                or theoretical_edge is None
+                or best_bid is None
+                or best_ask is None
+            ):
                 if active is None:
                     return None, None
                 connection.execute(
@@ -254,7 +267,7 @@ class JournalPaperRepository:
                     (timestamp.isoformat(), no_quote_reason, timestamp.isoformat(), active.quote_id),
                 )
                 return None, "CANCELLED"
-            if active is not None and active.limit_price == float(limit_price):
+            if active is not None and active.limit_price == limit_price:
                 connection.execute(
                     """UPDATE maker_shadow_quotes SET last_observed_at = ?, fair_probability = ?,
                         theoretical_edge = ?, best_bid = ?, best_ask = ?, payload_json = ? WHERE quote_id = ?""",
@@ -271,13 +284,13 @@ class JournalPaperRepository:
                 return replace(
                     active,
                     last_observed_at=timestamp,
-                    fair_probability=float(fair_probability),
-                    theoretical_edge=float(theoretical_edge),
-                    best_bid=float(best_bid),
-                    best_ask=float(best_ask),
+                    fair_probability=fair_probability,
+                    theoretical_edge=theoretical_edge,
+                    best_bid=best_bid,
+                    best_ask=best_ask,
                 ), None
             if active is not None:
-                price_change = abs(active.limit_price - float(limit_price))
+                price_change = abs(active.limit_price - limit_price)
                 quote_age_seconds = max(0.0, (timestamp - active.created_at).total_seconds())
                 should_hold = (
                     price_change < minimum_reprice_price_change or quote_age_seconds < minimum_quote_lifetime_seconds

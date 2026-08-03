@@ -12,23 +12,26 @@ from .journal_models import MakerShadowQuote, PaperPosition
 def _payload_execution_fee(payload: Mapping[str, object], outcome_prefix: str) -> float | None:
     """Use the fee frozen with the checkpoint, never a recalculated current fee."""
 
-    value = payload.get(f"{outcome_prefix}_taker_fee")
-    if value is None:
-        return None
-    try:
-        fee = float(value)
-    except (TypeError, ValueError):
-        return None
-    return fee if fee >= 0 else None
+    fee = _optional_float(payload.get(f"{outcome_prefix}_taker_fee"))
+    return fee if fee is not None and fee >= 0 else None
 
 
 def _optional_float(value: object) -> float | None:
-    if value is None:
+    if not isinstance(value, (int, float, str)):
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except ValueError:
         return None
+
+
+def _required_float(value: object, field_name: str) -> float:
+    """Convert a required persisted payload value without leaking ``object`` downstream."""
+
+    converted = _optional_float(value)
+    if converted is None:
+        raise ValueError(f"{field_name} must be numeric")
+    return converted
 
 
 def _paper_position_from_row(row: sqlite3.Row) -> PaperPosition:

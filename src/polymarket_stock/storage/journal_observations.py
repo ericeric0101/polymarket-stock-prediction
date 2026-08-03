@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 from ..checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 from ..evaluation_payload import read_spot, read_threshold, validate_for_write
-from .journal_helpers import _optional_float, _payload_execution_fee
+from .journal_helpers import _optional_float, _payload_execution_fee, _required_float
 from .journal_models import (
     BufferSweepObservation,
     CheckpointObservation,
@@ -79,7 +79,7 @@ class JournalObservationRepository(JournalRepository):
                         checkpoint_date,
                         checkpoint_name,
                         str(payload["evaluated_at"]),
-                        float(payload["fair_up_probability"]),
+                        _required_float(payload["fair_up_probability"], "fair_up_probability"),
                         payload.get("up_ask"),
                         payload.get("down_ask"),
                         str(payload["model_version"]),
