@@ -38,7 +38,7 @@ from .quality import observable_equity_market_date
 from .trading_calendar import previous_nyse_trading_day
 from .threshold_estimation import ThresholdSource, calibrated_threshold_estimate
 from .yahoo_data import YahooChartClient, YahooPayloadError
-from .realtime import RealtimeBaselineEvaluator
+from .realtime import RealtimeBaselineEvaluator, RealtimeEvaluation
 from .storage.writer import JournalWriter
 from .streaming import (
     AlpacaIexStockStream,
@@ -764,7 +764,7 @@ class MultiMarketShadowSupervisor:
         observation_kind: str,
         signal_id: str | None,
     ) -> None:
-        fair_up = _evaluation_value(evaluation, "fair_up_probability")
+        fair_up = evaluation.fair_up_probability
         for outcome, token_id, fee_rate, fair_probability in (
             ("UP", runtime.token_ids[0], runtime.up_fee_rate, fair_up),
             ("DOWN", runtime.token_ids[1], runtime.down_fee_rate, 1 - fair_up if fair_up is not None else None),
@@ -818,12 +818,12 @@ class MultiMarketShadowSupervisor:
         )
 
     async def _queue_paper_entry(
-        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
+        self, runtime: ActiveMarket, evaluation: RealtimeEvaluation, payload: Mapping[str, object], now: datetime
     ) -> None:
-        outcome = getattr(evaluation, "paper_outcome")
-        entry_ask = getattr(evaluation, "up_ask") if outcome == "UP" else getattr(evaluation, "down_ask")
-        edge = getattr(evaluation, "up_edge") if outcome == "UP" else getattr(evaluation, "down_edge")
-        fair_up = _evaluation_value(evaluation, "fair_up_probability")
+        outcome = evaluation.paper_outcome
+        entry_ask = evaluation.up_ask if outcome == "UP" else evaluation.down_ask
+        edge = evaluation.up_edge if outcome == "UP" else evaluation.down_edge
+        fair_up = evaluation.fair_up_probability
         if outcome not in {"UP", "DOWN"} or entry_ask is None or edge is None or fair_up is None:
             return
         fair_probability = float(fair_up) if outcome == "UP" else 1 - float(fair_up)
@@ -938,35 +938,35 @@ class MultiMarketShadowSupervisor:
                 )
 
     def _sync_maker_shadow_quotes(
-        self, runtime: ActiveMarket, evaluation: object, payload: Mapping[str, object], now: datetime
+        self, runtime: ActiveMarket, evaluation: RealtimeEvaluation, payload: Mapping[str, object], now: datetime
     ) -> list[Mapping[str, object]]:
         """Maintain research-only passive quotes; touches never become assumed fills."""
 
         quotes: list[Mapping[str, object]] = []
         fair_up = _evaluation_value(evaluation, "fair_up_probability")
         proposals: tuple[MakerQuoteProposal | None, MakerQuoteProposal | None]
-        if fair_up is None or getattr(evaluation, "skip_reasons"):
+        if fair_up is None or evaluation.skip_reasons:
             proposals = (None, None)
         else:
             proposals = (
                 propose_maker_buy_quote(
                     outcome="UP",
                     fair_probability=float(fair_up),
-                    best_bid=getattr(evaluation, "up_bid"),
-                    best_ask=getattr(evaluation, "up_ask"),
+                    best_bid=evaluation.up_bid,
+                    best_ask=evaluation.up_ask,
                     minimum_edge=self.maker_minimum_edge,
                 ),
                 propose_maker_buy_quote(
                     outcome="DOWN",
                     fair_probability=1 - float(fair_up),
-                    best_bid=getattr(evaluation, "down_bid"),
-                    best_ask=getattr(evaluation, "down_ask"),
+                    best_bid=evaluation.down_bid,
+                    best_ask=evaluation.down_ask,
                     minimum_edge=self.maker_minimum_edge,
                 ),
             )
         for outcome, proposal, current_ask in (
-            ("UP", proposals[0], getattr(evaluation, "up_ask")),
-            ("DOWN", proposals[1], getattr(evaluation, "down_ask")),
+            ("UP", proposals[0], evaluation.up_ask),
+            ("DOWN", proposals[1], evaluation.down_ask),
         ):
             if current_ask is not None:
                 touched = self.journal.record_maker_shadow_touch(
