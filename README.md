@@ -333,12 +333,16 @@ risk gates and live evaluations still respond to every received update.
 
 ### Pyth-Outage / Finnhub-Only Fallback
 
-`PYTH_PRIMARY` remains the default research mode. It uses Pyth Hermes as the
-model spot and Finnhub as a cross-check. `FINNHUB_ONLY` intentionally opens no
-Hermes stream: it uses Finnhub spot plus Polymarket CLOB quotes. A spot within
-35 bps of an *estimated* threshold is labelled `NEAR_ESTIMATED_THRESHOLD` and
-gets an additional model-error buffer; it is not suppressed solely for that
-reason.
+`FINNHUB_ONLY` is the default runtime mode. It uses Finnhub spot plus
+Polymarket CLOB quotes, while retaining the cached official Pyth final close as
+the daily threshold whenever it exists. A spot within 35 bps of an *estimated*
+threshold is labelled `NEAR_ESTIMATED_THRESHOLD` and gets an additional
+model-error buffer; it is not suppressed solely for that reason.
+
+`PYTH_PRIMARY` remains an opt-in diagnostic mode. It requires a working Hermes
+feed for the current equity symbols; it intentionally produces no model signal
+when that feed is unavailable rather than silently substituting a different
+primary source.
 
 ```zsh
 # After Pyth access ends: no Hermes stream, no Pyth freshness gate.
@@ -501,6 +505,7 @@ source .venv/bin/activate
 
 polymarket-stock supervise-shadow \
   --spot-provider finnhub \
+  --spot-mode FINNHUB_ONLY \
   --volatility-estimator CLOSE_TO_CLOSE \
   --comparison-estimators EWMA \
   --volatility-decay 0.94 \

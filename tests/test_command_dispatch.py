@@ -6,6 +6,12 @@ from polymarket_stock.commands.catalog import COMMAND_GROUPS, command_group
 from polymarket_stock.commands.entrypoint import _HANDLERS, build_parser
 
 
+def test_supervise_shadow_defaults_to_finnhub_only() -> None:
+    arguments = build_parser().parse_args(["supervise-shadow"])
+
+    assert arguments.spot_mode == "FINNHUB_ONLY"
+
+
 def test_every_catalog_command_has_a_parser_and_domain_handler() -> None:
     commands = tuple(command for group in COMMAND_GROUPS.values() for command in group)
     parser = build_parser()

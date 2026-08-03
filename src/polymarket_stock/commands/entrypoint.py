@@ -186,8 +186,8 @@ def build_parser() -> argparse.ArgumentParser:
     supervisor_parser.add_argument(
         "--spot-mode",
         choices=("PYTH_PRIMARY", "FINNHUB_ONLY"),
-        default="PYTH_PRIMARY",
-        help="PYTH_PRIMARY uses Hermes; FINNHUB_ONLY uses Finnhub spot plus exact or estimated prior-close thresholds",
+        default="FINNHUB_ONLY",
+        help="FINNHUB_ONLY uses Finnhub spot plus exact or estimated prior-close thresholds; PYTH_PRIMARY requires a working Hermes feed",
     )
     supervisor_parser.add_argument(
         "--finnhub-threshold-safety-bps",

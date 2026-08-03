@@ -157,7 +157,7 @@ class MultiMarketShadowSupervisor:
         pyth_client: PythBenchmarksClient | None = None,
         pyth_api_key: str = "",
         pyth_pro_api_key: str = "",
-        spot_mode: str = "PYTH_PRIMARY",
+        spot_mode: str = "FINNHUB_ONLY",
         finnhub_threshold_safety_bps: float = 35.0,
         tradier_api_token: str = "",
         polygon_api_key: str = "",
