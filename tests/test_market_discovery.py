@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from polymarket_stock.market_discovery import GammaMarketClient, MarketCandidate, MarketPayloadError, is_daily_equity_direction_candidate
+from polymarket_stock.market_discovery import (
+    GammaMarketClient,
+    MarketCandidate,
+    MarketPayloadError,
+    is_daily_equity_direction_candidate,
+)
 
 
 PAYLOAD = {
@@ -67,7 +72,11 @@ class MarketDiscoveryTests(unittest.TestCase):
 
     def test_market_settlement_uses_published_winning_outcome(self) -> None:
         client = GammaMarketClient(
-            get_json_fn=lambda _url, _params: {"closed": True, "outcomes": '["Up", "Down"]', "outcomePrices": '["0", "1"]'}
+            get_json_fn=lambda _url, _params: {
+                "closed": True,
+                "outcomes": '["Up", "Down"]',
+                "outcomePrices": '["0", "1"]',
+            }
         )
         settlement = client.get_market_settlement("market-1")
         self.assertTrue(settlement.closed)

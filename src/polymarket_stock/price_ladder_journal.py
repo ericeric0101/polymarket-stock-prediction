@@ -104,7 +104,11 @@ class PriceLadderJournal:
             connection.executescript(LADDER_SCHEMA)
 
     def upsert_contract(
-        self, contract: PriceLadderContract, *, accepted: bool = True, reason: str = "PYTH_CLOSE_ABOVE_TEMPLATE",
+        self,
+        contract: PriceLadderContract,
+        *,
+        accepted: bool = True,
+        reason: str = "PYTH_CLOSE_ABOVE_TEMPLATE",
     ) -> None:
         with database_connection(self.path) as connection:
             connection.execute(
@@ -120,16 +124,30 @@ class PriceLadderJournal:
                     review_status=excluded.review_status, review_reason=excluded.review_reason,
                     raw_payload_json=excluded.raw_payload_json""",
                 (
-                    contract.market_id, contract.event_id, contract.event_slug, contract.symbol, contract.strike,
-                    contract.market_date, contract.resolves_at.isoformat(), contract.pyth_feed,
-                    contract.yes_token_id, contract.no_token_id, contract.question, contract.rules_hash,
-                    "ACCEPTED" if accepted else "REJECTED", reason,
+                    contract.market_id,
+                    contract.event_id,
+                    contract.event_slug,
+                    contract.symbol,
+                    contract.strike,
+                    contract.market_date,
+                    contract.resolves_at.isoformat(),
+                    contract.pyth_feed,
+                    contract.yes_token_id,
+                    contract.no_token_id,
+                    contract.question,
+                    contract.rules_hash,
+                    "ACCEPTED" if accepted else "REJECTED",
+                    reason,
                     json.dumps(contract.raw_payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
 
     def list_contracts(
-        self, *, symbols: tuple[str, ...] = (), market_date: str | None = None, accepted_only: bool = True,
+        self,
+        *,
+        symbols: tuple[str, ...] = (),
+        market_date: str | None = None,
+        accepted_only: bool = True,
     ) -> tuple[PriceLadderContract, ...]:
         query = """SELECT market_id, event_id, event_slug, symbol, strike, market_date, resolves_at,
             pyth_feed, yes_token_id, no_token_id, question, rules_hash, raw_payload_json
@@ -150,39 +168,80 @@ class PriceLadderJournal:
         query += " ORDER BY market_date, symbol, strike"
         with database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
-        return tuple(PriceLadderContract(
-            market_id=str(row[0]), event_id=str(row[1]), event_slug=str(row[2]), symbol=str(row[3]),
-            strike=float(row[4]), market_date=str(row[5]), resolves_at=datetime.fromisoformat(str(row[6])),
-            pyth_feed=str(row[7]), yes_token_id=str(row[8]), no_token_id=str(row[9]), question=str(row[10]),
-            rules_hash=str(row[11]), raw_payload=json.loads(str(row[12])),
-        ) for row in rows)
+        return tuple(
+            PriceLadderContract(
+                market_id=str(row[0]),
+                event_id=str(row[1]),
+                event_slug=str(row[2]),
+                symbol=str(row[3]),
+                strike=float(row[4]),
+                market_date=str(row[5]),
+                resolves_at=datetime.fromisoformat(str(row[6])),
+                pyth_feed=str(row[7]),
+                yes_token_id=str(row[8]),
+                no_token_id=str(row[9]),
+                question=str(row[10]),
+                rules_hash=str(row[11]),
+                raw_payload=json.loads(str(row[12])),
+            )
+            for row in rows
+        )
 
     def record_snapshot(
-        self, contract: PriceLadderContract, *, observed_at: datetime, checkpoint_name: str | None,
-        yes_bid: float | None, yes_ask: float | None, no_bid: float | None, no_ask: float | None,
-        yes_bid_depth: float, yes_ask_depth: float, no_bid_depth: float, no_ask_depth: float,
-        yes_book: Mapping[str, object], no_book: Mapping[str, object],
+        self,
+        contract: PriceLadderContract,
+        *,
+        observed_at: datetime,
+        checkpoint_name: str | None,
+        yes_bid: float | None,
+        yes_ask: float | None,
+        no_bid: float | None,
+        no_ask: float | None,
+        yes_bid_depth: float,
+        yes_ask_depth: float,
+        no_bid_depth: float,
+        no_ask_depth: float,
+        yes_book: Mapping[str, object],
+        no_book: Mapping[str, object],
     ) -> bool:
         if observed_at.tzinfo is None:
             raise ValueError("ladder observed_at must be timezone-aware")
         with database_connection(self.path) as connection:
-            return connection.execute(
-                """INSERT OR IGNORE INTO price_ladder_snapshots (
+            return (
+                connection.execute(
+                    """INSERT OR IGNORE INTO price_ladder_snapshots (
                     observed_at, observed_second, market_id, symbol, market_date, checkpoint_name, strike,
                     yes_bid, yes_ask, no_bid, no_ask, yes_bid_depth, yes_ask_depth, no_bid_depth, no_ask_depth,
                     yes_book_json, no_book_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    observed_at.isoformat(), observed_at.replace(microsecond=0).isoformat(), contract.market_id,
-                    contract.symbol, contract.market_date, checkpoint_name, contract.strike,
-                    yes_bid, yes_ask, no_bid, no_ask, yes_bid_depth, yes_ask_depth, no_bid_depth, no_ask_depth,
-                    json.dumps(yes_book, sort_keys=True, separators=(",", ":"), default=str),
-                    json.dumps(no_book, sort_keys=True, separators=(",", ":"), default=str),
-                ),
-            ).rowcount == 1
+                    (
+                        observed_at.isoformat(),
+                        observed_at.replace(microsecond=0).isoformat(),
+                        contract.market_id,
+                        contract.symbol,
+                        contract.market_date,
+                        checkpoint_name,
+                        contract.strike,
+                        yes_bid,
+                        yes_ask,
+                        no_bid,
+                        no_ask,
+                        yes_bid_depth,
+                        yes_ask_depth,
+                        no_bid_depth,
+                        no_ask_depth,
+                        json.dumps(yes_book, sort_keys=True, separators=(",", ":"), default=str),
+                        json.dumps(no_book, sort_keys=True, separators=(",", ":"), default=str),
+                    ),
+                ).rowcount
+                == 1
+            )
 
     def list_snapshots(
-        self, *, market_date: str | None = None, checkpoint_only: bool = False,
+        self,
+        *,
+        market_date: str | None = None,
+        checkpoint_only: bool = False,
     ) -> tuple[StoredLadderSnapshot, ...]:
         query = """SELECT observed_at, market_id, symbol, market_date, checkpoint_name, strike,
             yes_bid, yes_ask, no_bid, no_ask, yes_bid_depth, yes_ask_depth, no_bid_depth, no_ask_depth,
@@ -199,14 +258,27 @@ class PriceLadderJournal:
         query += " ORDER BY observed_at, symbol, strike"
         with database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
-        return tuple(StoredLadderSnapshot(
-            observed_at=datetime.fromisoformat(str(row[0])), market_id=str(row[1]), symbol=str(row[2]),
-            market_date=str(row[3]), checkpoint_name=str(row[4]) if row[4] else None, strike=float(row[5]),
-            yes_bid=_optional_float(row[6]), yes_ask=_optional_float(row[7]), no_bid=_optional_float(row[8]),
-            no_ask=_optional_float(row[9]), yes_bid_depth=float(row[10]), yes_ask_depth=float(row[11]),
-            no_bid_depth=float(row[12]), no_ask_depth=float(row[13]),
-            yes_book=json.loads(str(row[14])), no_book=json.loads(str(row[15])),
-        ) for row in rows)
+        return tuple(
+            StoredLadderSnapshot(
+                observed_at=datetime.fromisoformat(str(row[0])),
+                market_id=str(row[1]),
+                symbol=str(row[2]),
+                market_date=str(row[3]),
+                checkpoint_name=str(row[4]) if row[4] else None,
+                strike=float(row[5]),
+                yes_bid=_optional_float(row[6]),
+                yes_ask=_optional_float(row[7]),
+                no_bid=_optional_float(row[8]),
+                no_ask=_optional_float(row[9]),
+                yes_bid_depth=float(row[10]),
+                yes_ask_depth=float(row[11]),
+                no_bid_depth=float(row[12]),
+                no_ask_depth=float(row[13]),
+                yes_book=json.loads(str(row[14])),
+                no_book=json.loads(str(row[15])),
+            )
+            for row in rows
+        )
 
     def latest_snapshot_rows(self, market_date: str) -> tuple[StoredLadderSnapshot, ...]:
         with database_connection(self.path) as connection:
@@ -216,41 +288,68 @@ class PriceLadderJournal:
                     yes_book_json, no_book_json FROM price_ladder_snapshots AS snapshot
                 WHERE market_date = ? AND id IN (
                     SELECT MAX(id) FROM price_ladder_snapshots WHERE market_date = ? GROUP BY market_id
-                ) ORDER BY symbol, strike""", (market_date, market_date)
+                ) ORDER BY symbol, strike""",
+                (market_date, market_date),
             ).fetchall()
-        return tuple(StoredLadderSnapshot(
-            observed_at=datetime.fromisoformat(str(row[0])), market_id=str(row[1]), symbol=str(row[2]),
-            market_date=str(row[3]), checkpoint_name=str(row[4]) if row[4] else None, strike=float(row[5]),
-            yes_bid=_optional_float(row[6]), yes_ask=_optional_float(row[7]), no_bid=_optional_float(row[8]),
-            no_ask=_optional_float(row[9]), yes_bid_depth=float(row[10]), yes_ask_depth=float(row[11]),
-            no_bid_depth=float(row[12]), no_ask_depth=float(row[13]), yes_book=json.loads(str(row[14])),
-            no_book=json.loads(str(row[15])),
-        ) for row in rows)
+        return tuple(
+            StoredLadderSnapshot(
+                observed_at=datetime.fromisoformat(str(row[0])),
+                market_id=str(row[1]),
+                symbol=str(row[2]),
+                market_date=str(row[3]),
+                checkpoint_name=str(row[4]) if row[4] else None,
+                strike=float(row[5]),
+                yes_bid=_optional_float(row[6]),
+                yes_ask=_optional_float(row[7]),
+                no_bid=_optional_float(row[8]),
+                no_ask=_optional_float(row[9]),
+                yes_bid_depth=float(row[10]),
+                yes_ask_depth=float(row[11]),
+                no_bid_depth=float(row[12]),
+                no_ask_depth=float(row[13]),
+                yes_book=json.loads(str(row[14])),
+                no_book=json.loads(str(row[15])),
+            )
+            for row in rows
+        )
 
     def record_veto_observation(self, payload: Mapping[str, object]) -> bool:
         required = ("market_id", "symbol", "checkpoint_date", "checkpoint_name", "policy_id", "shadow_action")
         if any(not str(payload.get(key, "")).strip() for key in required):
             raise ValueError("incomplete Above-X veto observation")
         with database_connection(self.path) as connection:
-            return connection.execute(
-                """INSERT OR IGNORE INTO above_x_veto_observations (
+            return (
+                connection.execute(
+                    """INSERT OR IGNORE INTO above_x_veto_observations (
                     market_id, symbol, checkpoint_date, checkpoint_name, policy_id, observed_at, shadow_action, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (str(payload["market_id"]), str(payload["symbol"]), str(payload["checkpoint_date"]),
-                 str(payload["checkpoint_name"]), str(payload["policy_id"]), str(payload.get("observed_at") or datetime.now(UTC).isoformat()),
-                 str(payload["shadow_action"]), json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)),
-            ).rowcount == 1
+                    (
+                        str(payload["market_id"]),
+                        str(payload["symbol"]),
+                        str(payload["checkpoint_date"]),
+                        str(payload["checkpoint_name"]),
+                        str(payload["policy_id"]),
+                        str(payload.get("observed_at") or datetime.now(UTC).isoformat()),
+                        str(payload["shadow_action"]),
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                    ),
+                ).rowcount
+                == 1
+            )
 
     def list_veto_observations(self, *, market_date: str | None = None) -> tuple[Mapping[str, object], ...]:
         query = "SELECT payload_json FROM above_x_veto_observations"
         params: tuple[object, ...] = ()
         if market_date:
-            query += " WHERE checkpoint_date = ?"; params = (market_date,)
+            query += " WHERE checkpoint_date = ?"
+            params = (market_date,)
         query += " ORDER BY checkpoint_date, checkpoint_name, symbol"
         with database_connection(self.path) as connection:
             return tuple(json.loads(str(row[0])) for row in connection.execute(query, params).fetchall())
 
-    def record_settlement(self, market_id: str, winning_outcome: str, payload: Mapping[str, object], *, settled_at: datetime) -> None:
+    def record_settlement(
+        self, market_id: str, winning_outcome: str, payload: Mapping[str, object], *, settled_at: datetime
+    ) -> None:
         outcome = winning_outcome.upper()
         if outcome not in {"YES", "NO"} or settled_at.tzinfo is None:
             raise ValueError("invalid ladder settlement")
@@ -259,8 +358,12 @@ class PriceLadderJournal:
                 """INSERT INTO price_ladder_settlements (market_id, settled_at, winning_outcome, raw_payload_json)
                 VALUES (?, ?, ?, ?) ON CONFLICT(market_id) DO UPDATE SET settled_at=excluded.settled_at,
                     winning_outcome=excluded.winning_outcome, raw_payload_json=excluded.raw_payload_json""",
-                (market_id, settled_at.isoformat(), outcome,
-                 json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)),
+                (
+                    market_id,
+                    settled_at.isoformat(),
+                    outcome,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
             )
 
 

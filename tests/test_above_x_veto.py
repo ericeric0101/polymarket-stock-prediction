@@ -5,7 +5,23 @@ from polymarket_stock.above_x_veto import AboveXVetoPolicy, VetoObservation, app
 
 
 def observation(day, core, ladder, winner):
-    return VetoObservation("m" + day, "TSLA", day, "1200_EDT", datetime(2026, 7, 1, tzinfo=UTC), core, .05, winner, 100., .6, .55, 5, True, ladder, ())
+    return VetoObservation(
+        "m" + day,
+        "TSLA",
+        day,
+        "1200_EDT",
+        datetime(2026, 7, 1, tzinfo=UTC),
+        core,
+        0.05,
+        winner,
+        100.0,
+        0.6,
+        0.55,
+        5,
+        True,
+        ladder,
+        (),
+    )
 
 
 class AboveXVetoTests(TestCase):

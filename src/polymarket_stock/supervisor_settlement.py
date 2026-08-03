@@ -25,17 +25,32 @@ async def settle_open_positions(owner: SettlementOwner) -> None:
         try:
             settlement = await asyncio.to_thread(owner.gamma.get_market_settlement, position.market_id)
         except Exception as error:  # Public data failures should not stop the supervisor.
-            owner.event_sink("PAPER_SETTLEMENT_CHECK_FAILED", {"position_id": position.position_id, "market_id": position.market_id, "error": str(error)})
+            owner.event_sink(
+                "PAPER_SETTLEMENT_CHECK_FAILED",
+                {"position_id": position.position_id, "market_id": position.market_id, "error": str(error)},
+            )
             continue
         outcome = settlement.winning_outcome.upper() if settlement.winning_outcome else None
         if not settlement.closed or outcome not in {"UP", "DOWN"}:
             continue
         settled = await asyncio.to_thread(
             owner.journal.settle_paper_position,
-            position.position_id, settlement_outcome=outcome, settlement_payload=settlement.raw_payload,
+            position.position_id,
+            settlement_outcome=outcome,
+            settlement_payload=settlement.raw_payload,
         )
         await asyncio.to_thread(owner.journal.cancel_maker_shadow_quotes, position.market_id, "MARKET_SETTLED")
-        owner.event_sink("PAPER_POSITION_SETTLED", {"position_id": settled.position_id, "market_id": settled.market_id, "outcome": settled.outcome, "settlement_outcome": outcome, "realized_pnl": settled.realized_pnl})
+        owner.event_sink(
+            "PAPER_POSITION_SETTLED",
+            {
+                "position_id": settled.position_id,
+                "market_id": settled.market_id,
+                "outcome": settled.outcome,
+                "settlement_outcome": outcome,
+                "realized_pnl": settled.realized_pnl,
+            },
+        )
+
 
 async def reconcile_evaluation_settlements(owner: SettlementOwner) -> None:
     """Attach official outcomes to all valid observations, not only paper entries."""
@@ -53,6 +68,7 @@ async def reconcile_evaluation_settlements(owner: SettlementOwner) -> None:
             await asyncio.to_thread(owner.journal.cancel_maker_shadow_quotes, market_id, "MARKET_SETTLED")
             owner.event_sink("EVALUATION_MARKET_SETTLED", {"market_id": market_id, "settlement_outcome": outcome})
 
+
 async def reconcile_all(owner: SettlementOwner) -> None:
     await reconcile(owner)
 
@@ -60,4 +76,3 @@ async def reconcile_all(owner: SettlementOwner) -> None:
 async def reconcile(owner: SettlementOwner) -> None:
     await settle_open_positions(owner)
     await reconcile_evaluation_settlements(owner)
-

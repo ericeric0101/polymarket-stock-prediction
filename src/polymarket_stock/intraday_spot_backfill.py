@@ -25,10 +25,23 @@ class IntradaySpotBackfillReport:
     failures: tuple[Mapping[str, object], ...]
 
     def as_payload(self) -> Mapping[str, object]:
-        return {"requested": self.requested, "completed": self.completed, "skipped": self.skipped, "failed": self.failed, "failures": list(self.failures)}
+        return {
+            "requested": self.requested,
+            "completed": self.completed,
+            "skipped": self.skipped,
+            "failed": self.failed,
+            "failures": list(self.failures),
+        }
 
 
-def backfill_pyth_intraday_spots(*, discovery_path: Path, output_dir: Path, api_key: str, symbols: tuple[str, ...] = ("NVDA", "TSLA"), pause_seconds: float = 0.25) -> IntradaySpotBackfillReport:
+def backfill_pyth_intraday_spots(
+    *,
+    discovery_path: Path,
+    output_dir: Path,
+    api_key: str,
+    symbols: tuple[str, ...] = ("NVDA", "TSLA"),
+    pause_seconds: float = 0.25,
+) -> IntradaySpotBackfillReport:
     """Write one `DateTime,Spot` file per settled market day, resuming on rerun."""
 
     if pause_seconds < 0:
@@ -39,7 +52,13 @@ def backfill_pyth_intraday_spots(*, discovery_path: Path, output_dir: Path, api_
     payload = json.loads(discovery_path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
         raise ValueError("discovery JSON must be a list")
-    items = [item for item in payload if isinstance(item, Mapping) and item.get("status") == "FOUND" and str(item.get("symbol", "")).upper() in allowed_symbols]
+    items = [
+        item
+        for item in payload
+        if isinstance(item, Mapping)
+        and item.get("status") == "FOUND"
+        and str(item.get("symbol", "")).upper() in allowed_symbols
+    ]
     items.sort(key=lambda item: (str(item.get("market_day", "")), str(item.get("market_id", ""))))
     output_dir.mkdir(parents=True, exist_ok=True)
     client = PythHistoryClient(api_key)

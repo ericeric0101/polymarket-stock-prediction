@@ -46,17 +46,22 @@ class CheckpointCalibrationReport:
 
     def as_payload(self) -> Mapping[str, object]:
         return {
-            "sample_size": self.sample_size, "brier_score": self.brier_score, "log_loss": self.log_loss,
+            "sample_size": self.sample_size,
+            "brier_score": self.brier_score,
+            "log_loss": self.log_loss,
             "buckets": [asdict(bucket) for bucket in self.buckets],
         }
 
 
 def calibrate_settled_positions(positions: Iterable[PaperPosition]) -> CalibrationRecommendation:
     settled = [
-        position for position in positions
+        position
+        for position in positions
         if position.included_in_calibration and position.status == "SETTLED" and position.settlement_outcome
     ]
-    return _calibrate_predictions((position.fair_probability, position.outcome == position.settlement_outcome) for position in settled)
+    return _calibrate_predictions(
+        (position.fair_probability, position.outcome == position.settlement_outcome) for position in settled
+    )
 
 
 def calibrate_market_observations(observations: Iterable[ReplayObservation]) -> CalibrationRecommendation:
@@ -78,12 +83,16 @@ def calibrate_checkpoint_observations(observations: Iterable[CheckpointObservati
     for (checkpoint_name, band), values in sorted(grouped.items()):
         bucket_predictions = [(value.fair_up_probability, value.winning_outcome == "UP") for value in values]
         bucket_metrics = calibration_metrics(bucket_predictions)
-        buckets.append(CheckpointCalibrationBucket(
-            checkpoint_name=checkpoint_name, probability_band=band, sample_size=len(values),
-            predicted_up_probability=sum(value.fair_up_probability for value in values) / len(values),
-            realized_up_frequency=sum(value.winning_outcome == "UP" for value in values) / len(values),
-            brier_score=bucket_metrics.brier_score,
-        ))
+        buckets.append(
+            CheckpointCalibrationBucket(
+                checkpoint_name=checkpoint_name,
+                probability_band=band,
+                sample_size=len(values),
+                predicted_up_probability=sum(value.fair_up_probability for value in values) / len(values),
+                realized_up_frequency=sum(value.winning_outcome == "UP" for value in values) / len(values),
+                brier_score=bucket_metrics.brier_score,
+            )
+        )
     return CheckpointCalibrationReport(metrics.sample_size, metrics.brier_score, metrics.log_loss, tuple(buckets))
 
 
@@ -101,8 +110,12 @@ def _calibrate_predictions(predictions: Iterable[tuple[float, bool]]) -> Calibra
     p90 = errors[min(len(errors) - 1, int(0.9 * len(errors)))]
     # Never weaken the pre-calibration floor. The edge floor remains independent of model error.
     return CalibrationRecommendation(
-        len(items), mean_absolute_error, p90,
-        max(0.02, p90), max(0.02, min(0.10, p90 / 2)), "READY_FOR_OPERATOR_REVIEW",
+        len(items),
+        mean_absolute_error,
+        p90,
+        max(0.02, p90),
+        max(0.02, min(0.10, p90 / 2)),
+        "READY_FOR_OPERATOR_REVIEW",
     )
 
 
@@ -119,10 +132,12 @@ def load_calibration_recommendation(path: Path) -> CalibrationRecommendation | N
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         recommendation = CalibrationRecommendation(
-            sample_size=int(payload["sample_size"]), mean_absolute_error=float(payload["mean_absolute_error"]),
+            sample_size=int(payload["sample_size"]),
+            mean_absolute_error=float(payload["mean_absolute_error"]),
             p90_absolute_error=float(payload["p90_absolute_error"]),
             recommended_model_error_buffer=float(payload["recommended_model_error_buffer"]),
-            recommended_minimum_edge=float(payload["recommended_minimum_edge"]), status=str(payload["status"]),
+            recommended_minimum_edge=float(payload["recommended_minimum_edge"]),
+            status=str(payload["status"]),
         )
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
         raise ValueError("model calibration file is invalid") from error

@@ -3,17 +3,34 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import unittest
 
-from polymarket_stock.calibration import calibrate_checkpoint_observations, calibrate_settled_positions, load_calibration_recommendation, write_calibration_recommendation
+from polymarket_stock.calibration import (
+    calibrate_checkpoint_observations,
+    calibrate_settled_positions,
+    load_calibration_recommendation,
+    write_calibration_recommendation,
+)
 from polymarket_stock.journal import CheckpointObservation, PaperPosition
 from polymarket_stock.replay import replay_settled_positions
 
 
 def _position(index: int, settled: bool = True) -> PaperPosition:
     return PaperPosition(
-        position_id=str(index), opened_at=datetime(2026, 7, 20, tzinfo=UTC), market_id=str(index), symbol="TSLA",
-        outcome="UP", status="SETTLED" if settled else "OPEN", contracts=1, entry_ask=0.50, entry_fee=0.005,
-        entry_slippage=0.001, fair_probability=0.60, model_version="test", settled_at=datetime(2026, 7, 20, 20, tzinfo=UTC) if settled else None,
-        settlement_outcome="UP" if settled else None, payout=1 if settled else None, realized_pnl=0.494 if settled else None,
+        position_id=str(index),
+        opened_at=datetime(2026, 7, 20, tzinfo=UTC),
+        market_id=str(index),
+        symbol="TSLA",
+        outcome="UP",
+        status="SETTLED" if settled else "OPEN",
+        contracts=1,
+        entry_ask=0.50,
+        entry_fee=0.005,
+        entry_slippage=0.001,
+        fair_probability=0.60,
+        model_version="test",
+        settled_at=datetime(2026, 7, 20, 20, tzinfo=UTC) if settled else None,
+        settlement_outcome="UP" if settled else None,
+        payout=1 if settled else None,
+        realized_pnl=0.494 if settled else None,
     )
 
 
@@ -44,8 +61,38 @@ class CalibrationReplayTests(unittest.TestCase):
 
     def test_checkpoint_calibration_reports_probability_bands(self) -> None:
         observations = [
-            CheckpointObservation("one", "TSLA", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.72, 0.60, 0.30, "iv-blend-v1", 0.3, "UP", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.0, True),
-            CheckpointObservation("two", "AAPL", "2026-07-20", "1000_EDT", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.78, 0.70, 0.20, "iv-blend-v1", 0.3, "DOWN", datetime(2026, 7, 20, 14, tzinfo=UTC), 0.0, True),
+            CheckpointObservation(
+                "one",
+                "TSLA",
+                "2026-07-20",
+                "1000_EDT",
+                datetime(2026, 7, 20, 14, tzinfo=UTC),
+                0.72,
+                0.60,
+                0.30,
+                "iv-blend-v1",
+                0.3,
+                "UP",
+                datetime(2026, 7, 20, 14, tzinfo=UTC),
+                0.0,
+                True,
+            ),
+            CheckpointObservation(
+                "two",
+                "AAPL",
+                "2026-07-20",
+                "1000_EDT",
+                datetime(2026, 7, 20, 14, tzinfo=UTC),
+                0.78,
+                0.70,
+                0.20,
+                "iv-blend-v1",
+                0.3,
+                "DOWN",
+                datetime(2026, 7, 20, 14, tzinfo=UTC),
+                0.0,
+                True,
+            ),
         ]
         report = calibrate_checkpoint_observations(observations)
         self.assertEqual(report.sample_size, 2)

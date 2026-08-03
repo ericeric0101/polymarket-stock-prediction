@@ -7,11 +7,22 @@ from typing import Iterable
 
 
 RISK_GROUPS = {
-    "AAPL": "MEGACAP_TECH", "AMZN": "MEGACAP_TECH", "GOOGL": "MEGACAP_TECH", "META": "MEGACAP_TECH", "MSFT": "MEGACAP_TECH",
-    "MU": "SEMICONDUCTOR", "NVDA": "SEMICONDUCTOR",
-    "COIN": "CRYPTO_BETA", "HOOD": "CRYPTO_BETA",
-    "OPEN": "HIGH_BETA_GROWTH", "PLTR": "HIGH_BETA_GROWTH", "RKLB": "HIGH_BETA_GROWTH", "SPCX": "HIGH_BETA_GROWTH",
-    "ABNB": "CONSUMER_TECH", "NFLX": "CONSUMER_TECH", "TSLA": "EV_AUTO",
+    "AAPL": "MEGACAP_TECH",
+    "AMZN": "MEGACAP_TECH",
+    "GOOGL": "MEGACAP_TECH",
+    "META": "MEGACAP_TECH",
+    "MSFT": "MEGACAP_TECH",
+    "MU": "SEMICONDUCTOR",
+    "NVDA": "SEMICONDUCTOR",
+    "COIN": "CRYPTO_BETA",
+    "HOOD": "CRYPTO_BETA",
+    "OPEN": "HIGH_BETA_GROWTH",
+    "PLTR": "HIGH_BETA_GROWTH",
+    "RKLB": "HIGH_BETA_GROWTH",
+    "SPCX": "HIGH_BETA_GROWTH",
+    "ABNB": "CONSUMER_TECH",
+    "NFLX": "CONSUMER_TECH",
+    "TSLA": "EV_AUTO",
 }
 
 
@@ -41,8 +52,12 @@ def risk_group_for_symbol(symbol: str) -> str:
 
 
 def select_diversified_entries(
-    candidates: Iterable[PaperEntryCandidate], *, existing_symbols: Iterable[tuple[str, str]],
-    max_daily_entries: int = 3, max_per_risk_group: int = 1, max_same_direction: int = 2,
+    candidates: Iterable[PaperEntryCandidate],
+    *,
+    existing_symbols: Iterable[tuple[str, str]],
+    max_daily_entries: int = 3,
+    max_per_risk_group: int = 1,
+    max_same_direction: int = 2,
 ) -> tuple[PortfolioDecision, ...]:
     """Choose the strongest independent candidates, returning auditable rejects."""
 

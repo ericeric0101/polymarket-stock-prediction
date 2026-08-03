@@ -104,7 +104,12 @@ class MarketSettlement:
         winners = [outcome for outcome, price in zip(outcomes, prices) if float(price) >= 0.99]
         if len(winners) > 1:
             raise MarketPayloadError("settlement reports more than one winning outcome")
-        return cls(market_id=market_id, closed=closed, winning_outcome=winners[0] if winners else None, raw_payload=dict(payload))
+        return cls(
+            market_id=market_id,
+            closed=closed,
+            winning_outcome=winners[0] if winners else None,
+            raw_payload=dict(payload),
+        )
 
 
 def is_daily_equity_direction_candidate(candidate: MarketCandidate, symbols: Iterable[str] | None) -> bool:
@@ -112,25 +117,30 @@ def is_daily_equity_direction_candidate(candidate: MarketCandidate, symbols: Ite
 
     question = candidate.question.upper()
     normalized_symbols = tuple(symbol.strip().upper() for symbol in (symbols or ()) if symbol.strip())
-    contains_symbol = any(re.search(rf"(?<![A-Z]){re.escape(symbol)}(?![A-Z])", question) for symbol in normalized_symbols)
+    contains_symbol = any(
+        re.search(rf"(?<![A-Z]){re.escape(symbol)}(?![A-Z])", question) for symbol in normalized_symbols
+    )
     direction_words = ("UP OR DOWN", "UP/DOWN", "CLOSE HIGHER", "CLOSE LOWER", "CLOSE UP", "CLOSE DOWN")
     directional_outcomes = {("UP", "DOWN"), ("YES", "NO"), ("HIGHER", "LOWER")}
     outcome_pair = (candidate.outcome_a_label.upper(), candidate.outcome_b_label.upper())
     raw_tags = candidate.raw_payload.get("tags")
     tags = raw_tags if isinstance(raw_tags, list) else ()
-    tag_slugs = {
-        str(tag.get("slug", "")).lower()
-        for tag in tags if isinstance(tag, dict)
-    }
+    tag_slugs = {str(tag.get("slug", "")).lower() for tag in tags if isinstance(tag, dict)}
     tagged_as_equity = bool({"stocks", "equities"}.intersection(tag_slugs))
     has_requested_symbol = contains_symbol if normalized_symbols else tagged_as_equity
-    return has_requested_symbol and any(word in question for word in direction_words) and outcome_pair in directional_outcomes
+    return (
+        has_requested_symbol
+        and any(word in question for word in direction_words)
+        and outcome_pair in directional_outcomes
+    )
 
 
 class GammaMarketClient:
     """Public Gamma client. It only performs GET requests to the market endpoint."""
 
-    def __init__(self, get_json_fn: Callable[..., object] = get_json, sleep_fn: Callable[[float], None] = time.sleep) -> None:
+    def __init__(
+        self, get_json_fn: Callable[..., object] = get_json, sleep_fn: Callable[[float], None] = time.sleep
+    ) -> None:
         self._get_json = get_json_fn
         self._sleep = sleep_fn
 

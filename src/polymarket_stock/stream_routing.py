@@ -24,7 +24,9 @@ class RoutableMarket(Protocol):
 class MultiMarketRouter:
     """Dispatch one shared provider stream to the relevant market evaluators."""
 
-    def __init__(self, runtimes: Mapping[str, RoutableMarket], spot_provider: str, pyth_feed_ids: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self, runtimes: Mapping[str, RoutableMarket], spot_provider: str, pyth_feed_ids: Mapping[str, str] | None = None
+    ) -> None:
         self._runtimes = runtimes
         self._spot_provider = spot_provider
         self._pyth_feed_ids = {symbol.upper(): feed_id for symbol, feed_id in (pyth_feed_ids or {}).items()}
@@ -44,7 +46,9 @@ class MultiMarketRouter:
             for change in changes:
                 if not isinstance(change, Mapping):
                     continue
-                await self._dispatch_book({"event_type": event_type, "price_changes": [dict(change)]}, str(change.get("asset_id", "")))
+                await self._dispatch_book(
+                    {"event_type": event_type, "price_changes": [dict(change)]}, str(change.get("asset_id", ""))
+                )
             return
         await self._dispatch_book(payload, str(payload.get("asset_id", "")))
 
@@ -63,7 +67,9 @@ class MultiMarketRouter:
                     by_symbol.setdefault(str(trade["s"]).upper(), []).append(dict(trade))
             for symbol, symbol_trades in by_symbol.items():
                 for market_id in self._symbol_market_ids.get(symbol, ()):
-                    await self._runtimes[market_id].coordinator.on_finnhub_message({"type": "trade", "data": symbol_trades})
+                    await self._runtimes[market_id].coordinator.on_finnhub_message(
+                        {"type": "trade", "data": symbol_trades}
+                    )
             return
         symbol = payload.get("S")
         if isinstance(symbol, str):
@@ -75,4 +81,3 @@ class MultiMarketRouter:
             feed_id = self._pyth_feed_ids.get(runtime.symbol)
             if feed_id:
                 await runtime.coordinator.on_pyth_message(payload, {feed_id: runtime.symbol})
-

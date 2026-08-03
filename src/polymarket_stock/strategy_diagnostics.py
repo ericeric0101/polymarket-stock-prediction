@@ -102,8 +102,11 @@ class StrategyDiagnosticsReport:
 
 
 def strategy_diagnostics(
-    checkpoints: Iterable[BufferSweepObservation], executions: Iterable[ExecutionObservation],
-    comparisons: Iterable[SpotSourceComparison], *, spots: Iterable[StoredSpotObservation] = (),
+    checkpoints: Iterable[BufferSweepObservation],
+    executions: Iterable[ExecutionObservation],
+    comparisons: Iterable[SpotSourceComparison],
+    *,
+    spots: Iterable[StoredSpotObservation] = (),
     requested_shares: float = 10,
 ) -> StrategyDiagnosticsReport:
     checkpoint_items = tuple(checkpoints)
@@ -113,7 +116,8 @@ def strategy_diagnostics(
     market = by_name.get("MARKET_FAVORITE")
     win_delta = (
         model.win_rate - market.win_rate
-        if model and market and model.win_rate is not None and market.win_rate is not None else None
+        if model and market and model.win_rate is not None and market.win_rate is not None
+        else None
     )
     pnl_delta = (
         model.average_pnl_per_share - market.average_pnl_per_share
@@ -162,22 +166,32 @@ def direction_benchmarks(observations: Iterable[BufferSweepObservation]) -> tupl
             won = outcome == item.winning_outcome
             scored.append((won, (1.0 if won else 0.0) - ask - fee))
         wins = sum(item[0] for item in scored)
-        results.append(DirectionBenchmark(
-            name, len(scored), wins, wins / len(scored) if scored else None,
-            sum(item[1] for item in scored), mean(item[1] for item in scored) if scored else None,
-        ))
+        results.append(
+            DirectionBenchmark(
+                name,
+                len(scored),
+                wins,
+                wins / len(scored) if scored else None,
+                sum(item[1] for item in scored),
+                mean(item[1] for item in scored) if scored else None,
+            )
+        )
     return tuple(results)
 
 
 def execution_quality(
-    observations: Iterable[ExecutionObservation], *, requested_shares: float,
+    observations: Iterable[ExecutionObservation],
+    *,
+    requested_shares: float,
 ) -> ExecutionQualitySummary:
     if requested_shares <= 0:
         raise ValueError("requested_shares must be positive")
     items = tuple(observations)
     entries = _selected_entries(items)
     slippages = []
-    delayed: dict[str, list[float]] = {name: [] for name in ("MARKOUT_60S", "MARKOUT_300S", "MARKOUT_900S", "MARKOUT_1800S")}
+    delayed: dict[str, list[float]] = {
+        name: [] for name in ("MARKOUT_60S", "MARKOUT_300S", "MARKOUT_900S", "MARKOUT_1800S")
+    }
     by_signal_kind = {(item.signal_id, item.observation_kind, item.outcome): item for item in items if item.signal_id}
     for entry in entries:
         initial_vwap = book_vwap(entry.book_payload, side="asks", shares=requested_shares)
@@ -191,7 +205,9 @@ def execution_quality(
             if later_vwap is not None:
                 delayed[kind].append(later_vwap - entry.best_ask)
     return ExecutionQualitySummary(
-        signals=len(entries), requested_shares=requested_shares, depth_fillable_signals=len(slippages),
+        signals=len(entries),
+        requested_shares=requested_shares,
+        depth_fillable_signals=len(slippages),
         average_depth_slippage=mean(slippages) if slippages else None,
         delayed_entry_slippage={name: mean(values) if values else None for name, values in delayed.items()},
     )
@@ -206,23 +222,31 @@ def spot_divergence_summary(comparisons: Iterable[SpotSourceComparison]) -> Spot
         by_symbol_values.setdefault(item.symbol, []).append(abs(item.difference_bps))
     by_symbol = {
         symbol: {
-            "observations": len(values), "mean_absolute_bps": mean(values),
+            "observations": len(values),
+            "mean_absolute_bps": mean(values),
             "p95_absolute_bps": _percentile(sorted(values), 0.95),
             "above_50_bps": sum(value > 50 for value in values),
         }
         for symbol, values in sorted(by_symbol_values.items())
     }
     return SpotDivergenceSummary(
-        total_observations=len(all_items), excluded_stale_or_unstamped=len(all_items) - len(items),
-        observations=len(items), symbols=len(by_symbol), median_absolute_bps=_percentile(absolute, 0.5),
-        p95_absolute_bps=_percentile(absolute, 0.95), p99_absolute_bps=_percentile(absolute, 0.99),
-        above_25_bps=sum(value > 25 for value in absolute), above_50_bps=sum(value > 50 for value in absolute),
+        total_observations=len(all_items),
+        excluded_stale_or_unstamped=len(all_items) - len(items),
+        observations=len(items),
+        symbols=len(by_symbol),
+        median_absolute_bps=_percentile(absolute, 0.5),
+        p95_absolute_bps=_percentile(absolute, 0.95),
+        p99_absolute_bps=_percentile(absolute, 0.99),
+        above_25_bps=sum(value > 25 for value in absolute),
+        above_50_bps=sum(value > 50 for value in absolute),
         by_symbol=by_symbol,
     )
 
 
 def volatility_comparison_summary(
-    observations: Iterable[BufferSweepObservation], *, large_difference: float = 0.10,
+    observations: Iterable[BufferSweepObservation],
+    *,
+    large_difference: float = 0.10,
 ) -> VolatilityComparisonSummary:
     differences = []
     direction_disagreements = 0
@@ -240,7 +264,8 @@ def volatility_comparison_summary(
             estimator = str(comparison.get("volatility_estimator") or "UNKNOWN")
             by_estimator_values.setdefault(estimator, []).append((difference, disagreed))
     return VolatilityComparisonSummary(
-        observations=len(differences), direction_disagreements=direction_disagreements,
+        observations=len(differences),
+        direction_disagreements=direction_disagreements,
         large_probability_disagreements=sum(value >= large_difference for value in differences),
         mean_absolute_probability_difference=mean(differences) if differences else None,
         by_estimator={
@@ -255,7 +280,9 @@ def volatility_comparison_summary(
 
 
 def intraday_volatility_summary(
-    spots: Iterable[StoredSpotObservation], checkpoints: Iterable[BufferSweepObservation], *,
+    spots: Iterable[StoredSpotObservation],
+    checkpoints: Iterable[BufferSweepObservation],
+    *,
     high_regime_ratio: float = 1.5,
 ) -> IntradayVolatilitySummary:
     """Compare partial-session Pyth realized volatility with prior matching checkpoints."""
@@ -279,7 +306,8 @@ def intraday_volatility_summary(
     )
     for item in ordered:
         samples = [
-            sample for sample in paths.get((item.symbol.upper(), item.checkpoint_date), ())
+            sample
+            for sample in paths.get((item.symbol.upper(), item.checkpoint_date), ())
             if sample.observed_at <= item.evaluated_at
         ]
         prices = [sample.price for sample in samples if sample.price > 0]
@@ -289,7 +317,8 @@ def intraday_volatility_summary(
         intraday_annualized = sqrt(realized_variance * 252)
         model_ratio = (
             intraday_annualized / item.annualized_volatility
-            if item.annualized_volatility is not None and item.annualized_volatility > 0 else None
+            if item.annualized_volatility is not None and item.annualized_volatility > 0
+            else None
         )
         history_key = (item.symbol.upper(), item.checkpoint_name)
         prior = [value for date, value in history.get(history_key, ()) if date < item.checkpoint_date]
@@ -321,7 +350,8 @@ def intraday_volatility_summary(
             "high_regime_count": sum(value[3] for value in values),
         }
     return IntradayVolatilitySummary(
-        checkpoint_paths=len(all_intraday), history_comparisons=history_comparisons,
+        checkpoint_paths=len(all_intraday),
+        history_comparisons=history_comparisons,
         high_regime_count=high_regime_count,
         median_intraday_annualized_volatility=_percentile(sorted(all_intraday), 0.5),
         mean_intraday_to_daily_model_ratio=mean(all_model_ratios) if all_model_ratios else None,
@@ -330,12 +360,17 @@ def intraday_volatility_summary(
 
 
 def exit_horizon_replay(
-    observations: Iterable[ExecutionObservation], checkpoints: Iterable[BufferSweepObservation], *, requested_shares: float,
+    observations: Iterable[ExecutionObservation],
+    checkpoints: Iterable[BufferSweepObservation],
+    *,
+    requested_shares: float,
 ) -> tuple[ExitHorizonSummary, ...]:
     items = tuple(observations)
     entries = _selected_entries(items)
     settlements = {item.market_id: item.winning_outcome for item in checkpoints}
-    by_signal_kind = {(item.signal_id, item.observation_kind, item.outcome): item for item in observations if item.signal_id}
+    by_signal_kind = {
+        (item.signal_id, item.observation_kind, item.outcome): item for item in observations if item.signal_id
+    }
     reports = []
     for kind in ("MARKOUT_60S", "MARKOUT_300S", "MARKOUT_900S", "MARKOUT_1800S"):
         exit_total = 0.0
@@ -355,9 +390,16 @@ def exit_horizon_replay(
             exit_total += exit_vwap * requested_shares - sell_fee - entry_cost
             hold_total += (requested_shares if entry.outcome == winning_outcome else 0.0) - entry_cost
             liquid += 1
-        reports.append(ExitHorizonSummary(
-            kind, len(entries), liquid, exit_total, hold_total, exit_total - hold_total,
-        ))
+        reports.append(
+            ExitHorizonSummary(
+                kind,
+                len(entries),
+                liquid,
+                exit_total,
+                hold_total,
+                exit_total - hold_total,
+            )
+        )
     return tuple(reports)
 
 

@@ -121,7 +121,11 @@ class HistoricalReplayReport:
 
 
 def price_gap_from_daily_closes(
-    *, market_id: str, symbol: str, prior_close: DailyClose, final_close: DailyClose,
+    *,
+    market_id: str,
+    symbol: str,
+    prior_close: DailyClose,
+    final_close: DailyClose,
 ) -> HistoricalPriceGap:
     price_to_beat = prior_close.close
     final_price = final_close.close
@@ -202,18 +206,20 @@ def replay_daily_up_down_market(
             continue
         outcome, probability, price, edge = max(eligible, key=lambda item: item[3])
         won = settlement.winning_outcome.upper() == outcome
-        trades.append(HistoricalReplayTrade(
-            market_id=candidate.market_id,
-            symbol=symbol.upper(),
-            evaluated_at=up_point.observed_at,
-            outcome=outcome,
-            fair_probability=probability,
-            market_price=price,
-            edge_before_costs=edge,
-            won=won,
-            realized_pnl_before_fees=(1.0 if won else 0.0) - price,
-            minutes_to_resolution=seconds_to_resolution / 60,
-        ))
+        trades.append(
+            HistoricalReplayTrade(
+                market_id=candidate.market_id,
+                symbol=symbol.upper(),
+                evaluated_at=up_point.observed_at,
+                outcome=outcome,
+                fair_probability=probability,
+                market_price=price,
+                edge_before_costs=edge,
+                won=won,
+                realized_pnl_before_fees=(1.0 if won else 0.0) - price,
+                minutes_to_resolution=seconds_to_resolution / 60,
+            )
+        )
 
     close_windows = close_risk_profile(
         resolves_at=resolves_at,
@@ -253,13 +259,15 @@ def close_risk_profile(
         up_price = point.price if point else None
         move = abs(up_price - previous_price) if up_price is not None and previous_price is not None else None
         previous_price = up_price if up_price is not None else previous_price
-        windows.append(CloseRiskWindow(
-            minutes_before_resolution=minutes,
-            observed_at=point.observed_at if point else None,
-            up_price=up_price,
-            absolute_move_from_previous_window=move,
-            distance_to_price_to_beat_bps=((final_price - price_to_beat) / price_to_beat) * 10_000,
-        ))
+        windows.append(
+            CloseRiskWindow(
+                minutes_before_resolution=minutes,
+                observed_at=point.observed_at if point else None,
+                up_price=up_price,
+                absolute_move_from_previous_window=move,
+                distance_to_price_to_beat_bps=((final_price - price_to_beat) / price_to_beat) * 10_000,
+            )
+        )
     return tuple(windows)
 
 

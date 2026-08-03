@@ -17,10 +17,12 @@ class YahooDataTests(unittest.TestCase):
             observed["params"] = params
             return {
                 "chart": {
-                    "result": [{
-                        "timestamp": [1770000000, 1770086400],
-                        "indicators": {"quote": [{"close": [101.25, 102.5]}]},
-                    }]
+                    "result": [
+                        {
+                            "timestamp": [1770000000, 1770086400],
+                            "indicators": {"quote": [{"close": [101.25, 102.5]}]},
+                        }
+                    ]
                 }
             }
 
@@ -36,12 +38,18 @@ class YahooDataTests(unittest.TestCase):
             self.assertIn("Date,Close", output.read_text(encoding="utf-8"))
 
     def test_intraday_spots_write_required_csv_shape(self) -> None:
-        client = YahooChartClient(lambda _url, _params: {
-            "chart": {"result": [{
-                "timestamp": [1784554200, 1784554260],
-                "indicators": {"quote": [{"close": [370.0, 370.25]}]},
-            }]}
-        })
+        client = YahooChartClient(
+            lambda _url, _params: {
+                "chart": {
+                    "result": [
+                        {
+                            "timestamp": [1784554200, 1784554260],
+                            "indicators": {"quote": [{"close": [370.0, 370.25]}]},
+                        }
+                    ]
+                }
+            }
+        )
         start_at = datetime(2026, 7, 20, 13, 30, tzinfo=UTC)
         series = client.intraday_spots("TSLA", start_at=start_at, end_at=datetime(2026, 7, 20, 20, tzinfo=UTC))
         self.assertEqual(len(series.points), 2)
@@ -51,17 +59,27 @@ class YahooDataTests(unittest.TestCase):
             self.assertIn("DateTime,Spot", output.read_text(encoding="utf-8"))
 
     def test_daily_bars_parse_and_write_ohlc_csv(self) -> None:
-        client = YahooChartClient(lambda _url, _params: {
-            "chart": {"result": [{
-                "timestamp": [1770000000, 1770086400, 1770172800],
-                "indicators": {"quote": [{
-                    "open": [100.0, 101.0, 102.0],
-                    "high": [102.0, 103.0, 104.0],
-                    "low": [99.0, 100.0, 101.0],
-                    "close": [101.0, 102.0, 103.0],
-                }]},
-            }]}
-        })
+        client = YahooChartClient(
+            lambda _url, _params: {
+                "chart": {
+                    "result": [
+                        {
+                            "timestamp": [1770000000, 1770086400, 1770172800],
+                            "indicators": {
+                                "quote": [
+                                    {
+                                        "open": [100.0, 101.0, 102.0],
+                                        "high": [102.0, 103.0, 104.0],
+                                        "low": [99.0, 100.0, 101.0],
+                                        "close": [101.0, 102.0, 103.0],
+                                    }
+                                ]
+                            },
+                        }
+                    ]
+                }
+            }
+        )
         series = client.daily_bars("TSLA", start_date=date(2026, 2, 1), end_date=date(2026, 2, 3))
         self.assertEqual(series.bars[0].high, 102.0)
         with TemporaryDirectory() as directory:

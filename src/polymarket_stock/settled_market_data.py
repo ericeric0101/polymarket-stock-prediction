@@ -57,9 +57,14 @@ class SettledMarketDataFiles:
 
 
 def backfill_settled_market_data(
-    *, candidate: MarketCandidate, contract: DailyEquityCloseContract, output_dir: Path,
-    lookback_calendar_days: int = 45, pyth_client: PythBenchmarksClient | None = None,
-    yahoo_client: YahooChartClient | None = None, clob_client: ClobPriceHistoryClient | None = None,
+    *,
+    candidate: MarketCandidate,
+    contract: DailyEquityCloseContract,
+    output_dir: Path,
+    lookback_calendar_days: int = 45,
+    pyth_client: PythBenchmarksClient | None = None,
+    yahoo_client: YahooChartClient | None = None,
+    clob_client: ClobPriceHistoryClient | None = None,
 ) -> SettledMarketDataFiles:
     """Write Pyth references and Yahoo research inputs for one settled contract."""
 
@@ -73,14 +78,20 @@ def backfill_settled_market_data(
     clob = clob_client or ClobPriceHistoryClient()
     feed_id = pyth.equity_feed_id(contract.symbol)
     price_to_beat = pyth.price_at(
-        symbol=contract.symbol, feed_id=feed_id, observed_at=_regular_close_at(prior_day),
+        symbol=contract.symbol,
+        feed_id=feed_id,
+        observed_at=_regular_close_at(prior_day),
     )
     final_price = pyth.price_at(symbol=contract.symbol, feed_id=feed_id, observed_at=resolves_at)
     daily = yahoo.daily_closes(
-        contract.symbol, start_date=market_day - timedelta(days=lookback_calendar_days), end_date=market_day,
+        contract.symbol,
+        start_date=market_day - timedelta(days=lookback_calendar_days),
+        end_date=market_day,
     )
     intraday = yahoo.intraday_spots(
-        contract.symbol, start_at=_regular_open_at(market_day), end_at=resolves_at,
+        contract.symbol,
+        start_at=_regular_open_at(market_day),
+        end_at=resolves_at,
     )
     history_start = datetime.combine(market_day, time.min, tzinfo=NEW_YORK).astimezone(UTC)
     up_history = clob.prices_history(candidate.outcome_a_token_id, start_at=history_start, end_at=resolves_at)
@@ -96,19 +107,38 @@ def backfill_settled_market_data(
     intraday.write_csv(intraday_path)
     _write_clob_history_csv(up_clob_path, up_history)
     _write_clob_history_csv(down_clob_path, down_history)
-    references_path.write_text(json.dumps({
-        "market_id": candidate.market_id,
-        "symbol": contract.symbol,
-        "market_day": market_day.isoformat(),
-        "pyth_feed": contract.pyth_feed,
-        "price_to_beat": price_to_beat.as_payload(),
-        "final_price": final_price.as_payload(),
-        "settlement_source": "PYTH_BENCHMARKS",
-        "spot_source": "YAHOO_CHART_NON_SETTLEMENT",
-    }, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    references_path.write_text(
+        json.dumps(
+            {
+                "market_id": candidate.market_id,
+                "symbol": contract.symbol,
+                "market_day": market_day.isoformat(),
+                "pyth_feed": contract.pyth_feed,
+                "price_to_beat": price_to_beat.as_payload(),
+                "final_price": final_price.as_payload(),
+                "settlement_source": "PYTH_BENCHMARKS",
+                "spot_source": "YAHOO_CHART_NON_SETTLEMENT",
+            },
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return SettledMarketDataFiles(
-        candidate.market_id, contract.symbol, price_to_beat, final_price, daily_path, intraday_path,
-        references_path, up_clob_path, down_clob_path, len(daily.closes), len(intraday.points), len(up_history), len(down_history),
+        candidate.market_id,
+        contract.symbol,
+        price_to_beat,
+        final_price,
+        daily_path,
+        intraday_path,
+        references_path,
+        up_clob_path,
+        down_clob_path,
+        len(daily.closes),
+        len(intraday.points),
+        len(up_history),
+        len(down_history),
     )
 
 

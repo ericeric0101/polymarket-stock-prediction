@@ -50,10 +50,16 @@ class OptionIvSurface:
 
     def as_payload(self) -> Mapping[str, object]:
         return {
-            "symbol": self.symbol, "expiration": self.expiration, "observed_at": self.observed_at.isoformat(),
-            "atm_iv": self.atm_iv, "call_iv": self.call_iv, "put_iv": self.put_iv,
-            "put_call_skew": self.put_call_skew, "point_count": self.point_count,
-            "provider": self.provider, "quality_flags": list(self.quality_flags),
+            "symbol": self.symbol,
+            "expiration": self.expiration,
+            "observed_at": self.observed_at.isoformat(),
+            "atm_iv": self.atm_iv,
+            "call_iv": self.call_iv,
+            "put_iv": self.put_iv,
+            "put_call_skew": self.put_call_skew,
+            "point_count": self.point_count,
+            "provider": self.provider,
+            "quality_flags": list(self.quality_flags),
         }
 
 
@@ -75,12 +81,15 @@ class TradierOptionIvClient:
             raise ValueError("spot and timestamps must be valid")
         headers = {"Authorization": f"Bearer {self._token}", "Accept": "application/json"}
         expirations_payload = self._get_json(
-            f"{TRADIER_MARKETS_URL}/options/expirations", {"symbol": symbol.upper(), "includeAllRoots": "false"}, headers=headers
+            f"{TRADIER_MARKETS_URL}/options/expirations",
+            {"symbol": symbol.upper(), "includeAllRoots": "false"},
+            headers=headers,
         )
         expiration = _nearest_usable_expiration(expirations_payload, resolves_at)
         chain_payload = self._get_json(
             f"{TRADIER_MARKETS_URL}/options/chains",
-            {"symbol": symbol.upper(), "expiration": expiration, "greeks": "true"}, headers=headers,
+            {"symbol": symbol.upper(), "expiration": expiration, "greeks": "true"},
+            headers=headers,
         )
         points = _parse_chain(chain_payload, now)
         return build_option_iv_surface(symbol.upper(), spot, expiration, now, points)
@@ -146,8 +155,14 @@ class PolygonOptionIvClient:
 
 
 def build_option_iv_surface(
-    symbol: str, spot: float, expiration: str, now: datetime, points: list[OptionIvPoint],
-    *, max_age_seconds: float = 900, max_relative_spread: float = 0.25,
+    symbol: str,
+    spot: float,
+    expiration: str,
+    now: datetime,
+    points: list[OptionIvPoint],
+    *,
+    max_age_seconds: float = 900,
+    max_relative_spread: float = 0.25,
 ) -> OptionIvSurface:
     """Select liquid near-ATM call/put IVs and expose skew without directional alpha."""
 
@@ -178,9 +193,15 @@ def build_option_iv_surface(
     put_iv = by_type.get("put", next(iter(eligible))).mid_iv
     observed_at = min(point.observed_at for point in by_type.values())
     return OptionIvSurface(
-        symbol=symbol, expiration=expiration, observed_at=observed_at,
-        atm_iv=(call_iv + put_iv) / 2, call_iv=call_iv, put_iv=put_iv,
-        put_call_skew=put_iv - call_iv, point_count=len(eligible), provider="TRADIER_ORATS",
+        symbol=symbol,
+        expiration=expiration,
+        observed_at=observed_at,
+        atm_iv=(call_iv + put_iv) / 2,
+        call_iv=call_iv,
+        put_iv=put_iv,
+        put_call_skew=put_iv - call_iv,
+        point_count=len(eligible),
+        provider="TRADIER_ORATS",
         quality_flags=tuple(flags),
     )
 
@@ -215,11 +236,18 @@ def _parse_chain(payload: object, now: datetime) -> list[OptionIvPoint]:
                 continue
             updated_at = _parse_provider_time(greeks.get("updated_at"), now)
             expires_at = datetime.fromisoformat(str(row["expiration_date"]) + "T20:00:00+00:00")
-            points.append(OptionIvPoint(
-                symbol=str(row["symbol"]), option_type=str(row["option_type"]).lower(), strike=float(row["strike"]),
-                bid=float(row["bid"]), ask=float(row["ask"]), mid_iv=float(greeks["mid_iv"]),
-                observed_at=updated_at, expires_at=expires_at,
-            ))
+            points.append(
+                OptionIvPoint(
+                    symbol=str(row["symbol"]),
+                    option_type=str(row["option_type"]).lower(),
+                    strike=float(row["strike"]),
+                    bid=float(row["bid"]),
+                    ask=float(row["ask"]),
+                    mid_iv=float(greeks["mid_iv"]),
+                    observed_at=updated_at,
+                    expires_at=expires_at,
+                )
+            )
         except (KeyError, TypeError, ValueError):
             continue
     return points
@@ -241,15 +269,23 @@ def _parse_polygon_chain(payload: object, now: datetime) -> tuple[list[OptionIvP
             timeframe = str(quote.get("timeframe", "")).upper()
             if timeframe != "REAL-TIME":
                 quality_flags.add(
-                    "POLYGON_OPTION_QUOTES_DELAYED" if timeframe == "DELAYED" else "POLYGON_OPTION_QUOTE_TIMEFRAME_UNKNOWN"
+                    "POLYGON_OPTION_QUOTES_DELAYED"
+                    if timeframe == "DELAYED"
+                    else "POLYGON_OPTION_QUOTE_TIMEFRAME_UNKNOWN"
                 )
             expiration = datetime.fromisoformat(str(details["expiration_date"]) + "T20:00:00+00:00")
-            points.append(OptionIvPoint(
-                symbol=str(details["ticker"]), option_type=str(details["contract_type"]).lower(),
-                strike=float(details["strike_price"]), bid=float(quote["bid"]), ask=float(quote["ask"]),
-                mid_iv=float(row["implied_volatility"]), observed_at=_parse_polygon_time(quote.get("last_updated"), now),
-                expires_at=expiration,
-            ))
+            points.append(
+                OptionIvPoint(
+                    symbol=str(details["ticker"]),
+                    option_type=str(details["contract_type"]).lower(),
+                    strike=float(details["strike_price"]),
+                    bid=float(quote["bid"]),
+                    ask=float(quote["ask"]),
+                    mid_iv=float(row["implied_volatility"]),
+                    observed_at=_parse_polygon_time(quote.get("last_updated"), now),
+                    expires_at=expiration,
+                )
+            )
         except (KeyError, TypeError, ValueError):
             continue
     return points, tuple(sorted(quality_flags))

@@ -38,7 +38,8 @@ class ThresholdEstimate:
 
 
 def calibrated_threshold_estimate(
-    sources: Iterable[ThresholdSource], calibrations: Iterable[Mapping[str, object]],
+    sources: Iterable[ThresholdSource],
+    calibrations: Iterable[Mapping[str, object]],
 ) -> ThresholdEstimate:
     """Return a robust Pyth-scale estimate without treating it as settlement truth.
 
@@ -61,13 +62,21 @@ def calibrated_threshold_estimate(
         adjusted = item.price / (1.0 + bias / 10_000.0)
         adjusted_prices.append(adjusted)
         errors.append(p90)
-        details.append({
-            "source": item.source, "raw_price": item.price, "calibration_source": key,
-            "bias_bps": bias, "calibration_samples": len(sample_errors),
-            "p90_absolute_error_bps": p90, "adjusted_price": adjusted,
-        })
+        details.append(
+            {
+                "source": item.source,
+                "raw_price": item.price,
+                "calibration_source": key,
+                "bias_bps": bias,
+                "calibration_samples": len(sample_errors),
+                "p90_absolute_error_bps": p90,
+                "adjusted_price": adjusted,
+            }
+        )
     estimate = median(adjusted_prices)
-    dispersion = max(abs(value - estimate) / estimate * 10_000 for value in adjusted_prices) if len(adjusted_prices) > 1 else 0.0
+    dispersion = (
+        max(abs(value - estimate) / estimate * 10_000 for value in adjusted_prices) if len(adjusted_prices) > 1 else 0.0
+    )
     samples = sum(int(item["calibration_samples"]) for item in details)
     error = max(median(errors), dispersion)
     if len(usable) >= 3 and samples >= 5:
@@ -77,8 +86,13 @@ def calibrated_threshold_estimate(
     else:
         quality = "SINGLE_SOURCE_ESTIMATE"
     return ThresholdEstimate(
-        price=estimate, quality=quality, source_count=len(usable), calibration_samples=samples,
-        estimated_error_bps=error, source_dispersion_bps=dispersion, sources=tuple(details),
+        price=estimate,
+        quality=quality,
+        source_count=len(usable),
+        calibration_samples=samples,
+        estimated_error_bps=error,
+        source_dispersion_bps=dispersion,
+        sources=tuple(details),
     )
 
 

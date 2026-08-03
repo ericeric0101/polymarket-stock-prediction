@@ -6,7 +6,13 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Iterable, Mapping
 
-from .baseline import DailyBar, DailyClose, annualized_volatility, daily_close_data_is_fresh, evaluate_realized_vol_baseline
+from .baseline import (
+    DailyBar,
+    DailyClose,
+    annualized_volatility,
+    daily_close_data_is_fresh,
+    evaluate_realized_vol_baseline,
+)
 from .quality import relative_price_difference, us_equity_session
 from .evaluation_payload import PAYLOAD_VERSION
 
@@ -106,7 +112,9 @@ class RealtimeBaselineEvaluator:
         self._volatility_decay = volatility_decay
         self._volatility_observations = volatility_observations if volatility_observations is not None else closes
         supported_estimators = {"CLOSE_TO_CLOSE", "EWMA", "GARMAN_KLASS", "YANG_ZHANG"}
-        self._comparison_estimators = tuple(dict.fromkeys(item.upper() for item in comparison_estimators if item.upper() != self._volatility_estimator))
+        self._comparison_estimators = tuple(
+            dict.fromkeys(item.upper() for item in comparison_estimators if item.upper() != self._volatility_estimator)
+        )
         if any(item not in supported_estimators for item in self._comparison_estimators):
             raise ValueError("comparison_estimators contains an unsupported volatility estimator")
         if self._volatility_estimator in {"GARMAN_KLASS", "YANG_ZHANG"} and volatility_observations is None:
@@ -191,8 +199,15 @@ class RealtimeBaselineEvaluator:
         # unavailable, preserve the observation and trade it as a clearly labeled
         # realized-volatility fallback so settlement data can be collected.
         active_fallback_buffer = self._fallback_buffer
-        active_model_error_buffer = self._base_model_error_buffer + active_fallback_buffer + additional_model_error_buffer
-        if reference_spot is not None and reference_spot_age_seconds is not None and reference_spot_age_seconds <= 15 and spot is not None:
+        active_model_error_buffer = (
+            self._base_model_error_buffer + active_fallback_buffer + additional_model_error_buffer
+        )
+        if (
+            reference_spot is not None
+            and reference_spot_age_seconds is not None
+            and reference_spot_age_seconds <= 15
+            and spot is not None
+        ):
             cross_source_difference = relative_price_difference(spot, reference_spot)
             if cross_source_difference > maximum_cross_source_difference:
                 skip_reasons.append("CROSS_SOURCE_SPOT_DIVERGENCE")
@@ -308,19 +323,22 @@ class RealtimeBaselineEvaluator:
                 additional_model_error_buffer=additional_model_error_buffer,
                 price_to_beat_override=self._price_to_beat,
             )
-            comparison_models.append({
-                "volatility_estimator": comparison.volatility_estimator,
-                "annualized_volatility": comparison.annualized_realized_volatility,
-                "fair_up_probability": comparison.fair_up_probability,
-                "up_edge": comparison.up_edge.edge,
-                "down_edge": comparison.down_edge.edge,
-                "model_outcome": comparison.paper_outcome,
-                "model_error_buffer": comparison.model_error_buffer,
-            })
+            comparison_models.append(
+                {
+                    "volatility_estimator": comparison.volatility_estimator,
+                    "annualized_volatility": comparison.annualized_realized_volatility,
+                    "fair_up_probability": comparison.fair_up_probability,
+                    "up_edge": comparison.up_edge.edge,
+                    "down_edge": comparison.down_edge.edge,
+                    "model_outcome": comparison.paper_outcome,
+                    "model_error_buffer": comparison.model_error_buffer,
+                }
+            )
         entry_block_reasons: list[str] = []
         if model_outcome and option_iv_status != "IV_VALID":
             volatility_disagreement = volatility_models_disagree(
-                assessment.fair_up_probability, comparison_models,
+                assessment.fair_up_probability,
+                comparison_models,
             )
             if volatility_disagreement:
                 entry_block_reasons.append("VOLATILITY_MODEL_DISAGREEMENT")
@@ -348,7 +366,10 @@ class RealtimeBaselineEvaluator:
 
 
 def volatility_models_disagree(
-    primary_probability: float, comparison_models: Iterable[Mapping[str, object]], *, threshold: float = 0.10,
+    primary_probability: float,
+    comparison_models: Iterable[Mapping[str, object]],
+    *,
+    threshold: float = 0.10,
 ) -> bool:
     primary_direction_up = primary_probability >= 0.5
     for item in comparison_models:

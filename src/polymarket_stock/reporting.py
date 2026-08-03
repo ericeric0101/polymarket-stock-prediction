@@ -31,13 +31,19 @@ def make_event_sink(log_path: Path, output_format: str):
             print(json.dumps({"event_type": event_type, **payload}, sort_keys=True, default=str))
             return
         print(_human_event(event_type, payload))
+
     return sink
 
 
 def render_dashboard(
-    rows: tuple[Mapping[str, object], ...], open_positions: int, settled_positions: int, *,
-    positions: Iterable[PaperPosition] = (), signal_performance: Mapping[str, object] | None = None,
-    sizing: SizingReadiness | None = None, daily_entry_limit: int = 3,
+    rows: tuple[Mapping[str, object], ...],
+    open_positions: int,
+    settled_positions: int,
+    *,
+    positions: Iterable[PaperPosition] = (),
+    signal_performance: Mapping[str, object] | None = None,
+    sizing: SizingReadiness | None = None,
+    daily_entry_limit: int = 3,
 ) -> str:
     now = datetime.now(UTC).astimezone(NEW_YORK)
     lines = [
@@ -52,9 +58,14 @@ def render_dashboard(
             f"{str(row.get('symbol', '-'))[:6]:<7} {cells[0]:<25} {cells[1]:<25} {cells[2]:<25} "
             f"{_plain_latest_recommendation(checkpoints, row=row)}"
         )
-    lines.extend(_plain_daily_portfolio_summary(
-        positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
-    ))
+    lines.extend(
+        _plain_daily_portfolio_summary(
+            positions,
+            signal_performance or {},
+            sizing=sizing,
+            daily_entry_limit=daily_entry_limit,
+        )
+    )
     return "\n".join(lines)
 
 
@@ -74,8 +85,12 @@ def run_live_dashboard(
                     sizing = sizing_readiness(journal.list_first_signal_calibration_observations())
                     live.update(
                         _rich_dashboard(
-                            rows, positions, signal_performance=signal_performance, sizing=sizing,
-                            refresh_seconds=refresh_seconds, daily_entry_limit=daily_entry_limit,
+                            rows,
+                            positions,
+                            signal_performance=signal_performance,
+                            sizing=sizing,
+                            refresh_seconds=refresh_seconds,
+                            daily_entry_limit=daily_entry_limit,
                         ),
                         refresh=True,
                     )
@@ -89,16 +104,18 @@ def run_live_dashboard(
 
 
 def _rich_dashboard(
-    rows: tuple[Mapping[str, object], ...], positions: tuple[PaperPosition, ...], *,
-    signal_performance: Mapping[str, object] | None = None, sizing: SizingReadiness | None = None,
-    refresh_seconds: float = 3.0, daily_entry_limit: int = 3,
+    rows: tuple[Mapping[str, object], ...],
+    positions: tuple[PaperPosition, ...],
+    *,
+    signal_performance: Mapping[str, object] | None = None,
+    sizing: SizingReadiness | None = None,
+    refresh_seconds: float = 3.0,
+    daily_entry_limit: int = 3,
 ) -> Layout:
     open_positions = sum(getattr(position, "status") == "OPEN" for position in positions)
     settled_positions = sum(getattr(position, "status") == "SETTLED" for position in positions)
     regular = sum(row.get("market_session") == "REGULAR" for row in rows)
-    signals = sum(
-        any(payload.get("paper_outcome") for payload in _row_checkpoints(row).values()) for row in rows
-    )
+    signals = sum(any(payload.get("paper_outcome") for payload in _row_checkpoints(row).values()) for row in rows)
     maker_quotes = sum(len(row.get("maker_shadow_quotes") or []) for row in rows)
     local_now = datetime.now().astimezone()
     ny_now = datetime.now(UTC).astimezone(NEW_YORK)
@@ -109,8 +126,13 @@ def _rich_dashboard(
     left = Text()
     left.append("Mode: ", style="dim")
     left.append("SHADOW", style="bold cyan")
-    left.append(f"   Markets: {len(rows)}   Regular: {regular}   Checkpoint entries: {signals}   Maker: {maker_quotes}\n")
-    left.append(f"Paper positions: {open_positions} open / {settled_positions} settled", style="green" if open_positions else "dim")
+    left.append(
+        f"   Markets: {len(rows)}   Regular: {regular}   Checkpoint entries: {signals}   Maker: {maker_quotes}\n"
+    )
+    left.append(
+        f"Paper positions: {open_positions} open / {settled_positions} settled",
+        style="green" if open_positions else "dim",
+    )
     right = Text()
     right.append("Data source: SQLite shadow journal\n", style="cyan")
     right.append(f"Local: {local_now:%Y-%m-%d %H:%M:%S %Z}\n", style="dim")
@@ -133,16 +155,26 @@ def _rich_dashboard(
             _latest_recommendation_text(checkpoints, row=row),
         )
     if not rows:
-        table.add_row("-", Text("PENDING", style="dim"), Text("PENDING", style="dim"),
-                      Text("PENDING", style="dim"), Text("Waiting for regular-session evaluations", style="yellow"))
+        table.add_row(
+            "-",
+            Text("PENDING", style="dim"),
+            Text("PENDING", style="dim"),
+            Text("PENDING", style="dim"),
+            Text("Waiting for regular-session evaluations", style="yellow"),
+        )
 
     footer = Text()
     footer.append("Direction cells: side / fair / recorded ask / fee+buffer-adjusted edge.  ", style="dim")
     footer.append("Green=entry-eligible  Yellow=skip/blocked  Dim=non-positive edge\n", style="dim")
-    footer.append(f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close  |  Shadow only", style="magenta")
+    footer.append(
+        f"Refresh: journal every {refresh_seconds:g}s  |  q: close  |  Ctrl+C: close  |  Shadow only", style="magenta"
+    )
     today_positions = _today_selected_positions(positions)
     portfolio = _daily_portfolio_panel(
-        today_positions, signal_performance or {}, sizing=sizing, daily_entry_limit=daily_entry_limit,
+        today_positions,
+        signal_performance or {},
+        sizing=sizing,
+        daily_entry_limit=daily_entry_limit,
     )
     layout = Layout()
     layout.split_column(
@@ -195,7 +227,8 @@ def _checkpoint_direction(payload: Mapping[str, object]) -> tuple[str, float, fl
     ask_value = payload.get("up_ask" if outcome == "UP" else "down_ask")
     edge_value = payload.get("up_edge" if outcome == "UP" else "down_edge")
     return (
-        outcome, probability,
+        outcome,
+        probability,
         float(ask_value) if ask_value is not None else None,
         float(edge_value) if edge_value is not None else None,
     )
@@ -254,7 +287,9 @@ def _latest_checkpoint(checkpoints: Mapping[str, Mapping[str, object]]) -> tuple
 
 
 def _latest_recommendation(
-    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+    checkpoints: Mapping[str, Mapping[str, object]],
+    *,
+    row: Mapping[str, object] | None = None,
 ) -> tuple[str, str]:
     latest = _latest_checkpoint(checkpoints)
     if latest is None:
@@ -267,7 +302,9 @@ def _latest_recommendation(
     current_ask = float(current_ask_value) if current_ask_value is not None else checkpoint_ask
     stream_is_live = bool(row and row.get("stream_ready") and not row.get("skip_reasons"))
     price_label = "live" if stream_is_live else "last" if row else "ask@cp"
-    detail = f"{name[:4]} {outcome} {price_label} {_format_contract_price(current_ask)} <= {_format_contract_price(limit)}"
+    detail = (
+        f"{name[:4]} {outcome} {price_label} {_format_contract_price(current_ask)} <= {_format_contract_price(limit)}"
+    )
     if blocks:
         return "SKIP", f"{name[:4]} {outcome} blocked: {blocks[0]}"
     if payload.get("paper_outcome") == outcome:
@@ -279,7 +316,9 @@ def _latest_recommendation(
 
 
 def _latest_recommendation_text(
-    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+    checkpoints: Mapping[str, Mapping[str, object]],
+    *,
+    row: Mapping[str, object] | None = None,
 ) -> Text:
     action, detail = _latest_recommendation(checkpoints, row=row)
     style = "bold green" if action == "ENTER" else "yellow" if action == "SKIP" else "cyan"
@@ -287,15 +326,20 @@ def _latest_recommendation_text(
 
 
 def _plain_latest_recommendation(
-    checkpoints: Mapping[str, Mapping[str, object]], *, row: Mapping[str, object] | None = None,
+    checkpoints: Mapping[str, Mapping[str, object]],
+    *,
+    row: Mapping[str, object] | None = None,
 ) -> str:
     action, detail = _latest_recommendation(checkpoints, row=row)
     return f"{action} {detail}"
 
 
 def _plain_daily_portfolio_summary(
-    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
-    sizing: SizingReadiness | None, daily_entry_limit: int,
+    positions: Iterable[PaperPosition],
+    signal_performance: Mapping[str, object],
+    *,
+    sizing: SizingReadiness | None,
+    daily_entry_limit: int,
 ) -> list[str]:
     now = datetime.now(UTC).astimezone(NEW_YORK)
     today = _today_selected_positions(positions, now=now)
@@ -312,7 +356,13 @@ def _plain_daily_portfolio_summary(
         f"All first signals | {total_wins}/{total_settled} | win rate: {all_rate}",
     ]
     for position in sorted(today, key=lambda item: item.opened_at):
-        result = "OPEN" if position.status != "SETTLED" else "WIN" if position.outcome == position.settlement_outcome else "LOSS"
+        result = (
+            "OPEN"
+            if position.status != "SETTLED"
+            else "WIN"
+            if position.outcome == position.settlement_outcome
+            else "LOSS"
+        )
         pnl = "-" if position.realized_pnl is None else f"{position.realized_pnl:+.4f}"
         lines.append(
             f"  {position.opened_at.astimezone(NEW_YORK):%H:%M} {position.symbol:<6} "
@@ -327,11 +377,14 @@ def _plain_daily_portfolio_summary(
 
 
 def _today_selected_positions(
-    positions: Iterable[PaperPosition], *, now: datetime | None = None,
+    positions: Iterable[PaperPosition],
+    *,
+    now: datetime | None = None,
 ) -> tuple[PaperPosition, ...]:
     local_now = now or datetime.now(UTC).astimezone(NEW_YORK)
     return tuple(
-        position for position in positions
+        position
+        for position in positions
         if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == local_now.date()
     )
 
@@ -342,8 +395,11 @@ def _daily_portfolio_height(selected_count: int, has_sizing_summary: bool) -> in
 
 
 def _daily_portfolio_panel(
-    today: Iterable[PaperPosition], signal_performance: Mapping[str, object], *,
-    sizing: SizingReadiness | None, daily_entry_limit: int,
+    today: Iterable[PaperPosition],
+    signal_performance: Mapping[str, object],
+    *,
+    sizing: SizingReadiness | None,
+    daily_entry_limit: int,
 ) -> Table:
     now = datetime.now(UTC).astimezone(NEW_YORK)
     today = tuple(today)
@@ -379,7 +435,10 @@ def _daily_portfolio_panel(
         status = "OPEN" if not settled else f"{position.settlement_outcome} {'WIN' if won else 'LOSS'}"
         entries.add_row(
             position.opened_at.astimezone(NEW_YORK).strftime("%H:%M"),
-            position.symbol, position.outcome, f"{position.entry_ask:.2f}", f"{position.fair_probability:.1%}",
+            position.symbol,
+            position.outcome,
+            f"{position.entry_ask:.2f}",
+            f"{position.fair_probability:.1%}",
             Text(status, style="yellow" if not settled else "bold green" if won else "bold red"),
             Text(
                 "-" if position.realized_pnl is None else f"{position.realized_pnl:+.4f}",
@@ -390,14 +449,15 @@ def _daily_portfolio_panel(
         entries.add_row("-", "-", "-", "-", "-", Text("No selected paper entries", style="dim"), "-")
     panel.add_row(entries)
     if sizing is not None:
-        panel.add_row(Text(_sizing_summary(sizing), style="yellow"), Text("Raw fair probabilities are research-only", style="dim"))
+        panel.add_row(
+            Text(_sizing_summary(sizing), style="yellow"), Text("Raw fair probabilities are research-only", style="dim")
+        )
     return panel
 
 
 def _sizing_summary(sizing: SizingReadiness) -> str:
     cohort_summary = "  ".join(
-        f"{cohort.iv_regime}: {cohort.sample_size}/{sizing.kelly_minimum_cohort_samples}"
-        for cohort in sizing.cohorts
+        f"{cohort.iv_regime}: {cohort.sample_size}/{sizing.kelly_minimum_cohort_samples}" for cohort in sizing.cohorts
     )
     return f"Sizing: {sizing.position_sizing}; Kelly disabled. {cohort_summary}"
 
@@ -441,7 +501,8 @@ def _status_text(row: Mapping[str, object]) -> Text:
     if isinstance(maker_quotes, list) and maker_quotes:
         summary = "  ".join(
             f"{quote.get('outcome')} @ {float(quote.get('limit_price')):.2f}"
-            for quote in maker_quotes if isinstance(quote, Mapping) and quote.get("limit_price") is not None
+            for quote in maker_quotes
+            if isinstance(quote, Mapping) and quote.get("limit_price") is not None
         )
         if summary:
             return Text(f"MAKER {summary}", style="bold cyan")
@@ -463,6 +524,7 @@ class _DashboardInput:
         try:
             import termios
             import tty
+
             self.fd = sys.stdin.fileno()
             self.settings = termios.tcgetattr(self.fd)
             tty.setcbreak(self.fd)
@@ -474,6 +536,7 @@ class _DashboardInput:
     def __exit__(self, *_args: object) -> None:
         if self.enabled and self.fd is not None and self.settings is not None:
             import termios
+
             termios.tcsetattr(self.fd, termios.TCSADRAIN, self.settings)
 
     def poll(self) -> str | None:

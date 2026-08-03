@@ -5,9 +5,15 @@ from datetime import UTC, datetime
 import unittest
 
 from polymarket_stock.streaming import (
-    DebouncedReevaluation, FinnhubStockStream, PolymarketMarketStream, PythHermesStockStream,
-    ShadowStreamCoordinator, SpotQuote,
-    _has_finnhub_trade, _has_pyth_price, run_with_reconnect,
+    DebouncedReevaluation,
+    FinnhubStockStream,
+    PolymarketMarketStream,
+    PythHermesStockStream,
+    ShadowStreamCoordinator,
+    SpotQuote,
+    _has_finnhub_trade,
+    _has_pyth_price,
+    run_with_reconnect,
 )
 
 
@@ -71,26 +77,47 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
     async def test_coordinator_extracts_book_and_price_change_asks(self) -> None:
         coordinator = ShadowStreamCoordinator(callback=lambda _payload: None, debounce_seconds=0.01)
         await coordinator.on_polymarket_message(
-            {"event_type": "book", "asset_id": "up-token", "bids": [{"price": "0.49"}], "asks": [{"price": "0.52"}, {"price": "0.53"}]}
+            {
+                "event_type": "book",
+                "asset_id": "up-token",
+                "bids": [{"price": "0.49"}],
+                "asks": [{"price": "0.52"}, {"price": "0.53"}],
+            }
         )
         await coordinator.on_polymarket_message(
-            {"event_type": "price_change", "price_changes": [{"asset_id": "down-token", "best_bid": "0.48", "best_ask": "0.49"}]}
+            {
+                "event_type": "price_change",
+                "price_changes": [{"asset_id": "down-token", "best_bid": "0.48", "best_ask": "0.49"}],
+            }
         )
         await coordinator.close()
         self.assertEqual(coordinator.latest_best_asks, {"up-token": 0.52, "down-token": 0.49})
 
     async def test_coordinator_reconstructs_top_five_depth_after_price_changes(self) -> None:
         coordinator = ShadowStreamCoordinator(callback=lambda _payload: None, debounce_seconds=0.01)
-        await coordinator.on_polymarket_message({
-            "event_type": "book", "asset_id": "up-token",
-            "bids": [{"price": "0.49", "size": "10"}, {"price": "0.48", "size": "8"}],
-            "asks": [{"price": "0.52", "size": "5"}],
-        })
-        await coordinator.on_polymarket_message({
-            "event_type": "price_change", "price_changes": [
-                {"asset_id": "up-token", "side": "BUY", "price": "0.50", "size": "7", "best_bid": "0.50", "best_ask": "0.52"}
-            ],
-        })
+        await coordinator.on_polymarket_message(
+            {
+                "event_type": "book",
+                "asset_id": "up-token",
+                "bids": [{"price": "0.49", "size": "10"}, {"price": "0.48", "size": "8"}],
+                "asks": [{"price": "0.52", "size": "5"}],
+            }
+        )
+        await coordinator.on_polymarket_message(
+            {
+                "event_type": "price_change",
+                "price_changes": [
+                    {
+                        "asset_id": "up-token",
+                        "side": "BUY",
+                        "price": "0.50",
+                        "size": "7",
+                        "best_bid": "0.50",
+                        "best_ask": "0.52",
+                    }
+                ],
+            }
+        )
         await coordinator.close()
         snapshot = coordinator.latest_books["up-token"]
         self.assertEqual(snapshot["bids"][0], {"price": 0.5, "size": 7.0})
@@ -122,13 +149,25 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             comparisons.append(payload)
 
         coordinator = ShadowStreamCoordinator(
-            callback=lambda _payload: None, primary_spot_source="PYTH_HERMES", comparison_spot_source="FINNHUB",
-            spot_observation_callback=record_spot, spot_comparison_callback=record_comparison,
+            callback=lambda _payload: None,
+            primary_spot_source="PYTH_HERMES",
+            comparison_spot_source="FINNHUB",
+            spot_observation_callback=record_spot,
+            spot_comparison_callback=record_comparison,
             session_classifier=lambda _now: "REGULAR",
         )
-        await coordinator.on_finnhub_message({"type": "trade", "data": [{"s": "TSLA", "p": 100.0, "t": 1_784_000_000_000}]})
+        await coordinator.on_finnhub_message(
+            {"type": "trade", "data": [{"s": "TSLA", "p": 100.0, "t": 1_784_000_000_000}]}
+        )
         await coordinator.on_pyth_message(
-            {"parsed": [{"id": "0xfeed", "price": {"price": "10025", "conf": "15", "expo": -2, "publish_time": 1_784_000_000}}]},
+            {
+                "parsed": [
+                    {
+                        "id": "0xfeed",
+                        "price": {"price": "10025", "conf": "15", "expo": -2, "publish_time": 1_784_000_000},
+                    }
+                ]
+            },
             {"feed": "TSLA"},
         )
         await coordinator.close()
@@ -137,7 +176,6 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["source"] for item in spots], ["FINNHUB", "PYTH_HERMES"])
         self.assertEqual(len(comparisons), 1)
         self.assertAlmostEqual(comparisons[0]["difference_bps"], -24.9376558603)
-
 
     async def test_coordinator_persists_only_regular_session_and_reports_source_gap(self) -> None:
         spots = []
@@ -150,8 +188,11 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             gaps.append(payload)
 
         regular = ShadowStreamCoordinator(
-            callback=lambda _payload: None, spot_observation_callback=record_spot,
-            source_gap_callback=record_gap, session_classifier=lambda _now: "REGULAR", max_age_seconds=15,
+            callback=lambda _payload: None,
+            spot_observation_callback=record_spot,
+            source_gap_callback=record_gap,
+            session_classifier=lambda _now: "REGULAR",
+            max_age_seconds=15,
         )
         start = datetime(2026, 7, 27, 15, 0, tzinfo=UTC)
         await regular._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
@@ -163,16 +204,17 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
 
         after_hours_spots = []
         after_hours = ShadowStreamCoordinator(
-            callback=lambda _payload: None, spot_observation_callback=after_hours_spots.append,
+            callback=lambda _payload: None,
+            spot_observation_callback=after_hours_spots.append,
             session_classifier=lambda _now: "AFTER_HOURS",
         )
         await after_hours._accept_spot(SpotQuote("PYTH_HERMES", "TSLA", 100.0, start), "TEST")
         await after_hours.close()
         self.assertEqual(after_hours_spots, [])
 
-
     def test_persistence_bucket_keeps_final_five_minutes_per_second(self) -> None:
         from polymarket_stock.streaming import _persistence_bucket
+
         normal = datetime(2026, 7, 31, 19, 0, 20, tzinfo=UTC)
         close = datetime(2026, 7, 31, 19, 59, 20, tzinfo=UTC)
         self.assertEqual(_persistence_bucket(normal), "2026-07-31T19:00:00+00:00")

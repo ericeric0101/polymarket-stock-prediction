@@ -15,7 +15,10 @@ class EventRiskTests(unittest.TestCase):
         now = datetime(2026, 7, 20, 15, tzinfo=UTC)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "events.json"
-            path.write_text('[{"kind":"earnings","starts_at":"2026-07-20T16:00:00Z","symbols":["TSLA"]},{"kind":"FOMC","starts_at":"2026-07-20T17:00:00Z","symbols":["*"]}]', encoding="utf-8")
+            path.write_text(
+                '[{"kind":"earnings","starts_at":"2026-07-20T16:00:00Z","symbols":["TSLA"]},{"kind":"FOMC","starts_at":"2026-07-20T17:00:00Z","symbols":["*"]}]',
+                encoding="utf-8",
+            )
             events = load_risk_events(path, "TSLA", now, now + timedelta(hours=4))
         self.assertEqual([event.kind for event in events], ["earnings", "FOMC"])
 
@@ -23,9 +26,12 @@ class EventRiskTests(unittest.TestCase):
         self.assertEqual(us_equity_session(datetime(2026, 12, 25, 16, tzinfo=UTC)), "HOLIDAY:CHRISTMAS")
 
     def test_finnhub_earnings_calendar_blocks_bmo_in_resolution_window(self) -> None:
-        client = FinnhubEarningsCalendarClient("key", get_json_fn=lambda *_args, **_kwargs: {
-            "earningsCalendar": [{"symbol": "TSLA", "date": "2026-07-20", "hour": "bmo"}]
-        })
+        client = FinnhubEarningsCalendarClient(
+            "key",
+            get_json_fn=lambda *_args, **_kwargs: {
+                "earningsCalendar": [{"symbol": "TSLA", "date": "2026-07-20", "hour": "bmo"}]
+            },
+        )
         events = client.events("TSLA", datetime(2026, 7, 20, 12, tzinfo=UTC), datetime(2026, 7, 20, 20, tzinfo=UTC))
         self.assertEqual([event.kind for event in events], ["EARNINGS"])
 

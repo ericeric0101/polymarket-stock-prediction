@@ -93,7 +93,10 @@ def crr_binomial_price(inputs: OptionPricingInputs, *, style: ExerciseStyle = "a
     if not 0 < probability < 1:
         raise ValueError("invalid binomial risk-neutral probability")
     discount = exp(-inputs.risk_free_rate * dt)
-    values = [_intrinsic(inputs.option_type, inputs.spot * up ** (steps - index) * down**index, inputs.strike) for index in range(steps + 1)]
+    values = [
+        _intrinsic(inputs.option_type, inputs.spot * up ** (steps - index) * down**index, inputs.strike)
+        for index in range(steps + 1)
+    ]
     for level in range(steps - 1, -1, -1):
         next_values: list[float] = []
         for index in range(level + 1):
@@ -147,7 +150,11 @@ def _intrinsic(option_type: OptionType, spot: float, strike: float) -> float:
 
 def _with_volatility(inputs: OptionPricingInputs, annual_volatility: float) -> OptionPricingInputs:
     return OptionPricingInputs(
-        spot=inputs.spot, strike=inputs.strike, annual_volatility=annual_volatility,
-        seconds_to_expiry=inputs.seconds_to_expiry, option_type=inputs.option_type,
-        risk_free_rate=inputs.risk_free_rate, dividend_yield=inputs.dividend_yield,
+        spot=inputs.spot,
+        strike=inputs.strike,
+        annual_volatility=annual_volatility,
+        seconds_to_expiry=inputs.seconds_to_expiry,
+        option_type=inputs.option_type,
+        risk_free_rate=inputs.risk_free_rate,
+        dividend_yield=inputs.dividend_yield,
     )

@@ -16,7 +16,15 @@ class NasdaqDataTests(unittest.TestCase):
         def fake_get_json(url, _params, headers=None):
             self.assertIn("Mozilla", headers["User-Agent"])
             if url.endswith("/info"):
-                return {"data": {"primaryData": {"lastSalePrice": "$130.00", "lastTradeTimestamp": "Jan 29, 2026", "isRealTime": False}}}
+                return {
+                    "data": {
+                        "primaryData": {
+                            "lastSalePrice": "$130.00",
+                            "lastTradeTimestamp": "Jan 29, 2026",
+                            "isRealTime": False,
+                        }
+                    }
+                }
             return {"data": {"tradesTable": {"rows": list(reversed(rows))}}}
 
         client = NasdaqBaselineClient(fake_get_json)
@@ -38,9 +46,15 @@ class NasdaqDataTests(unittest.TestCase):
     def test_parses_current_nasdaq_et_quote_timestamp(self) -> None:
         def fake_get_json(_url, _params, headers=None):
             self.assertIn("Mozilla", headers["User-Agent"])
-            return {"data": {"primaryData": {
-                "lastSalePrice": "$156.98", "lastTradeTimestamp": "Jul 24, 2026 9:39 AM ET", "isRealTime": True,
-            }}}
+            return {
+                "data": {
+                    "primaryData": {
+                        "lastSalePrice": "$156.98",
+                        "lastTradeTimestamp": "Jul 24, 2026 9:39 AM ET",
+                        "isRealTime": True,
+                    }
+                }
+            }
 
         quote = NasdaqBaselineClient(fake_get_json).latest_quote("COIN")
         self.assertEqual(quote.last_trade_at, datetime(2026, 7, 24, 13, 39, tzinfo=UTC))

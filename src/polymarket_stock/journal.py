@@ -13,7 +13,7 @@ import uuid
 from zoneinfo import ZoneInfo
 
 from .fees import estimate_taker_fee_usdc
-from .evaluation_payload import validate as validate_evaluation_payload
+from .evaluation_payload import read_spot, read_threshold, validate_for_write
 from .checkpoints import DEFAULT_MAXIMUM_DELAY_SECONDS, checkpoint_target_at
 from .quality import observable_equity_market_date
 from .storage.sqlite import database_connection
@@ -225,7 +225,9 @@ class ShadowJournal:
         if "checkpoint_delay_seconds" not in columns:
             connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN checkpoint_delay_seconds REAL")
         if "eligible_for_calibration" not in columns:
-            connection.execute("ALTER TABLE checkpoint_observations ADD COLUMN eligible_for_calibration INTEGER NOT NULL DEFAULT 1")
+            connection.execute(
+                "ALTER TABLE checkpoint_observations ADD COLUMN eligible_for_calibration INTEGER NOT NULL DEFAULT 1"
+            )
         rows = connection.execute(
             """SELECT id, checkpoint_date, checkpoint_name, evaluated_at
             FROM checkpoint_observations WHERE checkpoint_target_at IS NULL OR checkpoint_delay_seconds IS NULL"""
@@ -238,7 +240,12 @@ class ShadowJournal:
                 """UPDATE checkpoint_observations
                 SET checkpoint_target_at = ?, checkpoint_delay_seconds = ?, eligible_for_calibration = ?
                 WHERE id = ?""",
-                (target_at.isoformat(), delay_seconds, int(delay_seconds <= DEFAULT_MAXIMUM_DELAY_SECONDS), int(row[0])),
+                (
+                    target_at.isoformat(),
+                    delay_seconds,
+                    int(delay_seconds <= DEFAULT_MAXIMUM_DELAY_SECONDS),
+                    int(row[0]),
+                ),
             )
 
     @staticmethod
@@ -374,10 +381,20 @@ class ShadowJournal:
                     raw_payload_json=excluded.raw_payload_json
                 """,
                 (
-                    values[0], values[1], values[2], values[3], values[4], values[5],
-                    values[6], values[7], getattr(candidate, "outcome_a_label"),
-                    getattr(candidate, "outcome_b_label"), getattr(candidate, "outcome_a_token_id"),
-                    getattr(candidate, "outcome_b_token_id"), values[8], values[9],
+                    values[0],
+                    values[1],
+                    values[2],
+                    values[3],
+                    values[4],
+                    values[5],
+                    values[6],
+                    values[7],
+                    getattr(candidate, "outcome_a_label"),
+                    getattr(candidate, "outcome_b_label"),
+                    getattr(candidate, "outcome_a_token_id"),
+                    getattr(candidate, "outcome_b_token_id"),
+                    values[8],
+                    values[9],
                 ),
             )
 
@@ -421,7 +438,11 @@ class ShadowJournal:
                     observed_at, observed_second, source, symbol, price, published_at, confidence, feed_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    observed_at.isoformat(), observed_at.replace(microsecond=0).isoformat(), source, symbol, price,
+                    observed_at.isoformat(),
+                    observed_at.replace(microsecond=0).isoformat(),
+                    source,
+                    symbol,
+                    price,
                     str(published_at) if published_at else None,
                     float(confidence) if confidence is not None else None,
                     str(payload["feed_id"]) if payload.get("feed_id") else None,
@@ -449,14 +470,23 @@ class ShadowJournal:
                     pyth_price, pyth_published_at, pyth_confidence, pyth_feed_id, difference_bps
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    observed_at.isoformat(), observed_at.replace(microsecond=0).isoformat(), symbol, primary_source,
-                    primary_price, payload.get("primary_published_at"), pyth_price, payload.get("pyth_published_at"),
+                    observed_at.isoformat(),
+                    observed_at.replace(microsecond=0).isoformat(),
+                    symbol,
+                    primary_source,
+                    primary_price,
+                    payload.get("primary_published_at"),
+                    pyth_price,
+                    payload.get("pyth_published_at"),
                     float(payload["pyth_confidence"]) if payload.get("pyth_confidence") is not None else None,
-                    payload.get("pyth_feed_id"), difference_bps,
+                    payload.get("pyth_feed_id"),
+                    difference_bps,
                 ),
             )
 
-    def record_pyth_daily_close(self, *, market_date: str, symbol: str, close_price: float, candle_at: datetime, source: str) -> None:
+    def record_pyth_daily_close(
+        self, *, market_date: str, symbol: str, close_price: float, candle_at: datetime, source: str
+    ) -> None:
         if not market_date or not symbol.strip() or close_price <= 0 or candle_at.tzinfo is None:
             raise ValueError("Pyth daily close is invalid")
         with _database_connection(self.path) as connection:
@@ -465,7 +495,14 @@ class ShadowJournal:
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(market_date, symbol) DO UPDATE SET close_price=excluded.close_price,
                     candle_at=excluded.candle_at, source=excluded.source, recorded_at=excluded.recorded_at""",
-                (market_date, symbol.upper(), close_price, candle_at.isoformat(), source, datetime.now(UTC).isoformat()),
+                (
+                    market_date,
+                    symbol.upper(),
+                    close_price,
+                    candle_at.isoformat(),
+                    source,
+                    datetime.now(UTC).isoformat(),
+                ),
             )
 
     def get_pyth_daily_close(self, *, market_date: str, symbol: str) -> Mapping[str, object] | None:
@@ -494,7 +531,10 @@ class ShadowJournal:
                 ON CONFLICT(market_date, symbol) DO UPDATE SET
                     recorded_at=excluded.recorded_at, status=excluded.status, payload_json=excluded.payload_json""",
                 (
-                    market_date, symbol, datetime.now(UTC).isoformat(), status,
+                    market_date,
+                    symbol,
+                    datetime.now(UTC).isoformat(),
+                    status,
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
@@ -511,7 +551,11 @@ class ShadowJournal:
         return tuple(json.loads(str(row[0])) for row in rows)
 
     def last_regular_spot_observation(
-        self, *, source: str, symbol: str, market_date: str,
+        self,
+        *,
+        source: str,
+        symbol: str,
+        market_date: str,
     ) -> Mapping[str, object] | None:
         """Return the final locally recorded regular-session quote for one date."""
         local_date = datetime.fromisoformat(market_date).date()
@@ -530,10 +574,23 @@ class ShadowJournal:
         return {"price": float(row[0]), "observed_at": str(row[1]), "published_at": str(row[2]) if row[2] else None}
 
     def record_execution_observation(
-        self, *, observed_at: datetime, signal_id: str | None, observation_kind: str, market_id: str,
-        symbol: str, outcome: str, token_id: str, spot: float | None, price_to_beat: float | None,
-        fair_probability: float | None, best_bid: float | None, best_ask: float | None,
-        fee_rate: float | None, book_payload: Mapping[str, object], evaluation_payload: Mapping[str, object],
+        self,
+        *,
+        observed_at: datetime,
+        signal_id: str | None,
+        observation_kind: str,
+        market_id: str,
+        symbol: str,
+        outcome: str,
+        token_id: str,
+        spot: float | None,
+        price_to_beat: float | None,
+        fair_probability: float | None,
+        best_bid: float | None,
+        best_ask: float | None,
+        fee_rate: float | None,
+        book_payload: Mapping[str, object],
+        evaluation_payload: Mapping[str, object],
     ) -> None:
         if outcome not in {"UP", "DOWN"}:
             raise ValueError("execution observation outcome must be UP or DOWN")
@@ -545,8 +602,19 @@ class ShadowJournal:
                     book_payload_json, evaluation_payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    observed_at.isoformat(), signal_id, observation_kind, market_id, symbol, outcome, token_id,
-                    spot, price_to_beat, fair_probability, best_bid, best_ask, fee_rate,
+                    observed_at.isoformat(),
+                    signal_id,
+                    observation_kind,
+                    market_id,
+                    symbol,
+                    outcome,
+                    token_id,
+                    spot,
+                    price_to_beat,
+                    fair_probability,
+                    best_bid,
+                    best_ask,
+                    fee_rate,
                     json.dumps(book_payload, sort_keys=True, separators=(",", ":"), default=str),
                     json.dumps(evaluation_payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
@@ -648,7 +716,7 @@ class ShadowJournal:
     def record_realtime_evaluation(self, payload: Mapping[str, object]) -> None:
         """Persist every fresh or rejected real-time shadow evaluation for calibration."""
 
-        validate_evaluation_payload(payload)
+        validate_for_write(payload)
         with _database_connection(self.path) as connection:
             connection.execute(
                 """INSERT INTO realtime_evaluations (
@@ -656,16 +724,25 @@ class ShadowJournal:
                     fair_up_probability, signal_status, skip_reasons_json, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    str(payload["evaluated_at"]), str(payload["market_id"]), str(payload["symbol"]),
-                    payload.get("spot"), payload.get("up_ask"), payload.get("down_ask"),
-                    payload.get("fair_up_probability"), str(payload["signal_status"]),
+                    str(payload["evaluated_at"]),
+                    str(payload["market_id"]),
+                    str(payload["symbol"]),
+                    payload.get("spot"),
+                    payload.get("up_ask"),
+                    payload.get("down_ask"),
+                    payload.get("fair_up_probability"),
+                    str(payload["signal_status"]),
                     json.dumps(payload["skip_reasons"], sort_keys=True),
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
 
     def record_checkpoint_observation(
-        self, *, checkpoint_date: str, checkpoint_name: str, payload: Mapping[str, object],
+        self,
+        *,
+        checkpoint_date: str,
+        checkpoint_name: str,
+        payload: Mapping[str, object],
         maximum_delay_seconds: float = DEFAULT_MAXIMUM_DELAY_SECONDS,
     ) -> bool:
         """Store the first valid observation after a fixed daily research checkpoint."""
@@ -679,24 +756,46 @@ class ShadowJournal:
         delay_seconds = max(0.0, (evaluated_at - target_at).total_seconds())
         eligible = delay_seconds <= maximum_delay_seconds
         with _database_connection(self.path) as connection:
-            return connection.execute(
-                """INSERT OR IGNORE INTO checkpoint_observations (
+            return (
+                connection.execute(
+                    """INSERT OR IGNORE INTO checkpoint_observations (
                     market_id, symbol, checkpoint_date, checkpoint_name, evaluated_at,
                     fair_up_probability, up_ask, down_ask, model_version, option_iv, payload_json,
                     checkpoint_target_at, checkpoint_delay_seconds, eligible_for_calibration
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    str(payload["market_id"]), str(payload["symbol"]), checkpoint_date, checkpoint_name,
-                    str(payload["evaluated_at"]), float(payload["fair_up_probability"]), payload.get("up_ask"),
-                    payload.get("down_ask"), str(payload["model_version"]), payload.get("option_iv"),
-                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
-                    target_at.isoformat(), delay_seconds, int(eligible),
-                ),
-            ).rowcount == 1
+                    (
+                        str(payload["market_id"]),
+                        str(payload["symbol"]),
+                        checkpoint_date,
+                        checkpoint_name,
+                        str(payload["evaluated_at"]),
+                        float(payload["fair_up_probability"]),
+                        payload.get("up_ask"),
+                        payload.get("down_ask"),
+                        str(payload["model_version"]),
+                        payload.get("option_iv"),
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                        target_at.isoformat(),
+                        delay_seconds,
+                        int(eligible),
+                    ),
+                ).rowcount
+                == 1
+            )
 
     def record_portfolio_decision(
-        self, *, batch_id: str, market_id: str, symbol: str, outcome: str, risk_group: str,
-        edge: float, selected: bool, reason: str, payload: Mapping[str, object], created_at: datetime | None = None,
+        self,
+        *,
+        batch_id: str,
+        market_id: str,
+        symbol: str,
+        outcome: str,
+        risk_group: str,
+        edge: float,
+        selected: bool,
+        reason: str,
+        payload: Mapping[str, object],
+        created_at: datetime | None = None,
     ) -> None:
         if outcome not in {"UP", "DOWN"}:
             raise ValueError("portfolio decision outcome must be UP or DOWN")
@@ -707,8 +806,15 @@ class ShadowJournal:
                     created_at, batch_id, market_id, symbol, outcome, risk_group, edge, status, reason, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    timestamp.isoformat(), batch_id, market_id, symbol.upper(), outcome, risk_group, edge,
-                    "SELECTED" if selected else "REJECTED", reason,
+                    timestamp.isoformat(),
+                    batch_id,
+                    market_id,
+                    symbol.upper(),
+                    outcome,
+                    risk_group,
+                    edge,
+                    "SELECTED" if selected else "REJECTED",
+                    reason,
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
@@ -719,13 +825,24 @@ class ShadowJournal:
         with _database_connection(self.path) as connection:
             rows = connection.execute(
                 """SELECT created_at, batch_id, market_id, symbol, outcome, risk_group, edge, status, reason, payload_json
-                FROM portfolio_decisions ORDER BY id DESC LIMIT ?""", (limit,)
+                FROM portfolio_decisions ORDER BY id DESC LIMIT ?""",
+                (limit,),
             ).fetchall()
-        return tuple({
-            "created_at": str(row[0]), "batch_id": str(row[1]), "market_id": str(row[2]), "symbol": str(row[3]),
-            "outcome": str(row[4]), "risk_group": str(row[5]), "edge": float(row[6]), "status": str(row[7]),
-            "reason": str(row[8]), "payload": json.loads(str(row[9])),
-        } for row in rows)
+        return tuple(
+            {
+                "created_at": str(row[0]),
+                "batch_id": str(row[1]),
+                "market_id": str(row[2]),
+                "symbol": str(row[3]),
+                "outcome": str(row[4]),
+                "risk_group": str(row[5]),
+                "edge": float(row[6]),
+                "status": str(row[7]),
+                "reason": str(row[8]),
+                "payload": json.loads(str(row[9])),
+            }
+            for row in rows
+        )
 
     def list_checkpoint_observations(self, *, eligible_only: bool = True) -> tuple[CheckpointObservation, ...]:
         query = """SELECT checkpoint.market_id, checkpoint.symbol, checkpoint.checkpoint_date,
@@ -739,15 +856,25 @@ class ShadowJournal:
           ORDER BY checkpoint.checkpoint_date, checkpoint.checkpoint_name, checkpoint.market_id"""
         with _database_connection(self.path) as connection:
             rows = connection.execute(query, (int(eligible_only),)).fetchall()
-        return tuple(CheckpointObservation(
-            market_id=str(row[0]), symbol=str(row[1]), checkpoint_date=str(row[2]), checkpoint_name=str(row[3]),
-            evaluated_at=datetime.fromisoformat(str(row[4])), fair_up_probability=float(row[5]),
-            up_ask=float(row[6]) if row[6] is not None else None,
-            down_ask=float(row[7]) if row[7] is not None else None, model_version=str(row[8]),
-            option_iv=float(row[9]) if row[9] is not None else None, winning_outcome=str(row[10]),
-            checkpoint_target_at=datetime.fromisoformat(str(row[11])), checkpoint_delay_seconds=float(row[12]),
-            eligible_for_calibration=bool(row[13]),
-        ) for row in rows)
+        return tuple(
+            CheckpointObservation(
+                market_id=str(row[0]),
+                symbol=str(row[1]),
+                checkpoint_date=str(row[2]),
+                checkpoint_name=str(row[3]),
+                evaluated_at=datetime.fromisoformat(str(row[4])),
+                fair_up_probability=float(row[5]),
+                up_ask=float(row[6]) if row[6] is not None else None,
+                down_ask=float(row[7]) if row[7] is not None else None,
+                model_version=str(row[8]),
+                option_iv=float(row[9]) if row[9] is not None else None,
+                winning_outcome=str(row[10]),
+                checkpoint_target_at=datetime.fromisoformat(str(row[11])),
+                checkpoint_delay_seconds=float(row[12]),
+                eligible_for_calibration=bool(row[13]),
+            )
+            for row in rows
+        )
 
     def list_buffer_sweep_observations(self) -> tuple[BufferSweepObservation, ...]:
         """Return immutable, on-time checkpoints with their original executable costs."""
@@ -765,23 +892,31 @@ class ShadowJournal:
         for row in rows:
             payload = json.loads(str(row[8]))
             comparison_models = payload.get("comparison_models")
-            observations.append(BufferSweepObservation(
-                market_id=str(row[0]), symbol=str(row[1]), checkpoint_date=str(row[2]), checkpoint_name=str(row[3]),
-                evaluated_at=datetime.fromisoformat(str(row[4])), fair_up_probability=float(row[5]),
-                up_ask=float(row[6]) if row[6] is not None else None,
-                down_ask=float(row[7]) if row[7] is not None else None,
-                up_taker_fee=_payload_execution_fee(payload, "up"),
-                down_taker_fee=_payload_execution_fee(payload, "down"), winning_outcome=str(row[9]),
-                spot=_optional_float(payload.get("spot")),
-                price_to_beat=_optional_float(payload.get("price_to_beat")),
-                up_bid=_optional_float(payload.get("up_bid")), down_bid=_optional_float(payload.get("down_bid")),
-                annualized_volatility=_optional_float(payload.get("annualized_realized_volatility")),
-                cross_source_difference=_optional_float(payload.get("cross_source_difference")),
-                comparison_models=tuple(
-                    dict(item) for item in comparison_models if isinstance(item, Mapping)
-                ) if isinstance(comparison_models, list) else (),
-                payload=payload,
-            ))
+            observations.append(
+                BufferSweepObservation(
+                    market_id=str(row[0]),
+                    symbol=str(row[1]),
+                    checkpoint_date=str(row[2]),
+                    checkpoint_name=str(row[3]),
+                    evaluated_at=datetime.fromisoformat(str(row[4])),
+                    fair_up_probability=float(row[5]),
+                    up_ask=float(row[6]) if row[6] is not None else None,
+                    down_ask=float(row[7]) if row[7] is not None else None,
+                    up_taker_fee=_payload_execution_fee(payload, "up"),
+                    down_taker_fee=_payload_execution_fee(payload, "down"),
+                    winning_outcome=str(row[9]),
+                    spot=read_spot(payload),
+                    price_to_beat=read_threshold(payload),
+                    up_bid=_optional_float(payload.get("up_bid")),
+                    down_bid=_optional_float(payload.get("down_bid")),
+                    annualized_volatility=_optional_float(payload.get("annualized_realized_volatility")),
+                    cross_source_difference=_optional_float(payload.get("cross_source_difference")),
+                    comparison_models=tuple(dict(item) for item in comparison_models if isinstance(item, Mapping))
+                    if isinstance(comparison_models, list)
+                    else (),
+                    payload=payload,
+                )
+            )
         return tuple(observations)
 
     def list_execution_observations(self) -> tuple[ExecutionObservation, ...]:
@@ -791,17 +926,32 @@ class ShadowJournal:
           FROM execution_observations ORDER BY observed_at, id"""
         with _database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
-        return tuple(ExecutionObservation(
-            observed_at=datetime.fromisoformat(str(row[0])), signal_id=str(row[1]) if row[1] else None,
-            observation_kind=str(row[2]), market_id=str(row[3]), symbol=str(row[4]), outcome=str(row[5]),
-            token_id=str(row[6]), spot=_optional_float(row[7]), price_to_beat=_optional_float(row[8]),
-            fair_probability=_optional_float(row[9]), best_bid=_optional_float(row[10]),
-            best_ask=_optional_float(row[11]), fee_rate=_optional_float(row[12]),
-            book_payload=json.loads(str(row[13])), evaluation_payload=json.loads(str(row[14])),
-        ) for row in rows)
+        return tuple(
+            ExecutionObservation(
+                observed_at=datetime.fromisoformat(str(row[0])),
+                signal_id=str(row[1]) if row[1] else None,
+                observation_kind=str(row[2]),
+                market_id=str(row[3]),
+                symbol=str(row[4]),
+                outcome=str(row[5]),
+                token_id=str(row[6]),
+                spot=_optional_float(row[7]),
+                price_to_beat=_optional_float(row[8]),
+                fair_probability=_optional_float(row[9]),
+                best_bid=_optional_float(row[10]),
+                best_ask=_optional_float(row[11]),
+                fee_rate=_optional_float(row[12]),
+                book_payload=json.loads(str(row[13])),
+                evaluation_payload=json.loads(str(row[14])),
+            )
+            for row in rows
+        )
 
     def list_spot_observations(
-        self, *, source: str | None = None, market_date: date | None = None,
+        self,
+        *,
+        source: str | None = None,
+        market_date: date | None = None,
         sample_every_seconds: int = 1,
     ) -> tuple[StoredSpotObservation, ...]:
         if sample_every_seconds < 1:
@@ -826,10 +976,16 @@ class ShadowJournal:
         query += " ORDER BY observed_at, id"
         with _database_connection(self.path) as connection:
             rows = connection.execute(query, tuple(parameters)).fetchall()
-        return tuple(StoredSpotObservation(
-            observed_at=datetime.fromisoformat(str(row[0])), source=str(row[1]), symbol=str(row[2]),
-            price=float(row[3]), published_at=datetime.fromisoformat(str(row[4])) if row[4] else None,
-        ) for row in rows)
+        return tuple(
+            StoredSpotObservation(
+                observed_at=datetime.fromisoformat(str(row[0])),
+                source=str(row[1]),
+                symbol=str(row[2]),
+                price=float(row[3]),
+                published_at=datetime.fromisoformat(str(row[4])) if row[4] else None,
+            )
+            for row in rows
+        )
 
     def list_spot_source_comparisons(self, *, sample_every_seconds: int = 1) -> tuple[SpotSourceComparison, ...]:
         if sample_every_seconds < 1:
@@ -843,13 +999,20 @@ class ShadowJournal:
         query += " ORDER BY observed_at, id"
         with _database_connection(self.path) as connection:
             rows = connection.execute(query, parameters).fetchall()
-        return tuple(SpotSourceComparison(
-            observed_at=datetime.fromisoformat(str(row[0])), symbol=str(row[1]), primary_source=str(row[2]),
-            primary_price=float(row[3]), pyth_price=float(row[4]), pyth_confidence=_optional_float(row[5]),
-            difference_bps=float(row[6]),
-            primary_published_at=datetime.fromisoformat(str(row[7])) if row[7] else None,
-            pyth_published_at=datetime.fromisoformat(str(row[8])) if row[8] else None,
-        ) for row in rows)
+        return tuple(
+            SpotSourceComparison(
+                observed_at=datetime.fromisoformat(str(row[0])),
+                symbol=str(row[1]),
+                primary_source=str(row[2]),
+                primary_price=float(row[3]),
+                pyth_price=float(row[4]),
+                pyth_confidence=_optional_float(row[5]),
+                difference_bps=float(row[6]),
+                primary_published_at=datetime.fromisoformat(str(row[7])) if row[7] else None,
+                pyth_published_at=datetime.fromisoformat(str(row[8])) if row[8] else None,
+            )
+            for row in rows
+        )
 
     def record_contract_review(
         self, market_id: str, *, accepted: bool, reason: str, contract: Mapping[str, object] | None = None
@@ -861,7 +1024,10 @@ class ShadowJournal:
                 ON CONFLICT(market_id) DO UPDATE SET reviewed_at=excluded.reviewed_at, status=excluded.status,
                     reason=excluded.reason, contract_json=excluded.contract_json""",
                 (
-                    market_id, datetime.now(UTC).isoformat(), "ACCEPTED" if accepted else "REJECTED", reason,
+                    market_id,
+                    datetime.now(UTC).isoformat(),
+                    "ACCEPTED" if accepted else "REJECTED",
+                    reason,
                     json.dumps(contract, sort_keys=True, separators=(",", ":"), default=str) if contract else None,
                 ),
             )
@@ -886,8 +1052,12 @@ class ShadowJournal:
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(market_id) DO UPDATE SET settled_at=excluded.settled_at,
                     winning_outcome=excluded.winning_outcome, payload_json=excluded.payload_json""",
-                (market_id, datetime.now(UTC).isoformat(), winning_outcome,
-                 json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)),
+                (
+                    market_id,
+                    datetime.now(UTC).isoformat(),
+                    winning_outcome,
+                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                ),
             )
 
     def pending_evaluation_market_ids(self, limit: int = 100) -> tuple[str, ...]:
@@ -896,7 +1066,8 @@ class ShadowJournal:
                 """SELECT DISTINCT market_id FROM realtime_evaluations
                 WHERE fair_up_probability IS NOT NULL
                   AND market_id NOT IN (SELECT market_id FROM market_settlements)
-                ORDER BY market_id LIMIT ?""", (limit,)
+                ORDER BY market_id LIMIT ?""",
+                (limit,),
             ).fetchall()
         return tuple(str(row[0]) for row in rows)
 
@@ -915,11 +1086,18 @@ class ShadowJournal:
           ORDER BY evaluation.evaluated_at ASC"""
         with _database_connection(self.path) as connection:
             rows = connection.execute(query).fetchall()
-        return tuple(ReplayObservation(
-            market_id=str(row[0]), symbol=str(row[1]), evaluated_at=datetime.fromisoformat(str(row[2])),
-            fair_up_probability=float(row[3]), up_ask=float(row[4]) if row[4] is not None else None,
-            down_ask=float(row[5]) if row[5] is not None else None, winning_outcome=str(row[6]),
-        ) for row in rows)
+        return tuple(
+            ReplayObservation(
+                market_id=str(row[0]),
+                symbol=str(row[1]),
+                evaluated_at=datetime.fromisoformat(str(row[2])),
+                fair_up_probability=float(row[3]),
+                up_ask=float(row[4]) if row[4] is not None else None,
+                down_ask=float(row[5]) if row[5] is not None else None,
+                winning_outcome=str(row[6]),
+            )
+            for row in rows
+        )
 
     def list_first_signal_calibration_observations(self) -> tuple[FirstSignalCalibrationObservation, ...]:
         """Return exactly one pre-settlement model signal per officially settled market.
@@ -951,24 +1129,30 @@ class ShadowJournal:
             fair_up = float(row[3])
             entry_ask = float(row[4] if outcome == "UP" else row[5])
             entry_fee_value = payload.get("up_taker_fee") if outcome == "UP" else payload.get("down_taker_fee")
-            spot = payload.get("spot")
-            threshold = payload.get("prior_close")
+            spot = read_spot(payload)
+            threshold = read_threshold(payload)
             threshold_distance_bps = None
             if spot is not None and threshold is not None and float(threshold) > 0:
                 threshold_distance_bps = (float(spot) / float(threshold) - 1.0) * 10_000
             option_iv_status = str(payload.get("option_iv_status") or "IV_UNAVAILABLE")
-            observations.append(FirstSignalCalibrationObservation(
-                market_id=str(row[1]), symbol=str(row[2]), evaluated_at=datetime.fromisoformat(str(row[0])),
-                model_outcome=outcome,
-                selected_fair_probability=fair_up if outcome == "UP" else 1.0 - fair_up,
-                entry_ask=entry_ask, entry_fee=float(entry_fee_value) if entry_fee_value is not None else None,
-                winning_outcome=str(row[8]), model_version=str(payload.get("model_version") or "unknown"),
-                option_iv_status=option_iv_status,
-                iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
-                spot_provider=str(payload.get("spot_provider") or "unknown"),
-                threshold_distance_bps=threshold_distance_bps,
-                volatility_estimator=str(payload.get("volatility_estimator") or "CLOSE_TO_CLOSE"),
-            ))
+            observations.append(
+                FirstSignalCalibrationObservation(
+                    market_id=str(row[1]),
+                    symbol=str(row[2]),
+                    evaluated_at=datetime.fromisoformat(str(row[0])),
+                    model_outcome=outcome,
+                    selected_fair_probability=fair_up if outcome == "UP" else 1.0 - fair_up,
+                    entry_ask=entry_ask,
+                    entry_fee=float(entry_fee_value) if entry_fee_value is not None else None,
+                    winning_outcome=str(row[8]),
+                    model_version=str(payload.get("model_version") or "unknown"),
+                    option_iv_status=option_iv_status,
+                    iv_regime="IV_VALID" if option_iv_status == "IV_VALID" else "REALIZED_VOL_FALLBACK",
+                    spot_provider=str(payload.get("spot_provider") or "unknown"),
+                    threshold_distance_bps=threshold_distance_bps,
+                    volatility_estimator=str(payload.get("volatility_estimator") or "CLOSE_TO_CLOSE"),
+                )
+            )
         return tuple(observations)
 
     def first_signal_performance(self) -> Mapping[str, object]:
@@ -1001,7 +1185,10 @@ class ShadowJournal:
         }
 
     def dashboard_rows(
-        self, limit: int = 18, *, now: datetime | None = None,
+        self,
+        limit: int = 18,
+        *,
+        now: datetime | None = None,
     ) -> tuple[Mapping[str, object], ...]:
         """Return stable symbol rows with immutable same-day checkpoint decisions."""
         if limit < 1:
@@ -1014,13 +1201,15 @@ class ShadowJournal:
                 JOIN market_candidates AS candidate ON candidate.market_id = evaluation.market_id
                 WHERE evaluation.id IN (SELECT MAX(id) FROM realtime_evaluations GROUP BY market_id)
                   AND date(candidate.end_date) = ?
-                ORDER BY evaluation.evaluated_at DESC""", (ny_date,)
+                ORDER BY evaluation.evaluated_at DESC""",
+                (ny_date,),
             ).fetchall()
             checkpoint_rows = connection.execute(
                 """SELECT market_id, checkpoint_name, payload_json FROM checkpoint_observations
                 WHERE checkpoint_date = ? AND eligible_for_calibration = 1
                   AND checkpoint_name IN ('1200_EDT', '1400_EDT', '1530_EDT')
-                ORDER BY evaluated_at, id""", (ny_date,)
+                ORDER BY evaluated_at, id""",
+                (ny_date,),
             ).fetchall()
 
         # Old journals can contain overlapping regular and after-hours contracts.
@@ -1034,8 +1223,10 @@ class ShadowJournal:
             current = by_symbol.get(symbol)
             candidate_rank = (payload.get("market_session") == "REGULAR", str(payload.get("evaluated_at") or ""))
             current_rank = (
-                current.get("market_session") == "REGULAR", str(current.get("evaluated_at") or "")
-            ) if current else (False, "")
+                (current.get("market_session") == "REGULAR", str(current.get("evaluated_at") or ""))
+                if current
+                else (False, "")
+            )
             if current is None or candidate_rank > current_rank:
                 by_symbol[symbol] = payload
 
@@ -1087,17 +1278,29 @@ class ShadowJournal:
             ).fetchone()
             if open_row is not None:
                 return _paper_position_from_row(open_row), False
-            inserted = connection.execute(
-                """INSERT OR IGNORE INTO paper_positions (
+            inserted = (
+                connection.execute(
+                    """INSERT OR IGNORE INTO paper_positions (
                     position_id, opened_at, market_id, symbol, outcome, status, contracts,
                     entry_ask, entry_fee, entry_slippage, fair_probability, model_version, entry_payload_json
                 ) VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    position_id, timestamp.isoformat(), market_id, symbol.upper(), outcome, contracts,
-                    entry_ask, entry_fee, entry_slippage, fair_probability, model_version,
-                    json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
-                ),
-            ).rowcount == 1
+                    (
+                        position_id,
+                        timestamp.isoformat(),
+                        market_id,
+                        symbol.upper(),
+                        outcome,
+                        contracts,
+                        entry_ask,
+                        entry_fee,
+                        entry_slippage,
+                        fair_probability,
+                        model_version,
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                    ),
+                ).rowcount
+                == 1
+            )
             row = connection.execute(
                 """SELECT position_id, opened_at, market_id, symbol, outcome, status, contracts,
                     entry_ask, entry_fee, entry_slippage, fair_probability, model_version,
@@ -1137,7 +1340,11 @@ class ShadowJournal:
             raise ValueError("observed_at must be timezone-aware")
         has_proposal = None not in (limit_price, fair_probability, theoretical_edge, best_bid, best_ask)
         if has_proposal:
-            if not (0 < float(limit_price) < 1 and 0 <= float(fair_probability) <= 1 and 0 <= float(best_bid) <= float(best_ask) <= 1):
+            if not (
+                0 < float(limit_price) < 1
+                and 0 <= float(fair_probability) <= 1
+                and 0 <= float(best_bid) <= float(best_ask) <= 1
+            ):
                 raise ValueError("invalid maker quote proposal")
         with _database_connection(self.path) as connection:
             row = connection.execute(
@@ -1162,33 +1369,50 @@ class ShadowJournal:
                     """UPDATE maker_shadow_quotes SET last_observed_at = ?, fair_probability = ?,
                     theoretical_edge = ?, best_bid = ?, best_ask = ?, payload_json = ? WHERE quote_id = ?""",
                     (
-                        timestamp.isoformat(), fair_probability, theoretical_edge, best_bid, best_ask,
-                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str), active.quote_id,
+                        timestamp.isoformat(),
+                        fair_probability,
+                        theoretical_edge,
+                        best_bid,
+                        best_ask,
+                        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                        active.quote_id,
                     ),
                 )
                 return replace(
-                    active, last_observed_at=timestamp, fair_probability=float(fair_probability),
-                    theoretical_edge=float(theoretical_edge), best_bid=float(best_bid), best_ask=float(best_ask),
+                    active,
+                    last_observed_at=timestamp,
+                    fair_probability=float(fair_probability),
+                    theoretical_edge=float(theoretical_edge),
+                    best_bid=float(best_bid),
+                    best_ask=float(best_ask),
                 ), None
             if active is not None:
                 price_change = abs(active.limit_price - float(limit_price))
                 quote_age_seconds = max(0.0, (timestamp - active.created_at).total_seconds())
                 should_hold = (
-                    price_change < minimum_reprice_price_change
-                    or quote_age_seconds < minimum_quote_lifetime_seconds
+                    price_change < minimum_reprice_price_change or quote_age_seconds < minimum_quote_lifetime_seconds
                 )
                 if should_hold:
                     connection.execute(
                         """UPDATE maker_shadow_quotes SET last_observed_at = ?, fair_probability = ?,
                         theoretical_edge = ?, best_bid = ?, best_ask = ?, payload_json = ? WHERE quote_id = ?""",
                         (
-                            timestamp.isoformat(), fair_probability, theoretical_edge, best_bid, best_ask,
-                            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str), active.quote_id,
+                            timestamp.isoformat(),
+                            fair_probability,
+                            theoretical_edge,
+                            best_bid,
+                            best_ask,
+                            json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
+                            active.quote_id,
                         ),
                     )
                     return replace(
-                        active, last_observed_at=timestamp, fair_probability=float(fair_probability),
-                        theoretical_edge=float(theoretical_edge), best_bid=float(best_bid), best_ask=float(best_ask),
+                        active,
+                        last_observed_at=timestamp,
+                        fair_probability=float(fair_probability),
+                        theoretical_edge=float(theoretical_edge),
+                        best_bid=float(best_bid),
+                        best_ask=float(best_ask),
                     ), None
             action = "OPENED" if active is None else "REPRICED"
             if active is not None:
@@ -1204,8 +1428,17 @@ class ShadowJournal:
                     limit_price, fair_probability, theoretical_edge, best_bid, best_ask, payload_json
                 ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?)""",
                 (
-                    quote_id, timestamp.isoformat(), timestamp.isoformat(), market_id, symbol.upper(), outcome,
-                    limit_price, fair_probability, theoretical_edge, best_bid, best_ask,
+                    quote_id,
+                    timestamp.isoformat(),
+                    timestamp.isoformat(),
+                    market_id,
+                    symbol.upper(),
+                    outcome,
+                    limit_price,
+                    fair_probability,
+                    theoretical_edge,
+                    best_bid,
+                    best_ask,
                     json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str),
                 ),
             )
@@ -1230,7 +1463,8 @@ class ShadowJournal:
         with _database_connection(self.path) as connection:
             row = connection.execute(
                 """SELECT quote_id, limit_price FROM maker_shadow_quotes
-                WHERE market_id = ? AND outcome = ? AND status = 'ACTIVE'""", (market_id, outcome)
+                WHERE market_id = ? AND outcome = ? AND status = 'ACTIVE'""",
+                (market_id, outcome),
             ).fetchone()
             if row is None or current_ask > float(row[1]):
                 return None
@@ -1314,13 +1548,19 @@ class ShadowJournal:
             if position.status == "SETTLED":
                 return position
             payout = position.contracts if position.outcome == settlement_outcome else 0.0
-            realized_pnl = payout - (position.entry_ask * position.contracts + position.entry_fee + position.entry_slippage)
+            realized_pnl = payout - (
+                position.entry_ask * position.contracts + position.entry_fee + position.entry_slippage
+            )
             connection.execute(
                 """UPDATE paper_positions SET status = 'SETTLED', settled_at = ?, settlement_outcome = ?,
                     payout = ?, realized_pnl = ?, settlement_payload_json = ? WHERE position_id = ?""",
                 (
-                    timestamp.isoformat(), settlement_outcome, payout, realized_pnl,
-                    json.dumps(settlement_payload, sort_keys=True, separators=(",", ":"), default=str), position_id,
+                    timestamp.isoformat(),
+                    settlement_outcome,
+                    payout,
+                    realized_pnl,
+                    json.dumps(settlement_payload, sort_keys=True, separators=(",", ":"), default=str),
+                    position_id,
                 ),
             )
             row = connection.execute(
@@ -1359,24 +1599,42 @@ def _optional_float(value: object) -> float | None:
 
 def _paper_position_from_row(row: tuple[object, ...]) -> PaperPosition:
     return PaperPosition(
-        position_id=str(row[0]), opened_at=datetime.fromisoformat(str(row[1])), market_id=str(row[2]),
-        symbol=str(row[3]), outcome=str(row[4]), status=str(row[5]), contracts=float(row[6]),
-        entry_ask=float(row[7]), entry_fee=float(row[8]), entry_slippage=float(row[9]),
-        fair_probability=float(row[10]), model_version=str(row[11]),
+        position_id=str(row[0]),
+        opened_at=datetime.fromisoformat(str(row[1])),
+        market_id=str(row[2]),
+        symbol=str(row[3]),
+        outcome=str(row[4]),
+        status=str(row[5]),
+        contracts=float(row[6]),
+        entry_ask=float(row[7]),
+        entry_fee=float(row[8]),
+        entry_slippage=float(row[9]),
+        fair_probability=float(row[10]),
+        model_version=str(row[11]),
         settled_at=datetime.fromisoformat(str(row[12])) if row[12] else None,
         settlement_outcome=str(row[13]) if row[13] else None,
         payout=float(row[14]) if row[14] is not None else None,
         realized_pnl=float(row[15]) if row[15] is not None else None,
-        included_in_calibration=bool(row[16]), exclusion_reason=str(row[17]) if row[17] else None,
+        included_in_calibration=bool(row[16]),
+        exclusion_reason=str(row[17]) if row[17] else None,
     )
 
 
 def _maker_shadow_quote_from_row(row: tuple[object, ...]) -> MakerShadowQuote:
     return MakerShadowQuote(
-        quote_id=str(row[0]), created_at=datetime.fromisoformat(str(row[1])),
-        last_observed_at=datetime.fromisoformat(str(row[2])), market_id=str(row[3]), symbol=str(row[4]),
-        outcome=str(row[5]), status=str(row[6]), limit_price=float(row[7]), fair_probability=float(row[8]),
-        theoretical_edge=float(row[9]), best_bid=float(row[10]), best_ask=float(row[11]), touch_count=int(row[12]),
+        quote_id=str(row[0]),
+        created_at=datetime.fromisoformat(str(row[1])),
+        last_observed_at=datetime.fromisoformat(str(row[2])),
+        market_id=str(row[3]),
+        symbol=str(row[4]),
+        outcome=str(row[5]),
+        status=str(row[6]),
+        limit_price=float(row[7]),
+        fair_probability=float(row[8]),
+        theoretical_edge=float(row[9]),
+        best_bid=float(row[10]),
+        best_ask=float(row[11]),
+        touch_count=int(row[12]),
         last_touched_at=datetime.fromisoformat(str(row[13])) if row[13] else None,
         cancelled_at=datetime.fromisoformat(str(row[14])) if row[14] else None,
         cancel_reason=str(row[15]) if row[15] else None,

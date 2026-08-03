@@ -42,12 +42,23 @@ class ResearchTests(unittest.TestCase):
         option_price = black_scholes_price(101, 100, 0.50, (EXPIRY - NOW).total_seconds(), "call")
         quote = OptionQuote("CALL", "call", 100, option_price - 0.01, option_price + 0.01, NOW, EXPIRY)
         evaluation = evaluate_daily_direction(
-            market_id="test", spot=101, prior_close=100, now=NOW, resolves_at=NOW + timedelta(hours=4),
+            market_id="test",
+            spot=101,
+            prior_close=100,
+            now=NOW,
+            resolves_at=NOW + timedelta(hours=4),
             volatility_regime=VolatilityRegime(overnight_annual=0.60, regular_annual=0.30),
-            overnight_seconds=3600, regular_seconds=3 * 3600, option_quotes=[quote],
-            up_ask=0.40, down_ask=0.60, up_fee_rate=0.04, down_fee_rate=0.04,
-            model_error_buffer=0.02, minimum_edge=0.01,
-            events=[ScheduledRiskEvent("CPI", NOW + timedelta(hours=2), blocking=True)], halted=False,
+            overnight_seconds=3600,
+            regular_seconds=3 * 3600,
+            option_quotes=[quote],
+            up_ask=0.40,
+            down_ask=0.60,
+            up_fee_rate=0.04,
+            down_fee_rate=0.04,
+            model_error_buffer=0.02,
+            minimum_edge=0.01,
+            events=[ScheduledRiskEvent("CPI", NOW + timedelta(hours=2), blocking=True)],
+            halted=False,
         )
         self.assertFalse(evaluation.risk_passed)
         self.assertIsNone(evaluation.paper_outcome)

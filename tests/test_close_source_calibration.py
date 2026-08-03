@@ -15,7 +15,9 @@ class FakePythHistory:
 class CloseSourceCalibrationTests(unittest.TestCase):
     def test_reports_direction_flip_against_prior_pyth_close(self):
         report = calibrate_close_sources(
-            client=FakePythHistory(), market_date=date(2026, 7, 31), symbols=("TSLA",),
+            client=FakePythHistory(),
+            market_date=date(2026, 7, 31),
+            symbols=("TSLA",),
             finnhub_spots=(SpotQuote("FINNHUB", "TSLA", 99.99, datetime(2026, 7, 31, 19, 59, 30, tzinfo=UTC)),),
         )
         item = report.observations[0]
@@ -27,7 +29,9 @@ class CloseSourceCalibrationTests(unittest.TestCase):
 
     def test_reports_missing_finnhub_close_window_without_guessing(self):
         report = calibrate_close_sources(
-            client=FakePythHistory(), market_date=date(2026, 7, 31), symbols=("NVDA",),
+            client=FakePythHistory(),
+            market_date=date(2026, 7, 31),
+            symbols=("NVDA",),
             finnhub_spots=(SpotQuote("FINNHUB", "NVDA", 99.0, datetime(2026, 7, 31, 19, 58, 59, tzinfo=UTC)),),
         )
         item = report.observations[0]

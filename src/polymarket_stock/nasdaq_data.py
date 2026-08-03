@@ -76,7 +76,12 @@ def save_baseline_cache(path: Path, quote: NasdaqQuote, closes: list[DailyClose]
     path.write_text(
         json.dumps(
             {
-                "quote": {"symbol": quote.symbol, "price": quote.price, "last_trade_at": quote.last_trade_at.isoformat(), "is_real_time": quote.is_real_time},
+                "quote": {
+                    "symbol": quote.symbol,
+                    "price": quote.price,
+                    "last_trade_at": quote.last_trade_at.isoformat(),
+                    "is_real_time": quote.is_real_time,
+                },
                 "closes": [{"date": close.date, "close": close.close} for close in closes],
             },
             sort_keys=True,
@@ -90,7 +95,8 @@ def load_baseline_cache(path: Path) -> tuple[NasdaqQuote, list[DailyClose]]:
         payload = json.loads(path.read_text(encoding="utf-8"))
         quote_data = payload["quote"]
         quote = NasdaqQuote(
-            symbol=str(quote_data["symbol"]), price=float(quote_data["price"]),
+            symbol=str(quote_data["symbol"]),
+            price=float(quote_data["price"]),
             last_trade_at=datetime.fromisoformat(quote_data["last_trade_at"]),
             is_real_time=bool(quote_data["is_real_time"]),
         )

@@ -1,3 +1,5 @@
+Read `spec.md` before any change.
+
 # Repository SOP
 
 ## Canonical root
@@ -5,19 +7,19 @@
 All work for this repository uses exactly one root:
 
 ```text
-/Users/cheng-kaihuang/Polymarket-stock
+$REPO_ROOT
 ```
 
 Before modifying files, running tests, staging, or pushing, verify:
 
 ```zsh
-ROOT=/Users/cheng-kaihuang/Polymarket-stock
+ROOT=$REPO_ROOT
 test "$(git -C "$ROOT" rev-parse --show-toplevel)" = "$ROOT"
 ```
 
 Use absolute paths or explicit `git -C "$ROOT"` commands. Do not rely on an
 editor, agent, or patch tool's implicit CWD. If the environment reports
-`/Users/cheng-kaihuang/Documents/Polymarket-stock`, treat it as stale session
+`$STALE_REPO_ROOT`, treat it as stale session
 metadata: do not write there and reopen the task against the canonical root.
 
 ## Data and safety

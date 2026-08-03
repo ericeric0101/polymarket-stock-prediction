@@ -28,6 +28,16 @@ class JournalWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([str(error) for error in failures], ["write failure"])
         self.assertEqual(completed, ["after-error"])
 
+    async def test_writer_survives_error_handler_failure(self) -> None:
+        completed: list[str] = []
+        writer = JournalWriter(on_error=lambda _error: (_ for _ in ()).throw(RuntimeError("sink failure")))
+        await writer.start()
+        writer.submit(lambda: (_ for _ in ()).throw(RuntimeError("write failure")))
+        writer.submit(lambda: completed.append("after-error"))
+        await writer.drain(timeout_seconds=1.0)
+        await writer.close()
+        self.assertEqual(completed, ["after-error"])
+
 
 if __name__ == "__main__":
     unittest.main()

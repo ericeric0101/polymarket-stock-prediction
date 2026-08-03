@@ -33,16 +33,25 @@ class CheckpointTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             payload = {
-                "evaluated_at": "2026-07-20T14:00:01+00:00", "market_id": "market-1", "symbol": "TSLA",
-                "fair_up_probability": 0.61, "up_ask": 0.55, "down_ask": 0.46,
-                "option_iv": None, "model_version": "realized-vol-baseline-v1",
+                "evaluated_at": "2026-07-20T14:00:01+00:00",
+                "market_id": "market-1",
+                "symbol": "TSLA",
+                "fair_up_probability": 0.61,
+                "up_ask": 0.55,
+                "down_ask": 0.46,
+                "option_iv": None,
+                "model_version": "realized-vol-baseline-v1",
             }
-            self.assertTrue(journal.record_checkpoint_observation(
-                checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
-            ))
-            self.assertFalse(journal.record_checkpoint_observation(
-                checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
-            ))
+            self.assertTrue(
+                journal.record_checkpoint_observation(
+                    checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
+                )
+            )
+            self.assertFalse(
+                journal.record_checkpoint_observation(
+                    checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
+                )
+            )
             journal.record_market_settlement("market-1", "UP", {"id": "market-1"})
             observations = journal.list_checkpoint_observations(eligible_only=False)
             self.assertTrue(observations[0].eligible_for_calibration)
@@ -52,13 +61,20 @@ class CheckpointTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             payload = {
-                "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": "late-market", "symbol": "TSLA",
-                "fair_up_probability": 0.61, "up_ask": 0.55, "down_ask": 0.46,
-                "option_iv": None, "model_version": "realized-vol-baseline-v1",
+                "evaluated_at": "2026-07-20T15:00:00+00:00",
+                "market_id": "late-market",
+                "symbol": "TSLA",
+                "fair_up_probability": 0.61,
+                "up_ask": 0.55,
+                "down_ask": 0.46,
+                "option_iv": None,
+                "model_version": "realized-vol-baseline-v1",
             }
-            self.assertTrue(journal.record_checkpoint_observation(
-                checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
-            ))
+            self.assertTrue(
+                journal.record_checkpoint_observation(
+                    checkpoint_date="2026-07-20", checkpoint_name="1000_EDT", payload=payload
+                )
+            )
             journal.record_market_settlement("late-market", "UP", {"id": "late-market"})
             self.assertEqual(journal.list_checkpoint_observations(), ())
             observation = journal.list_checkpoint_observations(eligible_only=False)[0]

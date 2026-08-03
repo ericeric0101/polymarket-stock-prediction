@@ -9,11 +9,20 @@ from polymarket_stock.pyth_benchmarks import PythBenchmarksClient, PythPayloadEr
 class PythBenchmarksTests(unittest.TestCase):
     def test_resolves_equity_feed_and_scales_price(self) -> None:
         feed_id = "feed-id"
+
         def fake_get_json(url, params):
             if "price_feeds" in url:
                 return [{"id": feed_id, "attributes": {"symbol": "Equity.US.TSLA/USD"}}]
             self.assertEqual(params, {"ids": feed_id})
-            return {"parsed": [{"id": feed_id, "price": {"price": "36958009", "conf": "44951", "expo": -5, "publish_time": 1784577600}}]}
+            return {
+                "parsed": [
+                    {
+                        "id": feed_id,
+                        "price": {"price": "36958009", "conf": "44951", "expo": -5, "publish_time": 1784577600},
+                    }
+                ]
+            }
+
         client = PythBenchmarksClient(fake_get_json)
         self.assertEqual(client.equity_feed_id("tsla"), feed_id)
         quote = client.price_at(symbol="TSLA", feed_id=feed_id, observed_at=datetime(2026, 7, 20, 20, tzinfo=UTC))
@@ -32,6 +41,10 @@ class PythBenchmarksTests(unittest.TestCase):
         self.assertEqual(captured["headers"], {"Authorization": "Bearer key"})
 
     def test_rejects_price_before_requested_timestamp(self) -> None:
-        client = PythBenchmarksClient(lambda _url, _params: {"parsed": [{"id": "feed", "price": {"price": "1", "conf": "1", "expo": 0, "publish_time": 1}}]})
+        client = PythBenchmarksClient(
+            lambda _url, _params: {
+                "parsed": [{"id": "feed", "price": {"price": "1", "conf": "1", "expo": 0, "publish_time": 1}}]
+            }
+        )
         with self.assertRaises(PythPayloadError):
             client.price_at(symbol="TSLA", feed_id="feed", observed_at=datetime(2026, 7, 20, 20, tzinfo=UTC))

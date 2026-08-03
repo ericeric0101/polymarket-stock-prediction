@@ -59,7 +59,9 @@ class OrderBookSnapshot:
         return (self.best_bid + self.best_ask) / 2
 
     @classmethod
-    def from_clob_payload(cls, token_id: str, payload: Mapping[str, object], observed_at: datetime | None = None) -> "OrderBookSnapshot":
+    def from_clob_payload(
+        cls, token_id: str, payload: Mapping[str, object], observed_at: datetime | None = None
+    ) -> "OrderBookSnapshot":
         bids_raw = payload.get("bids")
         asks_raw = payload.get("asks")
         if not isinstance(bids_raw, list) or not isinstance(asks_raw, list):

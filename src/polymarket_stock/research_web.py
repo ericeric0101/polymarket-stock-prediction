@@ -10,7 +10,7 @@ from typing import Callable, Mapping
 from .cross_market import research_dashboard_state
 
 
-HTML = r'''<!doctype html>
+HTML = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -46,13 +46,18 @@ function renderDistribution(){const curves=state.ladder_curves||[];const select=
 function drawCurve(canvas,curve){const dpr=window.devicePixelRatio||1;const rect=canvas.getBoundingClientRect();canvas.width=Math.max(600,rect.width*dpr);canvas.height=Math.max(300,rect.height*dpr);const c=canvas.getContext('2d');c.scale(dpr,dpr);const w=canvas.width/dpr,h=canvas.height/dpr,p={l:58,r:24,t:24,b:42};c.clearRect(0,0,w,h);const pts=curve.points,xmin=pts[0].strike,xmax=pts[pts.length-1].strike;const x=v=>p.l+(v-xmin)/Math.max(xmax-xmin,1)*(w-p.l-p.r),y=v=>p.t+(1-v)*(h-p.t-p.b);c.strokeStyle='#30353a';c.fillStyle='#969da5';c.font='12px ui-monospace';for(let q=0;q<=1.001;q+=.25){c.beginPath();c.moveTo(p.l,y(q));c.lineTo(w-p.r,y(q));c.stroke();c.fillText((q*100).toFixed(0)+'%',8,y(q)+4)}pts.forEach(pt=>c.fillText('$'+pt.strike,x(pt.strike)-18,h-15));c.beginPath();pts.forEach((pt,i)=>{const xx=x(pt.strike),yy=y(pt.upper_bound);i?c.lineTo(xx,yy):c.moveTo(xx,yy)});[...pts].reverse().forEach(pt=>c.lineTo(x(pt.strike),y(pt.lower_bound)));c.closePath();c.fillStyle='rgba(215,198,74,.16)';c.fill();c.strokeStyle='#39c5d8';c.lineWidth=2;c.beginPath();pts.forEach((pt,i)=>{const xx=x(pt.strike),yy=y(pt.adjusted_probability);i?c.lineTo(xx,yy):c.moveTo(xx,yy)});c.stroke();pts.forEach(pt=>{c.fillStyle='#39c5d8';c.beginPath();c.arc(x(pt.strike),y(pt.adjusted_probability),3,0,Math.PI*2);c.fill()})}
 async function refresh(){try{const r=await fetch('/api/state',{cache:'no-store'});state=await r.json();document.querySelector('#taipei-time').textContent=`TW ${zonedTime(state.generated_at,'Asia/Taipei')}`;document.querySelector('#new-york-time').textContent=`NY ${zonedTime(state.generated_at,'America/New_York')}`;renderLive();renderCore();renderPortfolio();renderCross();renderAboveX();renderDistribution()}catch(e){document.querySelector('#taipei-time').textContent='API unavailable';document.querySelector('#new-york-time').textContent='NY -'}}
 document.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab,.view').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelector('#'+b.dataset.view).classList.add('active');if(b.dataset.view==='distribution')renderDistribution()});document.querySelector('#symbol-select').onchange=renderDistribution;window.onresize=()=>{if(document.querySelector('#distribution').classList.contains('active'))renderDistribution()};refresh();setInterval(refresh,3000);
-</script></body></html>'''
+</script></body></html>"""
 
 
 class ResearchDashboardServer:
     def __init__(
-        self, journal_path: Path, *, host: str = "127.0.0.1", port: int = 8765,
-        limit: int = 18, daily_entry_limit: int = 5,
+        self,
+        journal_path: Path,
+        *,
+        host: str = "127.0.0.1",
+        port: int = 8765,
+        limit: int = 18,
+        daily_entry_limit: int = 5,
         state_fn: Callable[..., Mapping[str, object]] = research_dashboard_state,
     ) -> None:
         if host not in {"127.0.0.1", "localhost", "::1"}:
@@ -82,7 +87,8 @@ class ResearchDashboardServer:
                 if self.path == "/api/state":
                     payload = json.dumps(
                         state_fn(journal_path, limit=limit, daily_entry_limit=daily_entry_limit),
-                        sort_keys=True, default=str,
+                        sort_keys=True,
+                        default=str,
                     ).encode("utf-8")
                     self._send(200, "application/json", payload)
                     return
@@ -94,7 +100,10 @@ class ResearchDashboardServer:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
-                self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+                )
                 self.end_headers()
                 self.wfile.write(body)
 

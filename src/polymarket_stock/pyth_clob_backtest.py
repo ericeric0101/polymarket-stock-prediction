@@ -52,9 +52,15 @@ class PythClobBacktestReport:
 
 
 def run_pyth_clob_backtest(
-    *, data_dir: Path, buffers: Iterable[float], minimum_edge: float = 0.02,
-    lookback_days: int = 20, training_days: int = 20, validation_days: int = 5,
-    minimum_training_trades: int = 10, fee_rate: float = 0.0,
+    *,
+    data_dir: Path,
+    buffers: Iterable[float],
+    minimum_edge: float = 0.02,
+    lookback_days: int = 20,
+    training_days: int = 20,
+    validation_days: int = 5,
+    minimum_training_trades: int = 10,
+    fee_rate: float = 0.0,
     checkpoint_names: tuple[str, ...] = DEFAULT_CHECKPOINTS,
 ) -> PythClobBacktestReport:
     """Replay one entry per market-day from immutable local historical files.
@@ -85,7 +91,9 @@ def run_pyth_clob_backtest(
         down = _read_price_history(record.down_clob_path)
         spots = _read_spots(record.spot_path)
         for name, checkpoint_time in checkpoints:
-            evaluated_at = datetime.combine(datetime.fromisoformat(record.market_day).date(), checkpoint_time, tzinfo=NEW_YORK).astimezone(UTC)
+            evaluated_at = datetime.combine(
+                datetime.fromisoformat(record.market_day).date(), checkpoint_time, tzinfo=NEW_YORK
+            ).astimezone(UTC)
             up_point = _latest_at_or_before(up, evaluated_at)
             down_point = _latest_at_or_before(down, evaluated_at)
             spot = _latest_at_or_before(spots, evaluated_at)
@@ -95,29 +103,47 @@ def run_pyth_clob_backtest(
             if seconds_to_resolution <= 0:
                 continue
             fair_up = digital_up_probability(
-                spot=spot.spot, threshold=record.price_to_beat, annual_volatility=volatility,
+                spot=spot.spot,
+                threshold=record.price_to_beat,
+                annual_volatility=volatility,
                 time_to_resolution_seconds=seconds_to_resolution,
             )
-            observations.append(BufferSweepObservation(
-                market_id=record.market_id, symbol=record.symbol, checkpoint_date=record.market_day,
-                checkpoint_name=name, evaluated_at=evaluated_at, fair_up_probability=fair_up,
-                up_ask=up_point.price, down_ask=down_point.price,
-                up_taker_fee=estimate_taker_fee_usdc(shares=1, price=up_point.price, fee_rate=fee_rate),
-                down_taker_fee=estimate_taker_fee_usdc(shares=1, price=down_point.price, fee_rate=fee_rate),
-                winning_outcome=record.winning_outcome,
-            ))
+            observations.append(
+                BufferSweepObservation(
+                    market_id=record.market_id,
+                    symbol=record.symbol,
+                    checkpoint_date=record.market_day,
+                    checkpoint_name=name,
+                    evaluated_at=evaluated_at,
+                    fair_up_probability=fair_up,
+                    up_ask=up_point.price,
+                    down_ask=down_point.price,
+                    up_taker_fee=estimate_taker_fee_usdc(shares=1, price=up_point.price, fee_rate=fee_rate),
+                    down_taker_fee=estimate_taker_fee_usdc(shares=1, price=down_point.price, fee_rate=fee_rate),
+                    winning_outcome=record.winning_outcome,
+                )
+            )
     buffer_values = tuple(buffers)
     sweep = run_buffer_sweep(observations, buffers=buffer_values, minimum_edge=minimum_edge)
     walk_forward = walk_forward_buffer_sweep(
-        observations, buffers=buffer_values, minimum_edge=minimum_edge, training_days=training_days,
-        validation_days=validation_days, minimum_training_trades=minimum_training_trades,
+        observations,
+        buffers=buffer_values,
+        minimum_edge=minimum_edge,
+        training_days=training_days,
+        validation_days=validation_days,
+        minimum_training_trades=minimum_training_trades,
     )
     return PythClobBacktestReport(
         source="PYTH_PRO_HISTORY + POLYMARKET_CLOB_PRICE_HISTORY + POLYMARKET_GAMMA_SETTLEMENT",
         execution_price_assumption="CLOB_HISTORY_PRICE_PROXY_NOT_HISTORICAL_EXECUTABLE_ASK",
-        fee_rate_assumption=fee_rate, discovered_market_days=len(records), eligible_market_days=eligible_market_days,
-        skipped_market_days=len(records) - eligible_market_days, observation_count=len(observations),
-        checkpoints=tuple(name for name, _ in checkpoints), sweep=sweep, walk_forward=walk_forward,
+        fee_rate_assumption=fee_rate,
+        discovered_market_days=len(records),
+        eligible_market_days=eligible_market_days,
+        skipped_market_days=len(records) - eligible_market_days,
+        observation_count=len(observations),
+        checkpoints=tuple(name for name, _ in checkpoints),
+        sweep=sweep,
+        walk_forward=walk_forward,
     )
 
 
@@ -151,12 +177,22 @@ def _load_records(data_dir: Path) -> tuple[_Record, ...]:
         if winner not in {"UP", "DOWN"}:
             continue
         try:
-            records.append(_Record(
-                market_id=str(payload["market_id"]), symbol=str(payload["symbol"]).upper(), market_day=str(payload["market_day"]),
-                price_to_beat=float(payload["price_to_beat"]["price"]), final_price=float(payload["final_price"]["price"]),
-                resolves_at=datetime.fromisoformat(str(payload["final_price"]["requested_at"]).replace("Z", "+00:00")).astimezone(UTC),
-                winning_outcome=winner, up_clob_path=up_path, down_clob_path=down_path, spot_path=spot_path,
-            ))
+            records.append(
+                _Record(
+                    market_id=str(payload["market_id"]),
+                    symbol=str(payload["symbol"]).upper(),
+                    market_day=str(payload["market_day"]),
+                    price_to_beat=float(payload["price_to_beat"]["price"]),
+                    final_price=float(payload["final_price"]["price"]),
+                    resolves_at=datetime.fromisoformat(
+                        str(payload["final_price"]["requested_at"]).replace("Z", "+00:00")
+                    ).astimezone(UTC),
+                    winning_outcome=winner,
+                    up_clob_path=up_path,
+                    down_clob_path=down_path,
+                    spot_path=spot_path,
+                )
+            )
         except (KeyError, TypeError, ValueError) as error:
             raise ValueError(f"invalid historical record {reference_path.name}") from error
     return tuple(sorted(records, key=lambda record: (record.market_day, record.market_id)))
@@ -171,12 +207,18 @@ def _checkpoint_times(names: tuple[str, ...]) -> tuple[tuple[str, time], ...]:
 
 def _read_price_history(path: Path) -> tuple[PriceHistoryPoint, ...]:
     with path.open(newline="", encoding="utf-8") as handle:
-        return tuple(PriceHistoryPoint(datetime.fromisoformat(row["DateTime"]), float(row["Price"])) for row in csv.DictReader(handle))
+        return tuple(
+            PriceHistoryPoint(datetime.fromisoformat(row["DateTime"]), float(row["Price"]))
+            for row in csv.DictReader(handle)
+        )
 
 
 def _read_spots(path: Path) -> tuple[UnderlyingSpotPoint, ...]:
     with path.open(newline="", encoding="utf-8") as handle:
-        return tuple(UnderlyingSpotPoint(datetime.fromisoformat(row["DateTime"]), float(row["Spot"])) for row in csv.DictReader(handle))
+        return tuple(
+            UnderlyingSpotPoint(datetime.fromisoformat(row["DateTime"]), float(row["Spot"]))
+            for row in csv.DictReader(handle)
+        )
 
 
 def _latest_at_or_before(items, target: datetime):

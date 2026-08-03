@@ -12,7 +12,7 @@ handling, order-submission code, or live-trading path.
 ### Setup
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --editable .
@@ -469,7 +469,7 @@ Fresh cross-source differences below the existing 0.5% hard gate now add a bound
 ### 安裝與初始化
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --editable .
@@ -486,12 +486,12 @@ python -m unittest discover -s tests -v
 ### 每日啟動指令
 
 以下程序必須在不同 Terminal 分別執行。每個 Terminal 都先進入同一個 canonical repo 並啟用
-`.venv`；不要使用 `/Users/cheng-kaihuang/Documents/Polymarket-stock`。
+`.venv`；不要使用 `$STALE_REPO_ROOT`。
 
 **Terminal 1：主 bot（會自動寫入同一個 SQLite DB）**
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 source .venv/bin/activate
 
 polymarket-stock supervise-shadow \
@@ -508,7 +508,7 @@ polymarket-stock supervise-shadow \
 **Terminal 2：TSLA / NVDA price-ladder collector（會寫入獨立 `price_ladder_*` tables）**
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 source .venv/bin/activate
 
 polymarket-stock collect-price-ladders \
@@ -520,7 +520,7 @@ polymarket-stock collect-price-ladders \
 **Terminal 3：localhost research dashboard（唯讀，不會自行啟動 bot 或 collector）**
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 source .venv/bin/activate
 
 polymarket-stock research-dashboard \
@@ -536,7 +536,7 @@ polymarket-stock research-dashboard \
 **Terminal 4（可選）：原本的 Rich terminal dashboard**
 
 ```zsh
-cd /Users/cheng-kaihuang/Polymarket-stock
+cd $REPO_ROOT
 source .venv/bin/activate
 
 polymarket-stock dashboard \

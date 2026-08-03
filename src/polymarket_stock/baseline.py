@@ -54,16 +54,25 @@ def load_daily_bars_csv(path: Path) -> list[DailyBar]:
             raise ValueError("CSV must contain Date, Open, High, Low, and Close columns")
         bars = [
             DailyBar(
-                row["Date"], float(row["Open"]), float(row["High"]),
-                float(row["Low"]), float(row["Close"]),
+                row["Date"],
+                float(row["Open"]),
+                float(row["High"]),
+                float(row["Low"]),
+                float(row["Close"]),
             )
             for row in reader
             if row.get("Close")
         ]
     if len(bars) < 3 or any(
-        bar.open <= 0 or bar.high <= 0 or bar.low <= 0 or bar.close <= 0
-        or bar.low > bar.high or bar.open > bar.high or bar.open < bar.low
-        or bar.close > bar.high or bar.close < bar.low
+        bar.open <= 0
+        or bar.high <= 0
+        or bar.low <= 0
+        or bar.close <= 0
+        or bar.low > bar.high
+        or bar.open > bar.high
+        or bar.open < bar.low
+        or bar.close > bar.high
+        or bar.close < bar.low
         for bar in bars
     ):
         raise ValueError("CSV requires at least three valid positive OHLC bars")
@@ -94,7 +103,7 @@ def annualized_volatility(
         raise ValueError(f"unknown volatility estimator: {estimator}")
     if not 0 < decay < 1:
         raise ValueError("decay must be between zero and one")
-    sample = observations[-(lookback_days + 1):]
+    sample = observations[-(lookback_days + 1) :]
     if len(sample) < lookback_days + 1:
         raise ValueError("insufficient daily observations for requested lookback")
     if estimator in {"GARMAN_KLASS", "YANG_ZHANG"} and not all(isinstance(item, DailyBar) for item in sample):
@@ -102,9 +111,7 @@ def annualized_volatility(
     if estimator == "GARMAN_KLASS":
         bars = sample[1:]
         values = [
-            0.5 * log(bar.high / bar.low) ** 2
-            - (2 * log(2) - 1) * log(bar.close / bar.open) ** 2
-            for bar in bars
+            0.5 * log(bar.high / bar.low) ** 2 - (2 * log(2) - 1) * log(bar.close / bar.open) ** 2 for bar in bars
         ]
         return sqrt(max(sum(values) / len(values), 0.0) * TRADING_DAYS_PER_YEAR)
     if estimator == "YANG_ZHANG":
@@ -112,8 +119,7 @@ def annualized_volatility(
         overnight = [log(current.open / previous.close) for previous, current in zip(bars, bars[1:])]
         open_to_close = [log(bar.close / bar.open) for bar in bars[1:]]
         rogers_satchell = [
-            log(bar.high / bar.close) * log(bar.high / bar.open)
-            + log(bar.low / bar.close) * log(bar.low / bar.open)
+            log(bar.high / bar.close) * log(bar.high / bar.open) + log(bar.low / bar.close) * log(bar.low / bar.open)
             for bar in bars[1:]
         ]
         k = 0.34 / (1.34 + (len(overnight) + 1) / (len(overnight) - 1))
@@ -211,8 +217,22 @@ def evaluate_realized_vol_baseline(
         annualized_realized_volatility=volatility,
         volatility_estimator=volatility_estimator.upper(),
         prior_close=prior_close,
-        up_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="YES", executable_ask=up_ask, fee_rate=up_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
-        down_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="NO", executable_ask=down_ask, fee_rate=down_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
+        up_edge=assess_buy_edge(
+            fair_yes_probability=fair_up,
+            outcome="YES",
+            executable_ask=up_ask,
+            fee_rate=up_fee_rate,
+            model_error_buffer=model_error_buffer,
+            minimum_edge=minimum_edge,
+        ),
+        down_edge=assess_buy_edge(
+            fair_yes_probability=fair_up,
+            outcome="NO",
+            executable_ask=down_ask,
+            fee_rate=down_fee_rate,
+            model_error_buffer=model_error_buffer,
+            minimum_edge=minimum_edge,
+        ),
         data_is_fresh=data_is_fresh,
         model_error_buffer=model_error_buffer,
     )

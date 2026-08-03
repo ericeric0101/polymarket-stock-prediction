@@ -8,12 +8,25 @@ from polymarket_stock.journal import BufferSweepObservation
 
 
 def _observation(
-    market_id: str, date: str, checkpoint: str, fair_up: float, outcome: str, *, hour: int = 14,
+    market_id: str,
+    date: str,
+    checkpoint: str,
+    fair_up: float,
+    outcome: str,
+    *,
+    hour: int = 14,
 ) -> BufferSweepObservation:
     return BufferSweepObservation(
-        market_id=market_id, symbol=market_id, checkpoint_date=date, checkpoint_name=checkpoint,
-        evaluated_at=datetime.fromisoformat(f"{date}T{hour:02d}:00:00+00:00"), fair_up_probability=fair_up,
-        up_ask=0.60, down_ask=0.40, up_taker_fee=0.01, down_taker_fee=0.01,
+        market_id=market_id,
+        symbol=market_id,
+        checkpoint_date=date,
+        checkpoint_name=checkpoint,
+        evaluated_at=datetime.fromisoformat(f"{date}T{hour:02d}:00:00+00:00"),
+        fair_up_probability=fair_up,
+        up_ask=0.60,
+        down_ask=0.40,
+        up_taker_fee=0.01,
+        down_taker_fee=0.01,
         winning_outcome=outcome,
     )
 
@@ -45,8 +58,12 @@ class BufferSweepTests(unittest.TestCase):
             _observation("three", "2026-07-22", "1200_EDT", 0.70, "UP"),
         ]
         report = walk_forward_buffer_sweep(
-            observations, buffers=(0.05, 0.08), minimum_edge=0.02,
-            training_days=2, validation_days=1, minimum_training_trades=1,
+            observations,
+            buffers=(0.05, 0.08),
+            minimum_edge=0.02,
+            training_days=2,
+            validation_days=1,
+            minimum_training_trades=1,
         )
         self.assertEqual(report.status, "READY")
         self.assertEqual(report.windows[0].training_dates, ("2026-07-20", "2026-07-21"))

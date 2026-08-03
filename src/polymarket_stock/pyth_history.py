@@ -62,7 +62,9 @@ class PythHistoryClient:
         return PythIntradaySpotSeries(symbol.upper(), _parse_history_response(response, start_at, end_at))
 
 
-def _parse_history_response(payload: object, start_at: datetime, end_at: datetime) -> tuple[tuple[datetime, float], ...]:
+def _parse_history_response(
+    payload: object, start_at: datetime, end_at: datetime
+) -> tuple[tuple[datetime, float], ...]:
     try:
         status = payload["s"]  # type: ignore[index]
         timestamps = payload["t"]  # type: ignore[index]

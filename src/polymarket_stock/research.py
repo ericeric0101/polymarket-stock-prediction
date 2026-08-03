@@ -27,10 +27,7 @@ class VolatilityRegime:
             raise ValueError("at least one session duration is required")
         if self.overnight_annual <= 0 or self.regular_annual <= 0:
             raise ValueError("annual volatilities must be positive")
-        variance = (
-            self.overnight_annual**2 * overnight_seconds
-            + self.regular_annual**2 * regular_seconds
-        ) / total
+        variance = (self.overnight_annual**2 * overnight_seconds + self.regular_annual**2 * regular_seconds) / total
         return sqrt(variance)
 
 
@@ -49,7 +46,9 @@ class OptionQuote:
         return (self.bid + self.ask) / 2
 
 
-def black_scholes_price(spot: float, strike: float, annual_volatility: float, seconds: float, option_type: OptionType) -> float:
+def black_scholes_price(
+    spot: float, strike: float, annual_volatility: float, seconds: float, option_type: OptionType
+) -> float:
     if spot <= 0 or strike <= 0 or annual_volatility <= 0 or seconds <= 0:
         raise ValueError("spot, strike, annual_volatility, and seconds must be positive")
     time_years = seconds / SECONDS_PER_YEAR
@@ -83,7 +82,13 @@ def implied_volatility(spot: float, quote: OptionQuote) -> float:
     return (lower + upper) / 2
 
 
-def select_near_atm_option(spot: float, quotes: list[OptionQuote], now: datetime, max_age_seconds: float = 900, max_relative_spread: float = 0.25) -> OptionQuote:
+def select_near_atm_option(
+    spot: float,
+    quotes: list[OptionQuote],
+    now: datetime,
+    max_age_seconds: float = 900,
+    max_relative_spread: float = 0.25,
+) -> OptionQuote:
     if spot <= 0 or now.tzinfo is None:
         raise ValueError("spot must be positive and now must be timezone-aware")
     eligible: list[OptionQuote] = []
@@ -108,7 +113,9 @@ class ScheduledRiskEvent:
     blocking: bool
 
 
-def risk_gate(now: datetime, resolves_at: datetime, events: list[ScheduledRiskEvent], halted: bool) -> tuple[bool, tuple[str, ...]]:
+def risk_gate(
+    now: datetime, resolves_at: datetime, events: list[ScheduledRiskEvent], halted: bool
+) -> tuple[bool, tuple[str, ...]]:
     if now.tzinfo is None or resolves_at.tzinfo is None:
         raise ValueError("risk timestamps must be timezone-aware")
     reasons: list[str] = []
@@ -175,8 +182,22 @@ def evaluate_daily_direction(
         fair_up_probability=fair_up,
         annual_volatility=annual_volatility,
         selected_option_symbol=selected_option.symbol,
-        up_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="YES", executable_ask=up_ask, fee_rate=up_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
-        down_edge=assess_buy_edge(fair_yes_probability=fair_up, outcome="NO", executable_ask=down_ask, fee_rate=down_fee_rate, model_error_buffer=model_error_buffer, minimum_edge=minimum_edge),
+        up_edge=assess_buy_edge(
+            fair_yes_probability=fair_up,
+            outcome="YES",
+            executable_ask=up_ask,
+            fee_rate=up_fee_rate,
+            model_error_buffer=model_error_buffer,
+            minimum_edge=minimum_edge,
+        ),
+        down_edge=assess_buy_edge(
+            fair_yes_probability=fair_up,
+            outcome="NO",
+            executable_ask=down_ask,
+            fee_rate=down_fee_rate,
+            model_error_buffer=model_error_buffer,
+            minimum_edge=minimum_edge,
+        ),
         risk_passed=risk_passed,
         risk_reasons=risk_reasons,
     )

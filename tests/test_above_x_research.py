@@ -21,10 +21,13 @@ def _market(market_id: str, symbol: str = "TSLA") -> dict[str, object]:
 
 class AboveXDiscoveryTests(TestCase):
     def test_discovers_closed_market_and_writes_contracts(self) -> None:
-        responses = [{"events": [{"id": "event-1", "slug": "tsla-above", "markets": [_market("1")]}], "next_cursor": "x"}, {"events": [], "next_cursor": ""}]
-        report = AboveXHistoricalDiscovery(
-            lambda *_args, **_kwargs: responses.pop(0)
-        ).discover(symbols=("TSLA",), page_size=10)
+        responses = [
+            {"events": [{"id": "event-1", "slug": "tsla-above", "markets": [_market("1")]}], "next_cursor": "x"},
+            {"events": [], "next_cursor": ""},
+        ]
+        report = AboveXHistoricalDiscovery(lambda *_args, **_kwargs: responses.pop(0)).discover(
+            symbols=("TSLA",), page_size=10
+        )
         self.assertEqual(len(report.contracts), 1)
         self.assertEqual(report.contracts[0].strike, 300.0)
         with TemporaryDirectory() as directory:
@@ -33,8 +36,11 @@ class AboveXDiscoveryTests(TestCase):
             self.assertEqual(json.loads(path.read_text())[0]["market_id"], "1")
 
     def test_date_and_symbol_filters_are_applied(self) -> None:
-        payloads = [{"events": [{"id": "event-1", "slug": "tsla-above", "markets": [_market("1")]}], "next_cursor": "x"}, {"events": [], "next_cursor": ""}]
-        report = AboveXHistoricalDiscovery(
-            lambda *_args, **_kwargs: payloads.pop(0)
-        ).discover(symbols=("TSLA",), date_start="2026-08-01", page_size=10)
+        payloads = [
+            {"events": [{"id": "event-1", "slug": "tsla-above", "markets": [_market("1")]}], "next_cursor": "x"},
+            {"events": [], "next_cursor": ""},
+        ]
+        report = AboveXHistoricalDiscovery(lambda *_args, **_kwargs: payloads.pop(0)).discover(
+            symbols=("TSLA",), date_start="2026-08-01", page_size=10
+        )
         self.assertEqual(report.contracts, ())

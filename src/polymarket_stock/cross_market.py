@@ -12,7 +12,11 @@ from zoneinfo import ZoneInfo
 from .journal import PaperPosition, ShadowJournal, _database_connection
 from .above_x_research import above_x_coverage_report
 from .price_ladder import (
-    CrossMarketDiagnostic, LadderProbabilityPoint, diagnose_cross_market, fit_monotonic_curve, probability_point,
+    CrossMarketDiagnostic,
+    LadderProbabilityPoint,
+    diagnose_cross_market,
+    fit_monotonic_curve,
+    probability_point,
 )
 from .price_ladder_journal import PriceLadderJournal, StoredLadderSnapshot
 from .probability_calibration import sizing_readiness
@@ -24,7 +28,9 @@ CHECKPOINTS = ("1200_EDT", "1400_EDT", "1530_EDT")
 
 
 def cross_market_diagnostics(
-    journal_path: Path, *, market_date: str | None = None,
+    journal_path: Path,
+    *,
+    market_date: str | None = None,
 ) -> tuple[CrossMarketDiagnostic, ...]:
     ladder = PriceLadderJournal(journal_path)
     ladder.initialize()
@@ -39,6 +45,7 @@ def cross_market_diagnostics(
         parameters = (market_date,)
     query += " ORDER BY checkpoint_date, checkpoint_name, symbol"
     import json
+
     with _database_connection(journal_path) as connection:
         rows = connection.execute(query, parameters).fetchall()
     diagnostics = []
@@ -49,17 +56,26 @@ def cross_market_diagnostics(
         if price_to_beat is None or fair_up is None:
             continue
         points = grouped_ladder.get((str(checkpoint_date), str(checkpoint_name), str(symbol).upper()), ())
-        diagnostics.append(diagnose_cross_market(
-            symbol=str(symbol), market_date=str(checkpoint_date), checkpoint_name=str(checkpoint_name),
-            price_to_beat=float(price_to_beat), model_up_probability=float(fair_up),
-            up_down_market_probability=_up_down_market_probability(payload), points=points,
-        ))
+        diagnostics.append(
+            diagnose_cross_market(
+                symbol=str(symbol),
+                market_date=str(checkpoint_date),
+                checkpoint_name=str(checkpoint_name),
+                price_to_beat=float(price_to_beat),
+                model_up_probability=float(fair_up),
+                up_down_market_probability=_up_down_market_probability(payload),
+                points=points,
+            )
+        )
     return tuple(diagnostics)
 
 
 def cross_market_report(journal_path: Path, *, market_date: str | None = None) -> Mapping[str, object]:
     diagnostics = cross_market_diagnostics(journal_path, market_date=market_date)
-    counts = {status: sum(item.status == status for item in diagnostics) for status in ("CONFIRM", "MIXED", "DISAGREE", "UNRELIABLE")}
+    counts = {
+        status: sum(item.status == status for item in diagnostics)
+        for status in ("CONFIRM", "MIXED", "DISAGREE", "UNRELIABLE")
+    }
     return {
         "market_date": market_date,
         "diagnostics": [item.as_payload() for item in diagnostics],
@@ -69,7 +85,11 @@ def cross_market_report(journal_path: Path, *, market_date: str | None = None) -
 
 
 def research_dashboard_state(
-    journal_path: Path, *, now: datetime | None = None, limit: int = 18, daily_entry_limit: int = 5,
+    journal_path: Path,
+    *,
+    now: datetime | None = None,
+    limit: int = 18,
+    daily_entry_limit: int = 5,
 ) -> Mapping[str, object]:
     if limit < 1 or daily_entry_limit < 1:
         raise ValueError("research dashboard limits must be positive")
@@ -85,18 +105,21 @@ def research_dashboard_state(
         symbol_rows = tuple(item for item in latest if item.symbol == symbol)
         points = tuple(point for point in (_snapshot_point(item) for item in symbol_rows) if point is not None)
         curve = fit_monotonic_curve(points)
-        curves.append({
-            "symbol": symbol,
-            "market_date": market_date,
-            "observed_at": max((item.observed_at for item in symbol_rows), default=timestamp).isoformat(),
-            "violations": curve.violations,
-            "points": [
-                {
-                    **asdict(point), "adjusted_probability": curve.adjusted_probabilities[index],
-                }
-                for index, point in enumerate(curve.points)
-            ],
-        })
+        curves.append(
+            {
+                "symbol": symbol,
+                "market_date": market_date,
+                "observed_at": max((item.observed_at for item in symbol_rows), default=timestamp).isoformat(),
+                "violations": curve.violations,
+                "points": [
+                    {
+                        **asdict(point),
+                        "adjusted_probability": curve.adjusted_probabilities[index],
+                    }
+                    for index, point in enumerate(curve.points)
+                ],
+            }
+        )
     diagnostics = cross_market_diagnostics(journal_path, market_date=market_date)
     latest_diagnostic: dict[str, CrossMarketDiagnostic] = {}
     for item in diagnostics:
@@ -104,14 +127,17 @@ def research_dashboard_state(
         if current is None or CHECKPOINTS.index(item.checkpoint_name) > CHECKPOINTS.index(current.checkpoint_name):
             latest_diagnostic[item.symbol] = item
     return {
-        "generated_at": timestamp.isoformat(), "market_date": market_date,
+        "generated_at": timestamp.isoformat(),
+        "market_date": market_date,
         "core_rows": core_rows,
         "live_markets": _live_market_payload(core_rows, timestamp),
         "market_status": _market_status_payload(timestamp, market_date),
         "paper_portfolio": _paper_portfolio_payload(
-            core.list_paper_positions(), core.first_signal_performance(),
+            core.list_paper_positions(),
+            core.first_signal_performance(),
             sizing_readiness(core.list_first_signal_calibration_observations()).as_payload(),
-            timestamp=timestamp, daily_entry_limit=daily_entry_limit,
+            timestamp=timestamp,
+            daily_entry_limit=daily_entry_limit,
         ),
         "ladder_curves": curves,
         "cross_market": [latest_diagnostic[symbol].as_payload() for symbol in sorted(latest_diagnostic)],
@@ -127,7 +153,8 @@ def _above_x_dashboard_payload() -> Mapping[str, object]:
         return {"status": "NO_DISCOVERY", "coverage": None, "replay": None}
     try:
         coverage = above_x_coverage_report(
-            discovery_path=discovery, output_dir=Path("data/historical/above_x"),
+            discovery_path=discovery,
+            output_dir=Path("data/historical/above_x"),
             spot_data_dir=Path("data/historical/90d"),
         ).as_payload()
     except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -158,7 +185,8 @@ def _market_status_payload(timestamp: datetime, market_date: str) -> Mapping[str
 
 
 def _live_market_payload(
-    rows: Iterable[Mapping[str, object]], timestamp: datetime,
+    rows: Iterable[Mapping[str, object]],
+    timestamp: datetime,
 ) -> list[Mapping[str, object]]:
     live_rows = []
     for row in rows:
@@ -170,65 +198,93 @@ def _live_market_payload(
         down_bid, down_ask = _optional_float(row.get("down_bid")), _optional_float(row.get("down_ask"))
         complete = all(value is not None for value in (up_bid, up_ask, down_bid, down_ask))
         state = (
-            "LIVE" if complete and book_age is not None and book_age <= 30
-            else "STALE" if complete else "INCOMPLETE"
+            "LIVE" if complete and book_age is not None and book_age <= 30 else "STALE" if complete else "INCOMPLETE"
         )
-        live_rows.append({
-            "market_id": row.get("market_id"), "symbol": row.get("symbol"),
-            "observed_at": observed_at.isoformat() if observed_at else None,
-            "book_age_seconds": book_age, "state": state,
-            "up_bid": up_bid, "up_ask": up_ask, "down_bid": down_bid, "down_ask": down_ask,
-            "up_spread": up_ask - up_bid if up_bid is not None and up_ask is not None else None,
-            "down_spread": down_ask - down_bid if down_bid is not None and down_ask is not None else None,
-            "market_up_probability": _up_down_market_probability(row),
-            "model_up_probability": _optional_float(row.get("fair_up_probability")),
-            "spot": _optional_float(row.get("spot")),
-            "price_to_beat": _optional_float(row.get("price_to_beat")),
-            "threshold_quality": str(row.get("threshold_quality") or "UNKNOWN"),
-            "threshold_warning": row.get("threshold_warning"),
-            "threshold_source_count": row.get("source_count"),
-            "threshold_calibration_samples": row.get("calibration_samples"),
-            "threshold_estimated_error_bps": row.get("estimated_error_bps"),
-            "up_book": row.get("up_book") if isinstance(row.get("up_book"), Mapping) else {},
-            "down_book": row.get("down_book") if isinstance(row.get("down_book"), Mapping) else {},
-            "skip_reasons": list(row.get("skip_reasons") or ()),
-        })
+        live_rows.append(
+            {
+                "market_id": row.get("market_id"),
+                "symbol": row.get("symbol"),
+                "observed_at": observed_at.isoformat() if observed_at else None,
+                "book_age_seconds": book_age,
+                "state": state,
+                "up_bid": up_bid,
+                "up_ask": up_ask,
+                "down_bid": down_bid,
+                "down_ask": down_ask,
+                "up_spread": up_ask - up_bid if up_bid is not None and up_ask is not None else None,
+                "down_spread": down_ask - down_bid if down_bid is not None and down_ask is not None else None,
+                "market_up_probability": _up_down_market_probability(row),
+                "model_up_probability": _optional_float(row.get("fair_up_probability")),
+                "spot": _optional_float(row.get("spot")),
+                "price_to_beat": _optional_float(row.get("price_to_beat")),
+                "threshold_quality": str(row.get("threshold_quality") or "UNKNOWN"),
+                "threshold_warning": row.get("threshold_warning"),
+                "threshold_source_count": row.get("source_count"),
+                "threshold_calibration_samples": row.get("calibration_samples"),
+                "threshold_estimated_error_bps": row.get("estimated_error_bps"),
+                "up_book": row.get("up_book") if isinstance(row.get("up_book"), Mapping) else {},
+                "down_book": row.get("down_book") if isinstance(row.get("down_book"), Mapping) else {},
+                "skip_reasons": list(row.get("skip_reasons") or ()),
+            }
+        )
     return live_rows
 
 
 def _paper_portfolio_payload(
-    positions: Iterable[PaperPosition], signal_performance: Mapping[str, object],
-    sizing: Mapping[str, object], *, timestamp: datetime, daily_entry_limit: int,
+    positions: Iterable[PaperPosition],
+    signal_performance: Mapping[str, object],
+    sizing: Mapping[str, object],
+    *,
+    timestamp: datetime,
+    daily_entry_limit: int,
 ) -> Mapping[str, object]:
     market_date = timestamp.astimezone(NEW_YORK).date()
     all_positions = tuple(positions)
-    selected = tuple(sorted((
-        position for position in all_positions
-        if position.included_in_calibration
-        and position.opened_at.astimezone(NEW_YORK).date() == market_date
-    ), key=lambda item: item.opened_at))
+    selected = tuple(
+        sorted(
+            (
+                position
+                for position in all_positions
+                if position.included_in_calibration and position.opened_at.astimezone(NEW_YORK).date() == market_date
+            ),
+            key=lambda item: item.opened_at,
+        )
+    )
     settled = tuple(position for position in selected if position.status == "SETTLED")
     wins = sum(position.outcome == position.settlement_outcome for position in settled)
     entries = []
     for position in selected:
         won = position.status == "SETTLED" and position.outcome == position.settlement_outcome
         status = "OPEN" if position.status != "SETTLED" else f"{position.settlement_outcome} {'WIN' if won else 'LOSS'}"
-        entries.append({
-            "position_id": position.position_id, "opened_at": position.opened_at.isoformat(),
-            "opened_at_ny": position.opened_at.astimezone(NEW_YORK).isoformat(),
-            "symbol": position.symbol, "side": position.outcome, "contracts": position.contracts,
-            "entry_ask": position.entry_ask, "entry_fee": position.entry_fee,
-            "fair_probability": position.fair_probability, "status": status,
-            "settlement_outcome": position.settlement_outcome, "realized_pnl": position.realized_pnl,
-        })
+        entries.append(
+            {
+                "position_id": position.position_id,
+                "opened_at": position.opened_at.isoformat(),
+                "opened_at_ny": position.opened_at.astimezone(NEW_YORK).isoformat(),
+                "symbol": position.symbol,
+                "side": position.outcome,
+                "contracts": position.contracts,
+                "entry_ask": position.entry_ask,
+                "entry_fee": position.entry_fee,
+                "fair_probability": position.fair_probability,
+                "status": status,
+                "settlement_outcome": position.settlement_outcome,
+                "realized_pnl": position.realized_pnl,
+            }
+        )
     return {
-        "market_date": market_date.isoformat(), "daily_entry_limit": daily_entry_limit,
-        "selected_count": len(selected), "settled_count": len(settled),
-        "wins": wins, "losses": len(settled) - wins,
+        "market_date": market_date.isoformat(),
+        "daily_entry_limit": daily_entry_limit,
+        "selected_count": len(selected),
+        "settled_count": len(settled),
+        "wins": wins,
+        "losses": len(settled) - wins,
         "win_rate": wins / len(settled) if settled else None,
         "open_positions": sum(position.status == "OPEN" for position in all_positions),
         "settled_positions": sum(position.status == "SETTLED" for position in all_positions),
-        "entries": entries, "first_signal_performance": dict(signal_performance), "sizing": dict(sizing),
+        "entries": entries,
+        "first_signal_performance": dict(signal_performance),
+        "sizing": dict(sizing),
     }
 
 
@@ -252,8 +308,12 @@ def _group_checkpoint_points(
 
 def _snapshot_point(item: StoredLadderSnapshot) -> LadderProbabilityPoint | None:
     return probability_point(
-        strike=item.strike, market_id=item.market_id,
-        yes_bid=item.yes_bid, yes_ask=item.yes_ask, no_bid=item.no_bid, no_ask=item.no_ask,
+        strike=item.strike,
+        market_id=item.market_id,
+        yes_bid=item.yes_bid,
+        yes_ask=item.yes_ask,
+        no_bid=item.no_bid,
+        no_ask=item.no_ask,
         yes_depth=item.yes_bid_depth + item.yes_ask_depth,
         no_depth=item.no_bid_depth + item.no_ask_depth,
     )

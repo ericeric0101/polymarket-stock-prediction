@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import unittest
 
+from polymarket_stock.evaluation_payload import PAYLOAD_VERSION
 from polymarket_stock.journal import ShadowJournal
 from polymarket_stock.market_discovery import MarketCandidate
 
@@ -39,8 +40,13 @@ class JournalTests(unittest.TestCase):
             journal.upsert_market_candidate(candidate)
             outcomes = journal.get_market_outcome_tokens("market-1")
             listed = journal.list_market_candidates("TSLA")
-        self.assertEqual([(item.label, item.token_id) for item in outcomes], [("Up", "up-token"), ("Down", "down-token")])
-        self.assertEqual([(item.market_id, item.outcome_a_label, item.outcome_b_label) for item in listed], [("market-1", "Up", "Down")])
+        self.assertEqual(
+            [(item.label, item.token_id) for item in outcomes], [("Up", "up-token"), ("Down", "down-token")]
+        )
+        self.assertEqual(
+            [(item.market_id, item.outcome_a_label, item.outcome_b_label) for item in listed],
+            [("market-1", "Up", "Down")],
+        )
 
     def test_realtime_evaluation_is_persisted_for_calibration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -49,9 +55,16 @@ class JournalTests(unittest.TestCase):
             journal.initialize()
             journal.record_realtime_evaluation(
                 {
-                    "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": "market-1", "symbol": "TSLA",
-                    "spot": 100.0, "up_ask": 0.50, "down_ask": 0.50, "fair_up_probability": 0.51,
-                    "signal_status": "NO_PAPER_TRADE", "skip_reasons": [],
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-07-20T15:00:00+00:00",
+                    "market_id": "market-1",
+                    "symbol": "TSLA",
+                    "spot": 100.0,
+                    "up_ask": 0.50,
+                    "down_ask": 0.50,
+                    "fair_up_probability": 0.51,
+                    "signal_status": "NO_PAPER_TRADE",
+                    "skip_reasons": [],
                 }
             )
             with sqlite3.connect(path) as connection:
@@ -62,12 +75,18 @@ class JournalTests(unittest.TestCase):
 
     def test_dashboard_rows_exclude_prior_day_contracts(self) -> None:
         def candidate(market_id: str, symbol: str, end_date: str) -> MarketCandidate:
-            return MarketCandidate.from_gamma_payload({
-                "id": market_id, "question": f"{symbol} Up or Down?", "slug": market_id,
-                "description": "Pyth close terms", "resolutionSource": "https://pyth.example",
-                "endDate": end_date, "outcomes": '["Up", "Down"]',
-                "clobTokenIds": '["up-token", "down-token"]',
-            })
+            return MarketCandidate.from_gamma_payload(
+                {
+                    "id": market_id,
+                    "question": f"{symbol} Up or Down?",
+                    "slug": market_id,
+                    "description": "Pyth close terms",
+                    "resolutionSource": "https://pyth.example",
+                    "endDate": end_date,
+                    "outcomes": '["Up", "Down"]',
+                    "clobTokenIds": '["up-token", "down-token"]',
+                }
+            )
 
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")
@@ -79,19 +98,37 @@ class JournalTests(unittest.TestCase):
                 ("after", "TSLA", "2026-07-30T20:00:00Z", "AFTER_HOURS", "2026-07-30T18:00:00+00:00"),
             ):
                 journal.upsert_market_candidate(candidate(market_id, symbol, end_date))
-                journal.record_realtime_evaluation({
-                    "evaluated_at": evaluated_at, "market_id": market_id,
-                    "symbol": symbol, "spot": 100.0, "up_ask": 0.50, "down_ask": 0.50,
-                    "fair_up_probability": 0.51, "signal_status": "NO_PAPER_TRADE", "skip_reasons": [],
-                    "market_session": session,
-                })
+                journal.record_realtime_evaluation(
+                    {
+                        "payload_version": PAYLOAD_VERSION,
+                        "evaluated_at": evaluated_at,
+                        "market_id": market_id,
+                        "symbol": symbol,
+                        "spot": 100.0,
+                        "up_ask": 0.50,
+                        "down_ask": 0.50,
+                        "fair_up_probability": 0.51,
+                        "signal_status": "NO_PAPER_TRADE",
+                        "skip_reasons": [],
+                        "market_session": session,
+                    }
+                )
             journal.record_checkpoint_observation(
-                checkpoint_date="2026-07-30", checkpoint_name="1200_EDT",
+                checkpoint_date="2026-07-30",
+                checkpoint_name="1200_EDT",
                 payload={
-                    "evaluated_at": "2026-07-30T16:00:00+00:00", "market_id": "current",
-                    "symbol": "TSLA", "fair_up_probability": 0.70, "up_ask": 0.58,
-                    "down_ask": 0.42, "up_edge": 0.08, "down_edge": -0.32,
-                    "model_outcome": "UP", "paper_outcome": "UP", "model_version": "test",
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-07-30T16:00:00+00:00",
+                    "market_id": "current",
+                    "symbol": "TSLA",
+                    "fair_up_probability": 0.70,
+                    "up_ask": 0.58,
+                    "down_ask": 0.42,
+                    "up_edge": 0.08,
+                    "down_edge": -0.32,
+                    "model_outcome": "UP",
+                    "paper_outcome": "UP",
+                    "model_version": "test",
                 },
             )
             rows = journal.dashboard_rows(18, now=datetime(2026, 7, 30, 17, tzinfo=UTC))
@@ -104,20 +141,41 @@ class JournalTests(unittest.TestCase):
             journal = ShadowJournal(path)
             journal.initialize()
             observed_at = "2026-07-27T14:00:00.500000+00:00"
-            journal.record_spot_observation({
-                "observed_at": observed_at, "source": "PYTH_HERMES", "symbol": "TSLA", "price": 100.25,
-                "published_at": "2026-07-27T14:00:00+00:00", "confidence": 0.02, "feed_id": "feed",
-            })
-            journal.record_spot_observation({
-                "observed_at": "2026-07-27T14:00:00.900000+00:00", "source": "PYTH_HERMES", "symbol": "TSLA", "price": 100.30,
-            })
-            journal.record_spot_source_comparison({
-                "observed_at": observed_at, "symbol": "TSLA", "primary_source": "FINNHUB", "primary_price": 100.0,
-                "pyth_price": 100.25, "difference_bps": -24.9376558603, "pyth_feed_id": "feed",
-            })
+            journal.record_spot_observation(
+                {
+                    "observed_at": observed_at,
+                    "source": "PYTH_HERMES",
+                    "symbol": "TSLA",
+                    "price": 100.25,
+                    "published_at": "2026-07-27T14:00:00+00:00",
+                    "confidence": 0.02,
+                    "feed_id": "feed",
+                }
+            )
+            journal.record_spot_observation(
+                {
+                    "observed_at": "2026-07-27T14:00:00.900000+00:00",
+                    "source": "PYTH_HERMES",
+                    "symbol": "TSLA",
+                    "price": 100.30,
+                }
+            )
+            journal.record_spot_source_comparison(
+                {
+                    "observed_at": observed_at,
+                    "symbol": "TSLA",
+                    "primary_source": "FINNHUB",
+                    "primary_price": 100.0,
+                    "pyth_price": 100.25,
+                    "difference_bps": -24.9376558603,
+                    "pyth_feed_id": "feed",
+                }
+            )
             with sqlite3.connect(path) as connection:
                 spot_count = connection.execute("SELECT COUNT(*) FROM spot_observations").fetchone()[0]
-                comparison = connection.execute("SELECT primary_source, difference_bps FROM spot_source_comparisons").fetchone()
+                comparison = connection.execute(
+                    "SELECT primary_source, difference_bps FROM spot_source_comparisons"
+                ).fetchone()
             typed_spot = journal.list_spot_observations(source="PYTH_HERMES")[0]
             typed = journal.list_spot_source_comparisons()[0]
         self.assertEqual(spot_count, 1)
@@ -133,12 +191,22 @@ class JournalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
-            journal.record_spot_observation({
-                "observed_at": "2026-07-27T04:00:00+00:00", "source": "FINNHUB", "symbol": "TSLA", "price": 100.0,
-            })
-            journal.record_spot_observation({
-                "observed_at": "2026-07-28T04:00:00+00:00", "source": "FINNHUB", "symbol": "TSLA", "price": 101.0,
-            })
+            journal.record_spot_observation(
+                {
+                    "observed_at": "2026-07-27T04:00:00+00:00",
+                    "source": "FINNHUB",
+                    "symbol": "TSLA",
+                    "price": 100.0,
+                }
+            )
+            journal.record_spot_observation(
+                {
+                    "observed_at": "2026-07-28T04:00:00+00:00",
+                    "source": "FINNHUB",
+                    "symbol": "TSLA",
+                    "price": 101.0,
+                }
+            )
             rows = journal.list_spot_observations(source="FINNHUB", market_date=date(2026, 7, 27))
         self.assertEqual([row.price for row in rows], [100.0])
 
@@ -161,11 +229,20 @@ class JournalTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             for minute, probability in ((5, 0.51), (6, 0.62)):
-                journal.record_realtime_evaluation({
-                    "evaluated_at": f"2026-07-20T15:0{minute}:00+00:00", "market_id": "market-1", "symbol": "TSLA",
-                    "spot": 100, "up_ask": 0.50, "down_ask": 0.50, "fair_up_probability": probability,
-                    "signal_status": "NO_PAPER_TRADE", "skip_reasons": [],
-                })
+                journal.record_realtime_evaluation(
+                    {
+                        "payload_version": PAYLOAD_VERSION,
+                        "evaluated_at": f"2026-07-20T15:0{minute}:00+00:00",
+                        "market_id": "market-1",
+                        "symbol": "TSLA",
+                        "spot": 100,
+                        "up_ask": 0.50,
+                        "down_ask": 0.50,
+                        "fair_up_probability": probability,
+                        "signal_status": "NO_PAPER_TRADE",
+                        "skip_reasons": [],
+                    }
+                )
             journal.record_market_settlement("market-1", "UP", {"closed": True})
             observations = journal.list_replay_observations()
         self.assertEqual(len(observations), 1)
@@ -176,11 +253,21 @@ class JournalTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             for market_id, prediction, outcome in (("market-1", "UP", "UP"), ("market-2", "DOWN", "UP")):
-                journal.record_realtime_evaluation({
-                    "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": market_id, "symbol": "TSLA",
-                    "spot": 100.0, "up_ask": 0.5, "down_ask": 0.5, "fair_up_probability": 0.6,
-                    "model_outcome": prediction, "signal_status": f"PAPER_{prediction}", "skip_reasons": [],
-                })
+                journal.record_realtime_evaluation(
+                    {
+                        "payload_version": PAYLOAD_VERSION,
+                        "evaluated_at": "2026-07-20T15:00:00+00:00",
+                        "market_id": market_id,
+                        "symbol": "TSLA",
+                        "spot": 100.0,
+                        "up_ask": 0.5,
+                        "down_ask": 0.5,
+                        "fair_up_probability": 0.6,
+                        "model_outcome": prediction,
+                        "signal_status": f"PAPER_{prediction}",
+                        "skip_reasons": [],
+                    }
+                )
                 journal.record_market_settlement(market_id, outcome, {"closed": True})
             performance = journal.first_signal_performance()
         self.assertEqual(performance["settled_markets"], 2)
@@ -192,19 +279,42 @@ class JournalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
-            journal.record_realtime_evaluation({
-                "evaluated_at": "2026-07-20T15:00:00+00:00", "market_id": "market-1", "symbol": "TSLA",
-                "spot": 99.0, "prior_close": 100.0, "up_ask": 0.2, "down_ask": 0.8,
-                "fair_up_probability": 0.25, "model_outcome": "DOWN", "signal_status": "PAPER_DOWN",
-                "skip_reasons": [], "option_iv_status": "IV_UNAVAILABLE", "spot_provider": "PYTH_HERMES",
-                "model_version": "test-v1", "down_taker_fee": 0.01,
-            })
-            journal.record_realtime_evaluation({
-                "evaluated_at": "2026-07-20T15:01:00+00:00", "market_id": "market-1", "symbol": "TSLA",
-                "spot": 99.0, "prior_close": 100.0, "up_ask": 0.2, "down_ask": 0.8,
-                "fair_up_probability": 0.10, "model_outcome": "DOWN", "signal_status": "PAPER_DOWN",
-                "skip_reasons": [],
-            })
+            journal.record_realtime_evaluation(
+                {
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-07-20T15:00:00+00:00",
+                    "market_id": "market-1",
+                    "symbol": "TSLA",
+                    "spot": 99.0,
+                    "prior_close": 100.0,
+                    "up_ask": 0.2,
+                    "down_ask": 0.8,
+                    "fair_up_probability": 0.25,
+                    "model_outcome": "DOWN",
+                    "signal_status": "PAPER_DOWN",
+                    "skip_reasons": [],
+                    "option_iv_status": "IV_UNAVAILABLE",
+                    "spot_provider": "PYTH_HERMES",
+                    "model_version": "test-v1",
+                    "down_taker_fee": 0.01,
+                }
+            )
+            journal.record_realtime_evaluation(
+                {
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-07-20T15:01:00+00:00",
+                    "market_id": "market-1",
+                    "symbol": "TSLA",
+                    "spot": 99.0,
+                    "prior_close": 100.0,
+                    "up_ask": 0.2,
+                    "down_ask": 0.8,
+                    "fair_up_probability": 0.10,
+                    "model_outcome": "DOWN",
+                    "signal_status": "PAPER_DOWN",
+                    "skip_reasons": [],
+                }
+            )
             journal.record_market_settlement("market-1", "DOWN", {"closed": True})
             observation = journal.list_first_signal_calibration_observations()[0]
         self.assertEqual(observation.model_outcome, "DOWN")
@@ -219,19 +329,39 @@ class JournalTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             position, created = journal.open_paper_position(
-                market_id="market-1", symbol="TSLA", outcome="DOWN", entry_ask=0.49,
-                fair_probability=0.55, model_version="test-v1", payload={"source": "test"}, fee_rate=0.04,
+                market_id="market-1",
+                symbol="TSLA",
+                outcome="DOWN",
+                entry_ask=0.49,
+                fair_probability=0.55,
+                model_version="test-v1",
+                payload={"source": "test"},
+                fee_rate=0.04,
             )
             duplicate, duplicate_created = journal.open_paper_position(
-                market_id="market-1", symbol="TSLA", outcome="DOWN", entry_ask=0.48,
-                fair_probability=0.56, model_version="test-v1", payload={"source": "duplicate"}, fee_rate=0.04,
+                market_id="market-1",
+                symbol="TSLA",
+                outcome="DOWN",
+                entry_ask=0.48,
+                fair_probability=0.56,
+                model_version="test-v1",
+                payload={"source": "duplicate"},
+                fee_rate=0.04,
             )
             opposite, opposite_created = journal.open_paper_position(
-                market_id="market-1", symbol="TSLA", outcome="UP", entry_ask=0.48,
-                fair_probability=0.56, model_version="test-v1", payload={"source": "opposite"}, fee_rate=0.04,
+                market_id="market-1",
+                symbol="TSLA",
+                outcome="UP",
+                entry_ask=0.48,
+                fair_probability=0.56,
+                model_version="test-v1",
+                payload={"source": "opposite"},
+                fee_rate=0.04,
             )
             settled = journal.settle_paper_position(
-                position.position_id, settlement_outcome="DOWN", settlement_payload={"closed": True},
+                position.position_id,
+                settlement_outcome="DOWN",
+                settlement_payload={"closed": True},
             )
         self.assertTrue(created)
         self.assertFalse(duplicate_created)
@@ -247,9 +377,13 @@ class JournalTests(unittest.TestCase):
     def test_precontract_day_paper_position_is_preserved_but_excluded(self) -> None:
         candidate = MarketCandidate.from_gamma_payload(
             {
-                "id": "next-day", "question": "Tesla (TSLA) Up or Down on July 21?", "slug": "tsla-next-day",
-                "description": "Pyth close terms", "resolutionSource": "https://pyth.example",
-                "endDate": "2026-07-21T20:00:00Z", "outcomes": '["Up", "Down"]',
+                "id": "next-day",
+                "question": "Tesla (TSLA) Up or Down on July 21?",
+                "slug": "tsla-next-day",
+                "description": "Pyth close terms",
+                "resolutionSource": "https://pyth.example",
+                "endDate": "2026-07-21T20:00:00Z",
+                "outcomes": '["Up", "Down"]',
                 "clobTokenIds": '["up-token", "down-token"]',
             }
         )
@@ -258,8 +392,14 @@ class JournalTests(unittest.TestCase):
             journal.initialize()
             journal.upsert_market_candidate(candidate)
             journal.open_paper_position(
-                market_id="next-day", symbol="TSLA", outcome="UP", entry_ask=0.50,
-                fair_probability=0.60, model_version="test", payload={"source": "test"}, fee_rate=0.04,
+                market_id="next-day",
+                symbol="TSLA",
+                outcome="UP",
+                entry_ask=0.50,
+                fair_probability=0.60,
+                model_version="test",
+                payload={"source": "test"},
+                fee_rate=0.04,
                 opened_at=datetime(2026, 7, 20, 19, 55, tzinfo=UTC),
             )
             journal.initialize()
@@ -272,8 +412,15 @@ class JournalTests(unittest.TestCase):
             journal = ShadowJournal(Path(directory) / "journal.db")
             journal.initialize()
             journal.record_portfolio_decision(
-                batch_id="batch-1", market_id="market-1", symbol="TSLA", outcome="UP", risk_group="EV_AUTO",
-                edge=0.05, selected=False, reason="CORRELATION_LIMIT", payload={"source": "test"},
+                batch_id="batch-1",
+                market_id="market-1",
+                symbol="TSLA",
+                outcome="UP",
+                risk_group="EV_AUTO",
+                edge=0.05,
+                selected=False,
+                reason="CORRELATION_LIMIT",
+                payload={"source": "test"},
             )
             decision = journal.list_portfolio_decisions()[0]
         self.assertEqual(decision["reason"], "CORRELATION_LIMIT")

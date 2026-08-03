@@ -50,7 +50,9 @@ class YahooDailyBarSeries:
             writer = csv.DictWriter(handle, fieldnames=("Date", "Open", "High", "Low", "Close"))
             writer.writeheader()
             for bar in self.bars:
-                writer.writerow({"Date": bar.date, "Open": bar.open, "High": bar.high, "Low": bar.low, "Close": bar.close})
+                writer.writerow(
+                    {"Date": bar.date, "Open": bar.open, "High": bar.high, "Low": bar.low, "Close": bar.close}
+                )
 
 
 @dataclass(frozen=True)
@@ -123,8 +125,11 @@ class YahooChartClient:
         response = self._get_json(
             f"{YAHOO_CHART_URL}/{symbol.upper()}",
             {
-                "period1": int(start_at.timestamp()), "period2": int(end_at.timestamp()),
-                "interval": "1m", "events": "history", "includePrePost": "false",
+                "period1": int(start_at.timestamp()),
+                "period2": int(end_at.timestamp()),
+                "interval": "1m",
+                "events": "history",
+                "includePrePost": "false",
             },
         )
         return YahooIntradaySpotSeries(symbol.upper(), _parse_intraday_chart_response(response, start_at, end_at))
@@ -163,17 +168,29 @@ def _parse_bar_chart_response(payload: object) -> tuple[DailyBar, ...]:
     bars = []
     for timestamp, open_, high, low, close in zip(timestamps, opens, highs, lows, closes):
         values = (open_, high, low, close)
-        if not isinstance(timestamp, (int, float)) or not all(isinstance(value, (int, float)) and value > 0 for value in values):
+        if not isinstance(timestamp, (int, float)) or not all(
+            isinstance(value, (int, float)) and value > 0 for value in values
+        ):
             continue
         if low > high or not low <= open_ <= high or not low <= close <= high:
             continue
-        bars.append(DailyBar(datetime.fromtimestamp(float(timestamp), tz=UTC).date().isoformat(), float(open_), float(high), float(low), float(close)))
+        bars.append(
+            DailyBar(
+                datetime.fromtimestamp(float(timestamp), tz=UTC).date().isoformat(),
+                float(open_),
+                float(high),
+                float(low),
+                float(close),
+            )
+        )
     if not bars:
         raise YahooPayloadError("Yahoo chart response has no usable OHLC bars")
     return tuple(bars)
 
 
-def _parse_intraday_chart_response(payload: object, start_at: datetime, end_at: datetime) -> tuple[tuple[datetime, float], ...]:
+def _parse_intraday_chart_response(
+    payload: object, start_at: datetime, end_at: datetime
+) -> tuple[tuple[datetime, float], ...]:
     try:
         result = payload["chart"]["result"][0]  # type: ignore[index]
         timestamps = result["timestamp"]

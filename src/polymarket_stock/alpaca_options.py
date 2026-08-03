@@ -32,9 +32,7 @@ class AlpacaCredentials:
         api_key_id = os.getenv("ALPACA_API_KEY_ID", "").strip()
         api_secret_key = os.getenv("ALPACA_API_SECRET_KEY", "").strip()
         if not api_key_id or not api_secret_key:
-            raise AlpacaConfigurationError(
-                "ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required for Alpaca data"
-            )
+            raise AlpacaConfigurationError("ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY are required for Alpaca data")
         return cls(api_key_id=api_key_id, api_secret_key=api_secret_key)
 
 
@@ -48,7 +46,9 @@ class IndicativeOptionQuote:
     quality_label: str = "INDICATIVE_DELAYED_OR_MODIFIED_NOT_LIVE_GRADE"
 
     @classmethod
-    def from_mapping(cls, symbol: str, payload: Mapping[str, object], observed_at: datetime | None = None) -> "IndicativeOptionQuote":
+    def from_mapping(
+        cls, symbol: str, payload: Mapping[str, object], observed_at: datetime | None = None
+    ) -> "IndicativeOptionQuote":
         bid_value = payload.get("bp", payload.get("b"))
         ask_value = payload.get("ap", payload.get("a"))
         try:

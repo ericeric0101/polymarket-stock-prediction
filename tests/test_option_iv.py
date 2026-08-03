@@ -24,14 +24,22 @@ class OptionIvTests(unittest.TestCase):
         self.assertTrue(surface.usable)
 
     def test_surface_rejects_stale_points(self) -> None:
-        point = OptionIvPoint("CALL", "call", 100, 2, 2.1, 0.30, self.now - timedelta(minutes=20), self.now + timedelta(days=1))
+        point = OptionIvPoint(
+            "CALL", "call", 100, 2, 2.1, 0.30, self.now - timedelta(minutes=20), self.now + timedelta(days=1)
+        )
         with self.assertRaises(OptionSurfaceError):
             build_option_iv_surface("TSLA", 100, "2026-07-21", self.now, [point])
 
     def test_polygon_rejects_delayed_surface_for_entry(self) -> None:
-        client = PolygonOptionIvClient("test-key", get_json_fn=lambda *_args, **_kwargs: {
-            "results": [_polygon_row("call", 100, 0.30, "DELAYED", self.now), _polygon_row("put", 100, 0.34, "DELAYED", self.now)]
-        })
+        client = PolygonOptionIvClient(
+            "test-key",
+            get_json_fn=lambda *_args, **_kwargs: {
+                "results": [
+                    _polygon_row("call", 100, 0.30, "DELAYED", self.now),
+                    _polygon_row("put", 100, 0.34, "DELAYED", self.now),
+                ]
+            },
+        )
         surface = client.option_surface("TSLA", 100, self.now, self.now + timedelta(hours=4))
         self.assertEqual(surface.provider, "MASSIVE_OPTIONS")
         self.assertIn("POLYGON_OPTION_QUOTES_DELAYED", surface.quality_flags)
@@ -42,7 +50,12 @@ class OptionIvTests(unittest.TestCase):
 
         def response(*args, **kwargs):
             calls.append((args, kwargs))
-            return {"results": [_polygon_row("call", 100, 0.30, "REAL-TIME", self.now), _polygon_row("put", 100, 0.34, "REAL-TIME", self.now)]}
+            return {
+                "results": [
+                    _polygon_row("call", 100, 0.30, "REAL-TIME", self.now),
+                    _polygon_row("put", 100, 0.34, "REAL-TIME", self.now),
+                ]
+            }
 
         client = PolygonOptionIvClient("test-key", get_json_fn=response)
         surface = client.option_surface("TSLA", 100, self.now, self.now + timedelta(hours=4))
@@ -70,7 +83,17 @@ class OptionIvTests(unittest.TestCase):
 
 def _polygon_row(option_type: str, strike: float, iv: float, timeframe: str, now: datetime) -> dict[str, object]:
     return {
-        "details": {"ticker": f"O:TSLA260722{option_type[0].upper()}00100000", "contract_type": option_type, "expiration_date": "2026-07-22", "strike_price": strike},
+        "details": {
+            "ticker": f"O:TSLA260722{option_type[0].upper()}00100000",
+            "contract_type": option_type,
+            "expiration_date": "2026-07-22",
+            "strike_price": strike,
+        },
         "implied_volatility": iv,
-        "last_quote": {"bid": 2.0, "ask": 2.1, "last_updated": int(now.timestamp() * 1_000_000_000), "timeframe": timeframe},
+        "last_quote": {
+            "bid": 2.0,
+            "ask": 2.1,
+            "last_updated": int(now.timestamp() * 1_000_000_000),
+            "timeframe": timeframe,
+        },
     }

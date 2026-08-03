@@ -67,7 +67,6 @@ async def run_with_reconnect(
         delay_seconds = min(maximum_delay_seconds, delay_seconds * 2)
 
 
-
 class DebouncedReevaluation:
     def __init__(
         self, delay_seconds: float, callback: EventCallback, *, error_callback: EventCallback | None = None
@@ -96,22 +95,29 @@ class DebouncedReevaluation:
                 return
             reasons = sorted(self._reasons)
             self._reasons.clear()
-            await _emit(self._callback, {
-                "event_type": "SHADOW_REEVALUATION_REQUESTED", "reasons": reasons,
-                "recorded_at": datetime.now(UTC).isoformat(),
-            })
+            await _emit(
+                self._callback,
+                {
+                    "event_type": "SHADOW_REEVALUATION_REQUESTED",
+                    "reasons": reasons,
+                    "recorded_at": datetime.now(UTC).isoformat(),
+                },
+            )
         except asyncio.CancelledError:
             return
         except KeyboardInterrupt:
             return
         except Exception as error:
             if self._error_callback is not None:
-                await _emit(self._error_callback, {
-                    "event_type": "SHADOW_REEVALUATION_FAILED",
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                    "recorded_at": datetime.now(UTC).isoformat(),
-                })
+                await _emit(
+                    self._error_callback,
+                    {
+                        "event_type": "SHADOW_REEVALUATION_FAILED",
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                        "recorded_at": datetime.now(UTC).isoformat(),
+                    },
+                )
 
     async def close(self) -> None:
         self._closed = True
@@ -141,10 +147,13 @@ class SpotQuote:
 
     def as_payload(self) -> Mapping[str, object]:
         return {
-            "source": self.source, "symbol": self.symbol, "price": self.price,
+            "source": self.source,
+            "symbol": self.symbol,
+            "price": self.price,
             "observed_at": self.observed_at.isoformat(),
             "published_at": self.published_at.isoformat() if self.published_at else None,
-            "confidence": self.confidence, "feed_id": self.feed_id,
+            "confidence": self.confidence,
+            "feed_id": self.feed_id,
         }
 
 
@@ -189,7 +198,9 @@ class ShadowStreamCoordinator:
         self.comparison_spot_source = self.comparison_spot_source.upper() if self.comparison_spot_source else None
         self.freshness = StreamFreshness(self.max_age_seconds)
         self._debouncer = DebouncedReevaluation(
-            self.debounce_seconds, self.callback, error_callback=self.reevaluation_error_callback,
+            self.debounce_seconds,
+            self.callback,
+            error_callback=self.reevaluation_error_callback,
         )
 
     def latest_quote(self, source: str, symbol: str) -> SpotQuote | None:
@@ -244,7 +255,8 @@ class ShadowStreamCoordinator:
                 else:
                     levels[book_side][price] = size
         self.latest_books[asset_id] = {
-            "event_type": "RECONSTRUCTED_L2", "source_event": event_type,
+            "event_type": "RECONSTRUCTED_L2",
+            "source_event": event_type,
             "bids": _top_levels(levels["bids"], maximum=True),
             "asks": _top_levels(levels["asks"], maximum=False),
             "last_event": dict(payload),
@@ -255,7 +267,9 @@ class ShadowStreamCoordinator:
         symbol = payload.get("S")
         price = payload.get("p") if message_type == "t" else payload.get("ap")
         if isinstance(symbol, str) and isinstance(price, (int, float)) and price > 0:
-            await self._accept_spot(SpotQuote("ALPACA", symbol.upper(), float(price), datetime.now(UTC)), f"ALPACA_{message_type.upper()}")
+            await self._accept_spot(
+                SpotQuote("ALPACA", symbol.upper(), float(price), datetime.now(UTC)), f"ALPACA_{message_type.upper()}"
+            )
 
     async def on_finnhub_message(self, payload: Mapping[str, object]) -> None:
         """Accept Finnhub trade batches in the same spot-update pipeline."""
@@ -273,7 +287,9 @@ class ShadowStreamCoordinator:
             if isinstance(symbol, str) and isinstance(price, (int, float)) and price > 0:
                 observed_at = datetime.now(UTC)
                 published_at = _unix_timestamp(trade.get("t"), milliseconds=True)
-                await self._accept_spot(SpotQuote("FINNHUB", symbol.upper(), float(price), observed_at, published_at), "FINNHUB_TRADE")
+                await self._accept_spot(
+                    SpotQuote("FINNHUB", symbol.upper(), float(price), observed_at, published_at), "FINNHUB_TRADE"
+                )
 
     async def on_pyth_message(self, payload: Mapping[str, object], feed_symbols: Mapping[str, str]) -> None:
         parsed = payload.get("parsed")
@@ -290,13 +306,16 @@ class ShadowStreamCoordinator:
                 continue
             try:
                 exponent = int(quote["expo"])
-                price = int(quote["price"]) * (10 ** exponent)
-                confidence = int(quote["conf"]) * (10 ** exponent)
+                price = int(quote["price"]) * (10**exponent)
+                confidence = int(quote["conf"]) * (10**exponent)
                 published_at = datetime.fromtimestamp(int(quote["publish_time"]), tz=UTC)
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
             if price > 0 and confidence >= 0:
-                await self._accept_spot(SpotQuote("PYTH_HERMES", symbol, price, datetime.now(UTC), published_at, confidence, feed_id), "PYTH_HERMES_SPOT")
+                await self._accept_spot(
+                    SpotQuote("PYTH_HERMES", symbol, price, datetime.now(UTC), published_at, confidence, feed_id),
+                    "PYTH_HERMES_SPOT",
+                )
 
     async def _accept_spot(self, quote: SpotQuote, reason: str) -> None:
         source_quotes = self.latest_source_quotes.setdefault(quote.source, {})
@@ -311,14 +330,17 @@ class ShadowStreamCoordinator:
         if previous is not None:
             gap_seconds = (quote.observed_at - previous.observed_at).total_seconds()
             if gap_seconds > self.max_age_seconds and self.source_gap_callback is not None:
-                await _emit(self.source_gap_callback, {
-                    "event_type": "SOURCE_SPOT_GAP_DETECTED",
-                    "source": quote.source,
-                    "symbol": quote.symbol,
-                    "gap_seconds": gap_seconds,
-                    "previous_observed_at": previous.observed_at.isoformat(),
-                    "observed_at": quote.observed_at.isoformat(),
-                })
+                await _emit(
+                    self.source_gap_callback,
+                    {
+                        "event_type": "SOURCE_SPOT_GAP_DETECTED",
+                        "source": quote.source,
+                        "symbol": quote.symbol,
+                        "gap_seconds": gap_seconds,
+                        "previous_observed_at": previous.observed_at.isoformat(),
+                        "observed_at": quote.observed_at.isoformat(),
+                    },
+                )
         await self._record_spot_if_due(quote)
         await self._record_comparison_if_due(quote.symbol, quote.observed_at)
 
@@ -347,17 +369,25 @@ class ShadowStreamCoordinator:
             return
         self._persisted_comparison_seconds[symbol] = bucket
         difference_bps = (primary.price - pyth.price) / pyth.price * 10_000
-        await _emit(self.spot_comparison_callback, {
-            "observed_at": observed_at.isoformat(), "symbol": symbol,
-            "primary_source": primary.source, "primary_price": primary.price,
-            "primary_published_at": primary.published_at.isoformat() if primary.published_at else None,
-            "pyth_price": pyth.price, "pyth_published_at": pyth.published_at.isoformat() if pyth.published_at else None,
-            "pyth_confidence": pyth.confidence, "pyth_feed_id": pyth.feed_id,
-            "difference_bps": difference_bps,
-        })
+        await _emit(
+            self.spot_comparison_callback,
+            {
+                "observed_at": observed_at.isoformat(),
+                "symbol": symbol,
+                "primary_source": primary.source,
+                "primary_price": primary.price,
+                "primary_published_at": primary.published_at.isoformat() if primary.published_at else None,
+                "pyth_price": pyth.price,
+                "pyth_published_at": pyth.published_at.isoformat() if pyth.published_at else None,
+                "pyth_confidence": pyth.confidence,
+                "pyth_feed_id": pyth.feed_id,
+                "difference_bps": difference_bps,
+            },
+        )
 
     async def close(self) -> None:
         await self._debouncer.close()
+
 
 def _persistence_bucket(observed_at: datetime) -> str:
     """Keep normal-session diagnostics at one minute, but preserve the final five minutes per second."""
@@ -415,7 +445,9 @@ class PolymarketMarketStream:
         if not token_ids:
             raise ValueError("at least one Polymarket token ID is required")
         async with connect(POLYMARKET_MARKET_WS, ping_interval=None) as websocket:
-            await websocket.send(json.dumps({"assets_ids": list(token_ids), "type": "market", "custom_feature_enabled": True}))
+            await websocket.send(
+                json.dumps({"assets_ids": list(token_ids), "type": "market", "custom_feature_enabled": True})
+            )
             heartbeat = asyncio.create_task(self._heartbeat(websocket))
             try:
                 async for raw_message in websocket:
@@ -483,14 +515,9 @@ def _has_finnhub_trade(payload: Mapping[str, object]) -> bool:
 
 def _has_pyth_price(payload: Mapping[str, object]) -> bool:
     parsed = payload.get("parsed")
-    return (
-        isinstance(parsed, list)
-        and any(
-            isinstance(item, Mapping)
-            and isinstance(item.get("price"), Mapping)
-            and item["price"].get("price") is not None
-            for item in parsed
-        )
+    return isinstance(parsed, list) and any(
+        isinstance(item, Mapping) and isinstance(item.get("price"), Mapping) and item["price"].get("price") is not None
+        for item in parsed
     )
 
 
@@ -522,7 +549,11 @@ class FinnhubStockStream:
                 # Finnhub sends non-trade traffic too. Only actual subscribed trades prove
                 # that the primary spot feed remains live during the regular session.
                 elapsed = asyncio.get_running_loop().time() - last_trade_at
-                timeout = max(0.01, maximum_silence_seconds - elapsed) if _is_regular_equity_session() else maximum_silence_seconds
+                timeout = (
+                    max(0.01, maximum_silence_seconds - elapsed)
+                    if _is_regular_equity_session()
+                    else maximum_silence_seconds
+                )
                 try:
                     raw_message = await asyncio.wait_for(websocket.recv(), timeout=timeout)
                 except TimeoutError:
@@ -534,7 +565,10 @@ class FinnhubStockStream:
                     if _has_finnhub_trade(payload):
                         last_trade_at = asyncio.get_running_loop().time()
                     await _emit(callback, payload)
-                if _is_regular_equity_session() and asyncio.get_running_loop().time() - last_trade_at >= maximum_silence_seconds:
+                if (
+                    _is_regular_equity_session()
+                    and asyncio.get_running_loop().time() - last_trade_at >= maximum_silence_seconds
+                ):
                     raise TimeoutError("Finnhub produced no usable trades during the liveness window")
 
 
@@ -545,7 +579,11 @@ class PythHermesStockStream:
         self._api_key = api_key.strip()
 
     async def run(
-        self, feed_ids: Mapping[str, str], callback: EventCallback, *, maximum_silence_seconds: float = FINNHUB_MAX_SILENCE_SECONDS
+        self,
+        feed_ids: Mapping[str, str],
+        callback: EventCallback,
+        *,
+        maximum_silence_seconds: float = FINNHUB_MAX_SILENCE_SECONDS,
     ) -> None:
         if not feed_ids:
             raise ValueError("at least one Pyth feed id is required")
@@ -553,11 +591,16 @@ class PythHermesStockStream:
             raise ValueError("maximum_silence_seconds must be positive")
         query = urlencode([("ids[]", f"0x{_normalize_feed_id(feed_id)}") for feed_id in feed_ids], doseq=True)
         reader, writer = await asyncio.open_connection(
-            PYTH_HERMES_HOST, 443, ssl=ssl.create_default_context(), server_hostname=PYTH_HERMES_HOST,
+            PYTH_HERMES_HOST,
+            443,
+            ssl=ssl.create_default_context(),
+            server_hostname=PYTH_HERMES_HOST,
         )
         request_lines = [
             f"GET {PYTH_HERMES_STREAM_PATH}?parsed=true&{query} HTTP/1.1",
-            f"Host: {PYTH_HERMES_HOST}", "Accept: text/event-stream", "Connection: close",
+            f"Host: {PYTH_HERMES_HOST}",
+            "Accept: text/event-stream",
+            "Connection: close",
         ]
         if self._api_key:
             request_lines.append(f"Authorization: Bearer {self._api_key}")
@@ -580,10 +623,13 @@ class PythHermesStockStream:
             while True:
                 timeout = (
                     max(0.01, maximum_silence_seconds - (asyncio.get_running_loop().time() - last_price_at))
-                    if _is_regular_equity_session() else None
+                    if _is_regular_equity_session()
+                    else None
                 )
                 try:
-                    chunk = await anext(body) if timeout is None else await asyncio.wait_for(anext(body), timeout=timeout)
+                    chunk = (
+                        await anext(body) if timeout is None else await asyncio.wait_for(anext(body), timeout=timeout)
+                    )
                 except StopAsyncIteration:
                     return
                 except TimeoutError:
@@ -602,7 +648,10 @@ class PythHermesStockStream:
                         if _has_pyth_price(payload):
                             last_price_at = asyncio.get_running_loop().time()
                         await _emit(callback, payload)
-                if _is_regular_equity_session() and asyncio.get_running_loop().time() - last_price_at >= maximum_silence_seconds:
+                if (
+                    _is_regular_equity_session()
+                    and asyncio.get_running_loop().time() - last_price_at >= maximum_silence_seconds
+                ):
                     raise TimeoutError("Pyth Hermes produced no parsed price updates during the liveness window")
         finally:
             writer.close()

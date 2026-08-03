@@ -62,7 +62,9 @@ class PythBenchmarksClient:
                 return str(item["id"])
         raise PythPayloadError(f"Pyth does not expose expected feed {expected_symbol}")
 
-    def price_at(self, *, symbol: str, feed_id: str, observed_at: datetime, maximum_delay_seconds: int = 60) -> PythBenchmarkPrice:
+    def price_at(
+        self, *, symbol: str, feed_id: str, observed_at: datetime, maximum_delay_seconds: int = 60
+    ) -> PythBenchmarkPrice:
         if observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
         if maximum_delay_seconds < 0:
@@ -89,10 +91,12 @@ class PythBenchmarksClient:
             delay = (published_at - requested_at).total_seconds()
             if delay < 0 or delay > maximum_delay_seconds:
                 raise PythPayloadError(f"Pyth benchmark timestamp is outside requested window: {delay:.3f}s")
-            scale = 10 ** exponent
+            scale = 10**exponent
             price = raw_price * scale
             confidence = raw_confidence * scale
             if price <= 0 or confidence < 0:
                 raise PythPayloadError("Pyth benchmarks returned an invalid price")
-            return PythBenchmarkPrice(symbol.upper(), feed_id.lower(), requested_at, published_at, price, confidence, exponent)
+            return PythBenchmarkPrice(
+                symbol.upper(), feed_id.lower(), requested_at, published_at, price, confidence, exponent
+            )
         raise PythPayloadError("Pyth benchmarks response did not contain requested feed")

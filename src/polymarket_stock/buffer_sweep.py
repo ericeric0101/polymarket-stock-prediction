@@ -112,7 +112,10 @@ def buffer_values(minimum: float, maximum: float, step: float) -> tuple[float, .
 
 
 def run_buffer_sweep(
-    observations: Iterable[BufferSweepObservation], *, buffers: Iterable[float], minimum_edge: float,
+    observations: Iterable[BufferSweepObservation],
+    *,
+    buffers: Iterable[float],
+    minimum_edge: float,
     checkpoint_name: str | None = None,
 ) -> BufferSweepReport:
     if minimum_edge < 0:
@@ -120,21 +123,25 @@ def run_buffer_sweep(
     buffer_values_tuple = tuple(buffers)
     if not buffer_values_tuple or any(buffer < 0 or buffer >= 1 for buffer in buffer_values_tuple):
         raise ValueError("buffers must contain values between 0 and 1")
-    items = tuple(
-        item for item in observations
-        if checkpoint_name is None or item.checkpoint_name == checkpoint_name
-    )
+    items = tuple(item for item in observations if checkpoint_name is None or item.checkpoint_name == checkpoint_name)
     market_days = {(item.checkpoint_date, item.market_id) for item in items}
     checkpoints = tuple(sorted({item.checkpoint_name for item in items}))
     return BufferSweepReport(
-        observation_count=len(items), eligible_market_days=len(market_days), checkpoints=checkpoints,
+        observation_count=len(items),
+        eligible_market_days=len(market_days),
+        checkpoints=checkpoints,
         results=tuple(_run_buffer(items, buffer, minimum_edge) for buffer in buffer_values_tuple),
     )
 
 
 def walk_forward_buffer_sweep(
-    observations: Iterable[BufferSweepObservation], *, buffers: Iterable[float], minimum_edge: float,
-    training_days: int, validation_days: int, minimum_training_trades: int = 10,
+    observations: Iterable[BufferSweepObservation],
+    *,
+    buffers: Iterable[float],
+    minimum_edge: float,
+    training_days: int,
+    validation_days: int,
+    minimum_training_trades: int = 10,
     checkpoint_name: str | None = None,
 ) -> WalkForwardReport:
     if training_days < 1 or validation_days < 1 or minimum_training_trades < 1:
@@ -146,26 +153,36 @@ def walk_forward_buffer_sweep(
         return WalkForwardReport("INSUFFICIENT_DISTINCT_DAYS", len(dates), training_days, validation_days, ())
     windows = []
     for start in range(0, len(dates) - training_days - validation_days + 1, validation_days):
-        training_dates = dates[start:start + training_days]
-        validation_dates = dates[start + training_days:start + training_days + validation_days]
+        training_dates = dates[start : start + training_days]
+        validation_dates = dates[start + training_days : start + training_days + validation_days]
         training_items = tuple(item for item in items if item.checkpoint_date in training_dates)
         validation_items = tuple(item for item in items if item.checkpoint_date in validation_dates)
         training_report = run_buffer_sweep(training_items, buffers=buffer_values_tuple, minimum_edge=minimum_edge)
-        eligible = [
-            result for result in training_report.results
-            if result.selected_trades >= minimum_training_trades
-        ]
+        eligible = [result for result in training_report.results if result.selected_trades >= minimum_training_trades]
         if not eligible:
             windows.append(WalkForwardWindow(training_dates, validation_dates, None, None, None))
             continue
-        selected = max(eligible, key=lambda result: (result.total_realized_pnl, result.average_realized_pnl or float("-inf"), -result.buffer))
+        selected = max(
+            eligible,
+            key=lambda result: (
+                result.total_realized_pnl,
+                result.average_realized_pnl or float("-inf"),
+                -result.buffer,
+            ),
+        )
         validation_result = _run_buffer(validation_items, selected.buffer, minimum_edge)
-        windows.append(WalkForwardWindow(training_dates, validation_dates, selected.buffer, selected, validation_result))
-    return WalkForwardReport("READY" if windows else "INSUFFICIENT_DISTINCT_DAYS", len(dates), training_days, validation_days, tuple(windows))
+        windows.append(
+            WalkForwardWindow(training_dates, validation_dates, selected.buffer, selected, validation_result)
+        )
+    return WalkForwardReport(
+        "READY" if windows else "INSUFFICIENT_DISTINCT_DAYS", len(dates), training_days, validation_days, tuple(windows)
+    )
 
 
 def _run_buffer(
-    observations: tuple[BufferSweepObservation, ...], buffer: float, minimum_edge: float,
+    observations: tuple[BufferSweepObservation, ...],
+    buffer: float,
+    minimum_edge: float,
 ) -> BufferSweepResult:
     grouped: dict[tuple[str, str], list[BufferSweepObservation]] = {}
     for item in observations:
@@ -183,17 +200,25 @@ def _run_buffer(
     metrics = calibration_metrics(predictions)
     wins = sum(trade.won for trade in trades)
     return BufferSweepResult(
-        buffer=buffer, minimum_edge=minimum_edge, eligible_market_days=len(grouped), selected_trades=len(trades),
-        wins=wins, win_rate=wins / len(trades), coverage=len(trades) / len(grouped),
+        buffer=buffer,
+        minimum_edge=minimum_edge,
+        eligible_market_days=len(grouped),
+        selected_trades=len(trades),
+        wins=wins,
+        win_rate=wins / len(trades),
+        coverage=len(trades) / len(grouped),
         total_realized_pnl=sum(trade.realized_pnl for trade in trades),
         average_realized_pnl=mean(trade.realized_pnl for trade in trades),
         average_entry_edge=mean(trade.edge for trade in trades),
-        brier_score=metrics.brier_score, log_loss=metrics.log_loss,
+        brier_score=metrics.brier_score,
+        log_loss=metrics.log_loss,
     )
 
 
 def _candidate_trade(
-    item: BufferSweepObservation, buffer: float, minimum_edge: float,
+    item: BufferSweepObservation,
+    buffer: float,
+    minimum_edge: float,
 ) -> BufferSweepTrade | None:
     candidates = []
     for outcome, raw_probability, ask, fee in (
@@ -207,10 +232,20 @@ def _candidate_trade(
         if edge < minimum_edge:
             continue
         won = outcome == item.winning_outcome
-        candidates.append(BufferSweepTrade(
-            market_id=item.market_id, symbol=item.symbol, checkpoint_date=item.checkpoint_date,
-            checkpoint_name=item.checkpoint_name, outcome=outcome, raw_probability=raw_probability,
-            conservative_probability=conservative_probability, entry_ask=ask, entry_fee=fee,
-            edge=edge, won=won, realized_pnl=(1.0 if won else 0.0) - ask - fee,
-        ))
+        candidates.append(
+            BufferSweepTrade(
+                market_id=item.market_id,
+                symbol=item.symbol,
+                checkpoint_date=item.checkpoint_date,
+                checkpoint_name=item.checkpoint_name,
+                outcome=outcome,
+                raw_probability=raw_probability,
+                conservative_probability=conservative_probability,
+                entry_ask=ask,
+                entry_fee=fee,
+                edge=edge,
+                won=won,
+                realized_pnl=(1.0 if won else 0.0) - ask - fee,
+            )
+        )
     return max(candidates, key=lambda candidate: candidate.edge) if candidates else None

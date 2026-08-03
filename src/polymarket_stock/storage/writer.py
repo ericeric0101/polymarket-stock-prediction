@@ -1,10 +1,12 @@
 """Async boundary for non-critical journal writes."""
+
 from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 
 WriteOperation = Callable[[], None]
 ErrorHandler = Callable[[Exception], None]
+
 
 class JournalWriter:
     def __init__(self, *, on_error: ErrorHandler, maxsize: int = 10_000) -> None:
@@ -25,8 +27,10 @@ class JournalWriter:
         except asyncio.QueueFull:
             return False
 
-    async def drain(self) -> None:
-        await self._queue.join()
+    async def drain(self, *, timeout_seconds: float = 10.0) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        await asyncio.wait_for(self._queue.join(), timeout_seconds)
 
     async def close(self) -> None:
         await self.drain()
@@ -41,6 +45,10 @@ class JournalWriter:
             try:
                 await asyncio.to_thread(operation)
             except Exception as error:
-                self._on_error(error)
+                try:
+                    self._on_error(error)
+                except Exception:
+                    # Observability failures must not kill the writer or strand queue.join().
+                    pass
             finally:
                 self._queue.task_done()

@@ -71,7 +71,10 @@ class AboveXCoverageReport:
 
 
 def above_x_coverage_report(
-    *, discovery_path: Path, output_dir: Path, spot_data_dir: Path | None = None,
+    *,
+    discovery_path: Path,
+    output_dir: Path,
+    spot_data_dir: Path | None = None,
 ) -> AboveXCoverageReport:
     payload = json.loads(discovery_path.read_text(encoding="utf-8"))
     if not isinstance(payload, list):
@@ -97,11 +100,16 @@ def above_x_coverage_report(
             matching_spot += bool(matches)
     dates = sorted(contract.market_date for contract in contracts)
     return AboveXCoverageReport(
-        discovery_contracts=len(contracts), complete_markets=complete,
-        missing_yes_clob=missing_yes, missing_no_clob=missing_no,
-        missing_pyth_final=missing_pyth, missing_settlement=missing_settlement,
-        matching_intraday_spot=matching_spot, missing_intraday_spot=len(contracts) - matching_spot,
-        market_date_start=dates[0] if dates else None, market_date_end=dates[-1] if dates else None,
+        discovery_contracts=len(contracts),
+        complete_markets=complete,
+        missing_yes_clob=missing_yes,
+        missing_no_clob=missing_no,
+        missing_pyth_final=missing_pyth,
+        missing_settlement=missing_settlement,
+        matching_intraday_spot=matching_spot,
+        missing_intraday_spot=len(contracts) - matching_spot,
+        market_date_start=dates[0] if dates else None,
+        market_date_end=dates[-1] if dates else None,
     )
 
 
@@ -115,8 +123,10 @@ class AboveXBackfillReport:
 
     def as_payload(self) -> Mapping[str, object]:
         return {
-            "requested": self.requested, "completed": self.completed,
-            "skipped": self.skipped, "failed": self.failed,
+            "requested": self.requested,
+            "completed": self.completed,
+            "skipped": self.skipped,
+            "failed": self.failed,
             "failures": [dict(item) for item in self.failures],
             "execution_price_assumption": "HISTORICAL_PRICE_PROXY",
         }
@@ -129,8 +139,13 @@ class AboveXHistoricalDiscovery:
         self._get_json = get_json_fn
 
     def discover(
-        self, *, symbols: Iterable[str] = ("TSLA", "NVDA"), date_start: str | None = None,
-        date_end: str | None = None, page_size: int = 500, max_pages: int = 100,
+        self,
+        *,
+        symbols: Iterable[str] = ("TSLA", "NVDA"),
+        date_start: str | None = None,
+        date_end: str | None = None,
+        page_size: int = 500,
+        max_pages: int = 100,
     ) -> AboveXDiscoveryReport:
         wanted = {item.strip().upper() for item in symbols if item.strip()}
         if not wanted:
@@ -149,8 +164,11 @@ class AboveXHistoricalDiscovery:
             seen_cursors: set[str] = set()
             for _ in range(max_pages):
                 params: dict[str, object] = {
-                    "closed": "true", "limit": page_size, "tag_slug": "stocks",
-                    "related_tags": "true", "title_search": symbol,
+                    "closed": "true",
+                    "limit": page_size,
+                    "tag_slug": "stocks",
+                    "related_tags": "true",
+                    "title_search": symbol,
                 }
                 if start:
                     params["end_date_min"] = f"{start.isoformat()}T00:00:00Z"
@@ -190,12 +208,13 @@ class AboveXHistoricalDiscovery:
                     raise MarketPayloadError("Gamma keyset pagination repeated a cursor")
                 seen_cursors.add(next_cursor)
                 cursor = next_cursor
-        ordered = tuple(sorted(
-            contracts.values(),
-            key=lambda item: (item.market_date, item.symbol, item.strike, item.market_id),
-        ))
+        ordered = tuple(
+            sorted(
+                contracts.values(),
+                key=lambda item: (item.market_date, item.symbol, item.strike, item.market_id),
+            )
+        )
         return AboveXDiscoveryReport(ordered, pages, scanned, rejected, date_start, date_end)
-
 
 
 def write_above_x_discovery(path: Path, report: AboveXDiscoveryReport) -> None:
@@ -207,9 +226,14 @@ def write_above_x_discovery(path: Path, report: AboveXDiscoveryReport) -> None:
 
 
 def backfill_above_x_markets(
-    *, discovery_path: Path, output_dir: Path, pyth_api_key: str = "",
-    pause_seconds: float = 0.2, pyth_pause_seconds: float = 2.0,
-    maximum_markets: int | None = None, pyth_data_dir: Path | None = Path("data/historical/90d"),
+    *,
+    discovery_path: Path,
+    output_dir: Path,
+    pyth_api_key: str = "",
+    pause_seconds: float = 0.2,
+    pyth_pause_seconds: float = 2.0,
+    maximum_markets: int | None = None,
+    pyth_data_dir: Path | None = Path("data/historical/90d"),
 ) -> AboveXBackfillReport:
     """Download CLOB price proxies, final Pyth price, and Gamma settlement."""
     if pause_seconds < 0 or pyth_pause_seconds < 0:
@@ -244,13 +268,19 @@ def backfill_above_x_markets(
             if not settlement.closed or winner not in {"YES", "NO"}:
                 raise ValueError("Gamma does not provide a closed Yes/No settlement")
             start_at = datetime.combine(
-                datetime.fromisoformat(contract.market_date).date(), time(9, 30), tzinfo=NEW_YORK,
+                datetime.fromisoformat(contract.market_date).date(),
+                time(9, 30),
+                tzinfo=NEW_YORK,
             ).astimezone(UTC)
             yes_history = clob.prices_history(
-                contract.yes_token_id, start_at=start_at, end_at=contract.resolves_at,
+                contract.yes_token_id,
+                start_at=start_at,
+                end_at=contract.resolves_at,
             )
             no_history = clob.prices_history(
-                contract.no_token_id, start_at=start_at, end_at=contract.resolves_at,
+                contract.no_token_id,
+                start_at=start_at,
+                end_at=contract.resolves_at,
             )
             cache_key = (contract.symbol, contract.market_date)
             final_payload = final_cache.get(cache_key)
@@ -262,7 +292,9 @@ def backfill_above_x_markets(
                         feed_id = pyth.equity_feed_id(contract.symbol)
                         feed_ids[contract.symbol] = feed_id
                     final_payload = pyth.price_at(
-                        symbol=contract.symbol, feed_id=feed_id, observed_at=contract.resolves_at,
+                        symbol=contract.symbol,
+                        feed_id=feed_id,
+                        observed_at=contract.resolves_at,
                     ).as_payload()
                 final_cache[cache_key] = final_payload
             _write_price_history(output_dir / f"{stem}_yes_clob.csv", yes_history)
@@ -276,18 +308,30 @@ def backfill_above_x_markets(
                 encoding="utf-8",
             )
             settlement_path.write_text(
-                json.dumps({
-                    "market_id": contract.market_id, "winning_outcome": winner,
-                    "provider": "POLYMARKET_GAMMA", "payload": settlement.raw_payload,
-                }, sort_keys=True, indent=2, default=str) + "\n",
+                json.dumps(
+                    {
+                        "market_id": contract.market_id,
+                        "winning_outcome": winner,
+                        "provider": "POLYMARKET_GAMMA",
+                        "payload": settlement.raw_payload,
+                    },
+                    sort_keys=True,
+                    indent=2,
+                    default=str,
+                )
+                + "\n",
                 encoding="utf-8",
             )
             completed += 1
         except Exception as error:
-            failures.append({
-                "market_id": contract.market_id, "symbol": contract.symbol,
-                "market_date": contract.market_date, "error": str(error),
-            })
+            failures.append(
+                {
+                    "market_id": contract.market_id,
+                    "symbol": contract.symbol,
+                    "market_date": contract.market_date,
+                    "error": str(error),
+                }
+            )
         if pause_seconds and index + 1 < len(items):
             time_module.sleep(pause_seconds)
     return AboveXBackfillReport(len(items), completed, skipped, len(failures), tuple(failures))
@@ -295,9 +339,16 @@ def backfill_above_x_markets(
 
 def _above_x_files_complete(contract: PriceLadderContract, output_dir: Path) -> bool:
     stem = f"{contract.market_id}_{contract.symbol}_{contract.market_date}_above_x"
-    return all((output_dir / f"{stem}{suffix}").is_file() for suffix in (
-        "_yes_clob.csv", "_no_clob.csv", "_market.json", "_pyth_final.json", "_settlement.json",
-    ))
+    return all(
+        (output_dir / f"{stem}{suffix}").is_file()
+        for suffix in (
+            "_yes_clob.csv",
+            "_no_clob.csv",
+            "_market.json",
+            "_pyth_final.json",
+            "_settlement.json",
+        )
+    )
 
 
 def _contract_from_payload(payload: Mapping[str, object]) -> PriceLadderContract:
@@ -340,7 +391,13 @@ def _local_pyth_final(contract: PriceLadderContract, data_dir: Path | None) -> M
             payload = json.loads(path.read_text(encoding="utf-8"))
             final = payload.get("final_price")
             if isinstance(final, Mapping) and "price" in final:
-                return {"provider": "LOCAL_PYTH_REFERENCE", "symbol": contract.symbol, "market_date": contract.market_date, "price": final["price"], "source": str(path)}
+                return {
+                    "provider": "LOCAL_PYTH_REFERENCE",
+                    "symbol": contract.symbol,
+                    "market_date": contract.market_date,
+                    "price": final["price"],
+                    "source": str(path),
+                }
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             continue
     return None

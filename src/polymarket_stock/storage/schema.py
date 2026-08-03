@@ -243,4 +243,3 @@ CREATE TABLE IF NOT EXISTS market_settlements (
     payload_json TEXT NOT NULL
 );
 """
-

@@ -144,22 +144,33 @@ def sizing_readiness(observations: Iterable[FirstSignalCalibrationObservation]) 
     for regime in ("IV_VALID", "REALIZED_VOL_FALLBACK"):
         values = [item for item in items if item.iv_regime == regime]
         metrics = _metrics(values) if values else None
-        cohorts.append(SizingCohortReadiness(
-            iv_regime=regime,
-            sample_size=len(values),
-            brier_score=metrics.brier_score if metrics else None,
-            status=("KELLY_DISABLED_INSUFFICIENT_SAMPLES" if len(values) < KELLY_MINIMUM_COHORT_SAMPLES
-                    else "OPERATOR_REVIEW_REQUIRED"),
-        ))
+        cohorts.append(
+            SizingCohortReadiness(
+                iv_regime=regime,
+                sample_size=len(values),
+                brier_score=metrics.brier_score if metrics else None,
+                status=(
+                    "KELLY_DISABLED_INSUFFICIENT_SAMPLES"
+                    if len(values) < KELLY_MINIMUM_COHORT_SAMPLES
+                    else "OPERATOR_REVIEW_REQUIRED"
+                ),
+            )
+        )
     return SizingReadiness(
-        sample_size=len(items), position_sizing="FIXED_SMALL_POSITION_ONLY", kelly_enabled=False,
-        kelly_minimum_cohort_samples=KELLY_MINIMUM_COHORT_SAMPLES, cohorts=tuple(cohorts),
+        sample_size=len(items),
+        position_sizing="FIXED_SMALL_POSITION_ONLY",
+        kelly_enabled=False,
+        kelly_minimum_cohort_samples=KELLY_MINIMUM_COHORT_SAMPLES,
+        cohorts=tuple(cohorts),
     )
 
 
 def walk_forward_probability_calibration(
-    observations: Iterable[FirstSignalCalibrationObservation], *, training_days: int = 20,
-    validation_days: int = 5, minimum_training_samples: int = 50,
+    observations: Iterable[FirstSignalCalibrationObservation],
+    *,
+    training_days: int = 20,
+    validation_days: int = 5,
+    minimum_training_samples: int = 50,
 ) -> WalkForwardProbabilityCalibrationReport:
     """Fit bin-level probability shrinkage on earlier dates and score later dates only."""
 
@@ -173,15 +184,23 @@ def walk_forward_probability_calibration(
     required_dates = training_days + validation_days
     if len(dates) < required_dates:
         return WalkForwardProbabilityCalibrationReport(
-            "INSUFFICIENT_DISTINCT_DAYS", len(dates), required_dates, (), 0, None, None, None, None,
+            "INSUFFICIENT_DISTINCT_DAYS",
+            len(dates),
+            required_dates,
+            (),
+            0,
+            None,
+            None,
+            None,
+            None,
         )
 
     folds = []
     raw_pairs: list[tuple[float, bool]] = []
     calibrated_pairs: list[tuple[float, bool]] = []
     for validation_start in range(training_days, len(dates) - validation_days + 1, validation_days):
-        train_dates = dates[validation_start - training_days:validation_start]
-        validation_dates = dates[validation_start:validation_start + validation_days]
+        train_dates = dates[validation_start - training_days : validation_start]
+        validation_dates = dates[validation_start : validation_start + validation_days]
         training = [item for day in train_dates for item in by_date[day]]
         validation = [item for day in validation_dates for item in by_date[day]]
         if len(training) < minimum_training_samples:
@@ -191,21 +210,44 @@ def walk_forward_probability_calibration(
         calibrated = [(calibrator.transform(item.selected_fair_probability), _won(item)) for item in validation]
         raw_metrics = calibration_metrics(raw)
         calibrated_metrics = calibration_metrics(calibrated)
-        folds.append(ProbabilityCalibrationFold(
-            train_dates, validation_dates, len(training), len(validation), raw_metrics.brier_score,
-            calibrated_metrics.brier_score, raw_metrics.log_loss, calibrated_metrics.log_loss,
-        ))
+        folds.append(
+            ProbabilityCalibrationFold(
+                train_dates,
+                validation_dates,
+                len(training),
+                len(validation),
+                raw_metrics.brier_score,
+                calibrated_metrics.brier_score,
+                raw_metrics.log_loss,
+                calibrated_metrics.log_loss,
+            )
+        )
         raw_pairs.extend(raw)
         calibrated_pairs.extend(calibrated)
     if not folds:
         return WalkForwardProbabilityCalibrationReport(
-            "INSUFFICIENT_TRAINING_SAMPLES", len(dates), required_dates, (), 0, None, None, None, None,
+            "INSUFFICIENT_TRAINING_SAMPLES",
+            len(dates),
+            required_dates,
+            (),
+            0,
+            None,
+            None,
+            None,
+            None,
         )
     raw_metrics = calibration_metrics(raw_pairs)
     calibrated_metrics = calibration_metrics(calibrated_pairs)
     return WalkForwardProbabilityCalibrationReport(
-        "READY_FOR_OPERATOR_REVIEW", len(dates), required_dates, tuple(folds), len(raw_pairs),
-        raw_metrics.brier_score, calibrated_metrics.brier_score, raw_metrics.log_loss, calibrated_metrics.log_loss,
+        "READY_FOR_OPERATOR_REVIEW",
+        len(dates),
+        required_dates,
+        tuple(folds),
+        len(raw_pairs),
+        raw_metrics.brier_score,
+        calibrated_metrics.brier_score,
+        raw_metrics.log_loss,
+        calibrated_metrics.log_loss,
     )
 
 
@@ -242,8 +284,16 @@ def _bucket(dimension: str, segment: str, observations: list[FirstSignalCalibrat
     predicted = sum(item.selected_fair_probability for item in observations) / sample_size
     lower, upper = _wilson_interval(wins, sample_size)
     return CalibrationBucket(
-        dimension, segment, sample_size, predicted, realized, realized - predicted,
-        metrics.brier_score, metrics.log_loss, lower, upper,
+        dimension,
+        segment,
+        sample_size,
+        predicted,
+        realized,
+        realized - predicted,
+        metrics.brier_score,
+        metrics.log_loss,
+        lower,
+        upper,
     )
 
 

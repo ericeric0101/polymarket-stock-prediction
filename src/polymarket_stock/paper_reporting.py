@@ -31,8 +31,13 @@ def paper_performance(positions: Iterable[PaperPosition]) -> PaperPerformance:
     settled = tuple(position for position in all_positions if position.status == "SETTLED")
     if not settled:
         return PaperPerformance(
-            open_positions=sum(position.status == "OPEN" for position in all_positions), settled_positions=0,
-            wins=0, total_realized_pnl=0.0, win_rate=None, brier_score=None, log_loss=None,
+            open_positions=sum(position.status == "OPEN" for position in all_positions),
+            settled_positions=0,
+            wins=0,
+            total_realized_pnl=0.0,
+            win_rate=None,
+            brier_score=None,
+            log_loss=None,
             excluded_positions=excluded_positions,
         )
     predictions = [(position.fair_probability, position.outcome == position.settlement_outcome) for position in settled]
@@ -40,8 +45,11 @@ def paper_performance(positions: Iterable[PaperPosition]) -> PaperPerformance:
     wins = sum(outcome for _, outcome in predictions)
     return PaperPerformance(
         open_positions=sum(position.status == "OPEN" for position in all_positions),
-        settled_positions=len(settled), wins=wins,
+        settled_positions=len(settled),
+        wins=wins,
         total_realized_pnl=sum(position.realized_pnl or 0.0 for position in settled),
-        win_rate=wins / len(settled), brier_score=calibration.brier_score, log_loss=calibration.log_loss,
+        win_rate=wins / len(settled),
+        brier_score=calibration.brier_score,
+        log_loss=calibration.log_loss,
         excluded_positions=excluded_positions,
     )

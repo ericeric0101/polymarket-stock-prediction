@@ -53,7 +53,9 @@ def latest_checkpoint(now: datetime, maximum_delay_seconds: float | None = None)
     return result
 
 
-def checkpoint_window(now: datetime, maximum_delay_seconds: float = DEFAULT_MAXIMUM_DELAY_SECONDS) -> CheckpointWindow | None:
+def checkpoint_window(
+    now: datetime, maximum_delay_seconds: float = DEFAULT_MAXIMUM_DELAY_SECONDS
+) -> CheckpointWindow | None:
     """Return the current valid capture window, never backfilling a late start."""
 
     checkpoint = latest_checkpoint(now, maximum_delay_seconds=maximum_delay_seconds)

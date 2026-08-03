@@ -54,18 +54,33 @@ class BaselineTests(unittest.TestCase):
 
     def test_pyth_price_to_beat_override_replaces_non_settlement_close(self) -> None:
         assessment = evaluate_realized_vol_baseline(
-            spot=115, closes=closes(), seconds_to_resolution=4 * 3600,
-            up_ask=0.2, down_ask=0.8, up_fee_rate=0.04, down_fee_rate=0.04,
-            base_model_error_buffer=0.02, fallback_buffer=0.0, minimum_edge=0.01,
-            data_is_fresh=True, price_to_beat_override=114.25,
+            spot=115,
+            closes=closes(),
+            seconds_to_resolution=4 * 3600,
+            up_ask=0.2,
+            down_ask=0.8,
+            up_fee_rate=0.04,
+            down_fee_rate=0.04,
+            base_model_error_buffer=0.02,
+            fallback_buffer=0.0,
+            minimum_edge=0.01,
+            data_is_fresh=True,
+            price_to_beat_override=114.25,
         )
         self.assertEqual(assessment.prior_close, 114.25)
 
     def test_stale_fallback_never_recommends_paper_outcome(self) -> None:
         assessment = evaluate_realized_vol_baseline(
-            spot=115, closes=closes(), seconds_to_resolution=4 * 3600,
-            up_ask=0.2, down_ask=0.8, up_fee_rate=0.04, down_fee_rate=0.04,
-            base_model_error_buffer=0.02, fallback_buffer=0.05, minimum_edge=0.01,
+            spot=115,
+            closes=closes(),
+            seconds_to_resolution=4 * 3600,
+            up_ask=0.2,
+            down_ask=0.8,
+            up_fee_rate=0.04,
+            down_fee_rate=0.04,
+            base_model_error_buffer=0.02,
+            fallback_buffer=0.05,
+            minimum_edge=0.01,
             data_is_fresh=False,
         )
         self.assertEqual(assessment.model_error_buffer, 0.07)

@@ -130,16 +130,25 @@ def parse_probability_values(value: str) -> tuple[float, ...]:
 
 
 def top_five_policies(
-    *, checkpoint_groups: Iterable[tuple[str, ...]], buffers: Iterable[float], minimum_edges: Iterable[float],
-    max_daily_entries: int, probability_calibration: str = "RAW",
+    *,
+    checkpoint_groups: Iterable[tuple[str, ...]],
+    buffers: Iterable[float],
+    minimum_edges: Iterable[float],
+    max_daily_entries: int,
+    probability_calibration: str = "RAW",
 ) -> tuple[TopFivePolicy, ...]:
     if max_daily_entries < 1:
         raise ValueError("max_daily_entries must be positive")
     if probability_calibration not in {"RAW", "TRAINING_BINNED_SHRINKAGE"}:
         raise ValueError("unknown probability calibration")
     policies = tuple(
-        TopFivePolicy(checkpoints=checkpoints, buffer=buffer, minimum_edge=minimum_edge,
-                      max_daily_entries=max_daily_entries, probability_calibration=probability_calibration)
+        TopFivePolicy(
+            checkpoints=checkpoints,
+            buffer=buffer,
+            minimum_edge=minimum_edge,
+            max_daily_entries=max_daily_entries,
+            probability_calibration=probability_calibration,
+        )
         for checkpoints in checkpoint_groups
         for buffer in buffers
         for minimum_edge in minimum_edges
@@ -171,13 +180,15 @@ class TrainingProbabilityCalibrator:
         sample_size = self.samples_by_band.get(band, 0)
         if sample_size < self.minimum_band_samples:
             return raw_probability
-        return (
-            self.wins_by_band.get(band, 0) + self.prior_strength * raw_probability
-        ) / (sample_size + self.prior_strength)
+        return (self.wins_by_band.get(band, 0) + self.prior_strength * raw_probability) / (
+            sample_size + self.prior_strength
+        )
 
 
 def run_top_five_policy(
-    observations: Iterable[BufferSweepObservation], *, policy: TopFivePolicy,
+    observations: Iterable[BufferSweepObservation],
+    *,
+    policy: TopFivePolicy,
     calibrator: TrainingProbabilityCalibrator | None = None,
 ) -> TopFivePolicyResult:
     """Replay an executable, chronological, maximum-five-entries-per-day policy."""
@@ -216,18 +227,27 @@ def run_top_five_policy(
         daily_pnl[trade.checkpoint_date] = daily_pnl.get(trade.checkpoint_date, 0.0) + trade.realized_pnl
     metrics = calibration_metrics(tuple((trade.raw_probability, trade.won) for trade in trades))
     return TopFivePolicyResult(
-        policy=policy, eligible_market_days=len(market_days), selected_trades=len(trades), wins=wins,
-        win_rate=wins / len(trades), total_realized_pnl=sum(trade.realized_pnl for trade in trades),
+        policy=policy,
+        eligible_market_days=len(market_days),
+        selected_trades=len(trades),
+        wins=wins,
+        win_rate=wins / len(trades),
+        total_realized_pnl=sum(trade.realized_pnl for trade in trades),
         average_realized_pnl=mean(trade.realized_pnl for trade in trades),
         average_entry_edge=mean(trade.edge for trade in trades),
-        worst_daily_realized_pnl=min(daily_pnl.values()), brier_score=metrics.brier_score,
+        worst_daily_realized_pnl=min(daily_pnl.values()),
+        brier_score=metrics.brier_score,
         log_loss=metrics.log_loss,
     )
 
 
 def walk_forward_top_five_policy(
-    observations: Iterable[BufferSweepObservation], *, policies: Iterable[TopFivePolicy], training_days: int,
-    validation_days: int, minimum_training_trades: int = 5,
+    observations: Iterable[BufferSweepObservation],
+    *,
+    policies: Iterable[TopFivePolicy],
+    training_days: int,
+    validation_days: int,
+    minimum_training_trades: int = 5,
 ) -> TopFiveWalkForwardReport:
     if training_days < 1 or validation_days < 1 or minimum_training_trades < 1:
         raise ValueError("walk-forward windows and minimum_training_trades must be positive")
@@ -235,12 +255,13 @@ def walk_forward_top_five_policy(
     items = tuple(observations)
     dates = tuple(sorted({item.checkpoint_date for item in items}))
     if len(dates) < training_days + validation_days:
-        return TopFiveWalkForwardReport("INSUFFICIENT_DISTINCT_DAYS", len(dates), training_days, validation_days,
-                                        len(policy_values), ())
+        return TopFiveWalkForwardReport(
+            "INSUFFICIENT_DISTINCT_DAYS", len(dates), training_days, validation_days, len(policy_values), ()
+        )
     windows = []
     for start in range(0, len(dates) - training_days - validation_days + 1, validation_days):
-        training_dates = dates[start:start + training_days]
-        validation_dates = dates[start + training_days:start + training_days + validation_days]
+        training_dates = dates[start : start + training_days]
+        validation_dates = dates[start + training_days : start + training_days + validation_days]
         training_items = tuple(item for item in items if item.checkpoint_date in training_dates)
         validation_items = tuple(item for item in items if item.checkpoint_date in validation_dates)
         calibrator = (
@@ -250,7 +271,8 @@ def walk_forward_top_five_policy(
         )
         training_results = [
             run_top_five_policy(
-                training_items, policy=policy,
+                training_items,
+                policy=policy,
                 calibrator=calibrator if policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" else None,
             )
             for policy in policy_values
@@ -270,15 +292,22 @@ def walk_forward_top_five_policy(
             ),
         )
         validation_result = run_top_five_policy(
-            validation_items, policy=selected.policy,
-            calibrator=(
-                calibrator if selected.policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" else None
-            ),
+            validation_items,
+            policy=selected.policy,
+            calibrator=(calibrator if selected.policy.probability_calibration == "TRAINING_BINNED_SHRINKAGE" else None),
         )
-        windows.append(TopFiveWalkForwardWindow(
-            training_dates, validation_dates, selected.policy, selected, validation_result,
-        ))
-    return TopFiveWalkForwardReport("READY", len(dates), training_days, validation_days, len(policy_values), tuple(windows))
+        windows.append(
+            TopFiveWalkForwardWindow(
+                training_dates,
+                validation_dates,
+                selected.policy,
+                selected,
+                validation_result,
+            )
+        )
+    return TopFiveWalkForwardReport(
+        "READY", len(dates), training_days, validation_days, len(policy_values), tuple(windows)
+    )
 
 
 def _probability_band(probability: float) -> int:
@@ -286,7 +315,13 @@ def _probability_band(probability: float) -> int:
 
 
 __all__ = [
-    "TopFivePolicy", "TopFivePolicyResult", "TrainingProbabilityCalibrator", "checkpoint_sets",
-    "parse_checkpoint_sets", "parse_probability_values",
-    "run_top_five_policy", "top_five_policies", "walk_forward_top_five_policy",
+    "TopFivePolicy",
+    "TopFivePolicyResult",
+    "TrainingProbabilityCalibrator",
+    "checkpoint_sets",
+    "parse_checkpoint_sets",
+    "parse_probability_values",
+    "run_top_five_policy",
+    "top_five_policies",
+    "walk_forward_top_five_policy",
 ]

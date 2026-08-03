@@ -51,9 +51,7 @@ def _required_bool(name: str, expected: bool) -> bool:
     actual = raw_value == "true"
     if actual is not expected:
         expected_text = str(expected).lower()
-        raise ConfigurationError(
-            f"Phase 0 requires {name}={expected_text}; refusing to start"
-        )
+        raise ConfigurationError(f"Phase 0 requires {name}={expected_text}; refusing to start")
     return actual
 
 

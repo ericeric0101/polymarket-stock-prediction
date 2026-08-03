@@ -12,10 +12,13 @@ class ThresholdEstimateTests(unittest.TestCase):
             {"status": "COMPLETE", "source_errors_bps": {"NASDAQ_DAILY_CLOSE": 10.0, "YAHOO_DAILY_CLOSE": -10.0}},
             {"status": "COMPLETE", "source_errors_bps": {"NASDAQ_DAILY_CLOSE": 10.0, "YAHOO_DAILY_CLOSE": -10.0}},
         )
-        report = calibrated_threshold_estimate((
-            ThresholdSource("NASDAQ_DAILY_CLOSE", 100.10),
-            ThresholdSource("YAHOO_DAILY_CLOSE", 99.90),
-        ), calibrations)
+        report = calibrated_threshold_estimate(
+            (
+                ThresholdSource("NASDAQ_DAILY_CLOSE", 100.10),
+                ThresholdSource("YAHOO_DAILY_CLOSE", 99.90),
+            ),
+            calibrations,
+        )
         self.assertAlmostEqual(report.price, 100.0, places=4)
         self.assertEqual(report.quality, "CALIBRATED_MULTI_SOURCE_MEDIUM")
         self.assertEqual(report.source_count, 2)

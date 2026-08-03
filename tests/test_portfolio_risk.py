@@ -13,7 +13,9 @@ class PortfolioRiskTests(unittest.TestCase):
             PaperEntryCandidate("nvda", "NVDA", "UP", 0.43, 0.65, 0.15),
             PaperEntryCandidate("abnb", "ABNB", "DOWN", 0.44, 0.65, 0.14),
         )
-        decisions = select_diversified_entries(candidates, existing_symbols=(), max_daily_entries=3, max_per_risk_group=1, max_same_direction=2)
+        decisions = select_diversified_entries(
+            candidates, existing_symbols=(), max_daily_entries=3, max_per_risk_group=1, max_same_direction=2
+        )
         selected = [item.candidate.market_id for item in decisions if item.accepted]
         rejected = {item.candidate.market_id: item.reason for item in decisions if not item.accepted}
         self.assertEqual(selected, ["aapl", "nvda", "abnb"])

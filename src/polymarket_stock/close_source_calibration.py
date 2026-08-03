@@ -65,8 +65,12 @@ class CloseSourceCalibrationReport:
 
 
 def calibrate_close_sources(
-    *, client: PythHistoryClient, market_date: date, symbols: Iterable[str],
-    finnhub_spots: Iterable[SpotQuote], pyth_live_spots: Iterable[SpotQuote] = (),
+    *,
+    client: PythHistoryClient,
+    market_date: date,
+    symbols: Iterable[str],
+    finnhub_spots: Iterable[SpotQuote],
+    pyth_live_spots: Iterable[SpotQuote] = (),
     supplemental_closes: Mapping[str, Mapping[str, float]] | None = None,
 ) -> CloseSourceCalibrationReport:
     """Compare exact Pyth 15:59 candle close with locally captured close-window quotes.
@@ -82,22 +86,51 @@ def calibrate_close_sources(
         finnhub = _latest_in_close_window(finnhub_by_symbol.get(raw_symbol, ()), market_date)
         pyth_live = _latest_in_close_window(pyth_live_by_symbol.get(raw_symbol, ()), market_date)
         if finnhub is None:
-            observations.append(CloseSourceCalibration(
-                market_date.isoformat(), raw_symbol, None, None, None, None,
-                pyth_live.price if pyth_live else None, pyth_live.observed_at if pyth_live else None, None,
-                None, None, None, None, "FINNHUB_CLOSE_UNAVAILABLE",
-                "no locally captured Finnhub quote in the 15:59-16:00 ET window",
-            ))
+            observations.append(
+                CloseSourceCalibration(
+                    market_date.isoformat(),
+                    raw_symbol,
+                    None,
+                    None,
+                    None,
+                    None,
+                    pyth_live.price if pyth_live else None,
+                    pyth_live.observed_at if pyth_live else None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "FINNHUB_CLOSE_UNAVAILABLE",
+                    "no locally captured Finnhub quote in the 15:59-16:00 ET window",
+                )
+            )
             continue
         try:
             pyth_close, pyth_close_at = official_pyth_final_minute_close(client, raw_symbol, market_date)
-            prior_close, _ = official_pyth_final_minute_close(client, raw_symbol, previous_nyse_trading_day(market_date))
+            prior_close, _ = official_pyth_final_minute_close(
+                client, raw_symbol, previous_nyse_trading_day(market_date)
+            )
         except (PythHistoryError, OSError, ValueError) as error:
-            observations.append(CloseSourceCalibration(
-                market_date.isoformat(), raw_symbol, None, None, finnhub.price, finnhub.observed_at,
-                pyth_live.price if pyth_live else None, pyth_live.observed_at if pyth_live else None, None,
-                None, None, None, None, "PYTH_CLOSE_UNAVAILABLE", str(error),
-            ))
+            observations.append(
+                CloseSourceCalibration(
+                    market_date.isoformat(),
+                    raw_symbol,
+                    None,
+                    None,
+                    finnhub.price,
+                    finnhub.observed_at,
+                    pyth_live.price if pyth_live else None,
+                    pyth_live.observed_at if pyth_live else None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "PYTH_CLOSE_UNAVAILABLE",
+                    str(error),
+                )
+            )
             continue
         difference_bps = (finnhub.price - pyth_close) / pyth_close * 10_000
         source_estimates = {"FINNHUB_CLOSE_WINDOW": finnhub.price}
@@ -105,19 +138,37 @@ def calibrate_close_sources(
             value = values.get(raw_symbol)
             if isinstance(value, (int, float)) and value > 0:
                 source_estimates[str(source)] = float(value)
-        source_errors = {source: (value - pyth_close) / pyth_close * 10_000 for source, value in source_estimates.items()}
+        source_errors = {
+            source: (value - pyth_close) / pyth_close * 10_000 for source, value in source_estimates.items()
+        }
         pyth_direction = _direction(pyth_close, prior_close)
         finnhub_direction = _direction(finnhub.price, prior_close)
-        observations.append(CloseSourceCalibration(
-            market_date.isoformat(), raw_symbol, pyth_close, pyth_close_at, finnhub.price, finnhub.observed_at,
-            pyth_live.price if pyth_live else None, pyth_live.observed_at if pyth_live else None, prior_close,
-            pyth_direction, finnhub_direction, pyth_direction != finnhub_direction, difference_bps, "COMPLETE",
-            source_estimates=source_estimates, source_errors_bps=source_errors,
-        ))
+        observations.append(
+            CloseSourceCalibration(
+                market_date.isoformat(),
+                raw_symbol,
+                pyth_close,
+                pyth_close_at,
+                finnhub.price,
+                finnhub.observed_at,
+                pyth_live.price if pyth_live else None,
+                pyth_live.observed_at if pyth_live else None,
+                prior_close,
+                pyth_direction,
+                finnhub_direction,
+                pyth_direction != finnhub_direction,
+                difference_bps,
+                "COMPLETE",
+                source_estimates=source_estimates,
+                source_errors_bps=source_errors,
+            )
+        )
     return CloseSourceCalibrationReport(market_date.isoformat(), tuple(observations))
 
 
-def official_pyth_final_minute_close(client: PythHistoryClient, symbol: str, market_date: date) -> tuple[float, datetime]:
+def official_pyth_final_minute_close(
+    client: PythHistoryClient, symbol: str, market_date: date
+) -> tuple[float, datetime]:
     start = datetime.combine(market_date, CLOSE_WINDOW_START, tzinfo=NEW_YORK).astimezone(UTC)
     end = datetime.combine(market_date, CLOSE_WINDOW_END, tzinfo=NEW_YORK).astimezone(UTC)
     points = client.intraday_spots(symbol, start_at=start, end_at=end).points

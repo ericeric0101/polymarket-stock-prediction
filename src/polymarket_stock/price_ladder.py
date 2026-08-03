@@ -105,9 +105,14 @@ def parse_price_ladder_contract(candidate: MarketCandidate) -> PriceLadderContra
 
     payload = candidate.raw_payload
     searchable = " ".join(
-        str(value) for value in (
-            candidate.question, payload.get("title"), payload.get("groupItemTitle"), payload.get("groupItemThreshold"),
-        ) if value
+        str(value)
+        for value in (
+            candidate.question,
+            payload.get("title"),
+            payload.get("groupItemTitle"),
+            payload.get("groupItemThreshold"),
+        )
+        if value
     )
     symbol_match = re.search(r"\(([A-Z][A-Z.]{0,9})\)", searchable.upper())
     if symbol_match is None:
@@ -119,7 +124,10 @@ def parse_price_ladder_contract(candidate: MarketCandidate) -> PriceLadderContra
         raise PriceLadderContractError("price-ladder outcomes must be Yes/No in that order")
     normalized_question = " ".join(candidate.question.upper().split())
     normalized_title = " ".join(str(payload.get("title") or "").upper().split())
-    if "CLOSE" not in normalized_question + " " + normalized_title or "ABOVE" not in normalized_question + " " + normalized_title:
+    if (
+        "CLOSE" not in normalized_question + " " + normalized_title
+        or "ABOVE" not in normalized_question + " " + normalized_title
+    ):
         raise PriceLadderContractError("market is not a closes-above strike")
     strike = _parse_strike(searchable)
     expected_feed = f"Equity.US.{symbol}/USD"
@@ -137,6 +145,7 @@ def parse_price_ladder_contract(candidate: MarketCandidate) -> PriceLadderContra
         raise PriceLadderContractError("market end date is timezone-naive")
     market_date = resolves_at.date().isoformat()
     import hashlib
+
     rules_hash = hashlib.sha256(
         f"{candidate.question}|{candidate.description}|{candidate.resolution_source}".encode("utf-8")
     ).hexdigest()
@@ -144,16 +153,29 @@ def parse_price_ladder_contract(candidate: MarketCandidate) -> PriceLadderContra
         market_id=candidate.market_id,
         event_id=str(payload.get("event_id") or payload.get("eventId") or payload.get("id") or ""),
         event_slug=str(payload.get("event_slug") or payload.get("slug") or ""),
-        symbol=symbol, strike=strike, market_date=market_date, resolves_at=resolves_at,
-        pyth_feed=expected_feed, yes_token_id=candidate.outcome_a_token_id,
-        no_token_id=candidate.outcome_b_token_id, question=candidate.question,
-        rules_hash=rules_hash, raw_payload=dict(payload),
+        symbol=symbol,
+        strike=strike,
+        market_date=market_date,
+        resolves_at=resolves_at,
+        pyth_feed=expected_feed,
+        yes_token_id=candidate.outcome_a_token_id,
+        no_token_id=candidate.outcome_b_token_id,
+        question=candidate.question,
+        rules_hash=rules_hash,
+        raw_payload=dict(payload),
     )
 
 
 def probability_point(
-    *, strike: float, market_id: str, yes_bid: float | None, yes_ask: float | None,
-    no_bid: float | None, no_ask: float | None, yes_depth: float = 0.0, no_depth: float = 0.0,
+    *,
+    strike: float,
+    market_id: str,
+    yes_bid: float | None,
+    yes_ask: float | None,
+    no_bid: float | None,
+    no_ask: float | None,
+    yes_depth: float = 0.0,
+    no_depth: float = 0.0,
 ) -> LadderProbabilityPoint | None:
     """Create executable probability bounds from both complementary books."""
 
@@ -188,8 +210,7 @@ def fit_monotonic_curve(points: Iterable[LadderProbabilityPoint]) -> MonotonicLa
             left = blocks.pop()
             weight = float(left["weight"]) + float(right["weight"])
             value = (
-                float(left["value"]) * float(left["weight"])
-                + float(right["value"]) * float(right["weight"])
+                float(left["value"]) * float(left["weight"]) + float(right["value"]) * float(right["weight"])
             ) / weight
             blocks.append({"start": int(left["start"]), "end": int(right["end"]), "weight": weight, "value": value})
     adjusted = [0.0] * len(ordered)
@@ -200,10 +221,17 @@ def fit_monotonic_curve(points: Iterable[LadderProbabilityPoint]) -> MonotonicLa
 
 
 def diagnose_cross_market(
-    *, symbol: str, market_date: str, checkpoint_name: str, price_to_beat: float,
-    model_up_probability: float, up_down_market_probability: float | None,
-    points: Iterable[LadderProbabilityPoint], minimum_strikes: int = 3,
-    maximum_bracket_width: float = 0.30, disagreement_threshold: float = 0.10,
+    *,
+    symbol: str,
+    market_date: str,
+    checkpoint_name: str,
+    price_to_beat: float,
+    model_up_probability: float,
+    up_down_market_probability: float | None,
+    points: Iterable[LadderProbabilityPoint],
+    minimum_strikes: int = 3,
+    maximum_bracket_width: float = 0.30,
+    disagreement_threshold: float = 0.10,
     confirmation_threshold: float = 0.07,
 ) -> CrossMarketDiagnostic:
     curve = fit_monotonic_curve(points)
@@ -218,7 +246,9 @@ def diagnose_cross_market(
         reasons.append("LADDER_BOOK_TOO_WIDE")
     if curve.violations:
         reasons.append("NON_MONOTONIC_RAW_LADDER")
-    if reasons and any(reason in {"INSUFFICIENT_STRIKES", "PRICE_TO_BEAT_NOT_BRACKETED", "LADDER_BOOK_TOO_WIDE"} for reason in reasons):
+    if reasons and any(
+        reason in {"INSUFFICIENT_STRIKES", "PRICE_TO_BEAT_NOT_BRACKETED", "LADDER_BOOK_TOO_WIDE"} for reason in reasons
+    ):
         status = "UNRELIABLE"
     elif ladder_probability is None:
         status = "UNRELIABLE"
@@ -233,14 +263,19 @@ def diagnose_cross_market(
         else:
             status = "MIXED"
     return CrossMarketDiagnostic(
-        symbol=symbol, market_date=market_date, checkpoint_name=checkpoint_name,
-        price_to_beat=price_to_beat, model_up_probability=model_up_probability,
+        symbol=symbol,
+        market_date=market_date,
+        checkpoint_name=checkpoint_name,
+        price_to_beat=price_to_beat,
+        model_up_probability=model_up_probability,
         up_down_market_probability=up_down_market_probability,
         ladder_up_probability=ladder_probability,
         ladder_lower_bound=bounds[0] if bounds else None,
         ladder_upper_bound=bounds[1] if bounds else None,
-        strikes=len(curve.points), monotonic_violations=curve.violations,
-        status=status, reasons=tuple(reasons),
+        strikes=len(curve.points),
+        monotonic_violations=curve.violations,
+        status=status,
+        reasons=tuple(reasons),
     )
 
 

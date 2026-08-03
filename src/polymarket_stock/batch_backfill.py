@@ -28,10 +28,24 @@ class BatchBackfillReport:
     failures: tuple[Mapping[str, object], ...]
 
     def as_payload(self) -> Mapping[str, object]:
-        return {"requested": self.requested, "completed": self.completed, "skipped": self.skipped, "failed": self.failed, "failures": list(self.failures)}
+        return {
+            "requested": self.requested,
+            "completed": self.completed,
+            "skipped": self.skipped,
+            "failed": self.failed,
+            "failures": list(self.failures),
+        }
 
 
-def backfill_discovered_markets(*, discovery_path: Path, output_dir: Path, start_offset: int = 0, maximum_markets: int | None = None, pause_seconds: float = 0.2, pyth_pause_seconds: float = 2.0) -> BatchBackfillReport:
+def backfill_discovered_markets(
+    *,
+    discovery_path: Path,
+    output_dir: Path,
+    start_offset: int = 0,
+    maximum_markets: int | None = None,
+    pause_seconds: float = 0.2,
+    pyth_pause_seconds: float = 2.0,
+) -> BatchBackfillReport:
     """Fetch only Pyth references, CLOB histories, and official Gamma settlement."""
 
     if pause_seconds < 0:
@@ -67,7 +81,16 @@ def backfill_discovered_markets(*, discovery_path: Path, output_dir: Path, start
             skipped += 1
             continue
         try:
-            _backfill_one(item=item, output_dir=output_dir, gamma=gamma, pyth=pyth, clob=clob, feed_ids=feed_ids, price_cache=price_cache, pyth_pause_seconds=pyth_pause_seconds)
+            _backfill_one(
+                item=item,
+                output_dir=output_dir,
+                gamma=gamma,
+                pyth=pyth,
+                clob=clob,
+                feed_ids=feed_ids,
+                price_cache=price_cache,
+                pyth_pause_seconds=pyth_pause_seconds,
+            )
             completed += 1
         except Exception as error:
             failures.append({"market_id": market_id, "symbol": symbol, "market_day": market_day, "error": str(error)})
@@ -76,7 +99,17 @@ def backfill_discovered_markets(*, discovery_path: Path, output_dir: Path, start
     return BatchBackfillReport(len(items), completed, skipped, len(failures), tuple(failures))
 
 
-def _backfill_one(*, item: Mapping[str, object], output_dir: Path, gamma: GammaMarketClient, pyth: PythBenchmarksClient, clob: ClobPriceHistoryClient, feed_ids: dict[str, str], price_cache: dict[tuple[str, datetime], object], pyth_pause_seconds: float) -> None:
+def _backfill_one(
+    *,
+    item: Mapping[str, object],
+    output_dir: Path,
+    gamma: GammaMarketClient,
+    pyth: PythBenchmarksClient,
+    clob: ClobPriceHistoryClient,
+    feed_ids: dict[str, str],
+    price_cache: dict[tuple[str, datetime], object],
+    pyth_pause_seconds: float,
+) -> None:
     market_id = str(item["market_id"])
     symbol = str(item["symbol"]).upper()
     market_day = datetime.fromisoformat(str(item["market_day"])).date()
@@ -102,15 +135,37 @@ def _backfill_one(*, item: Mapping[str, object], output_dir: Path, gamma: GammaM
     stem = f"{market_id}_{symbol}_{market_day.isoformat()}"
     _write_history(output_dir / f"{stem}_up_clob.csv", up_history)
     _write_history(output_dir / f"{stem}_down_clob.csv", down_history)
-    (output_dir / f"{stem}_pyth_references.json").write_text(json.dumps({
-        "market_id": market_id, "symbol": symbol, "market_day": market_day.isoformat(),
-        "price_to_beat": price_to_beat.as_payload(), "final_price": final_price.as_payload(),
-        "settlement_source": "PYTH_BENCHMARKS",
-    }, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-    (output_dir / f"{stem}_settlement.json").write_text(json.dumps({
-        "market_id": market_id, "winning_outcome": winning_outcome,
-        "provider": "POLYMARKET_GAMMA", "payload": settlement.raw_payload,
-    }, sort_keys=True, indent=2, default=str) + "\n", encoding="utf-8")
+    (output_dir / f"{stem}_pyth_references.json").write_text(
+        json.dumps(
+            {
+                "market_id": market_id,
+                "symbol": symbol,
+                "market_day": market_day.isoformat(),
+                "price_to_beat": price_to_beat.as_payload(),
+                "final_price": final_price.as_payload(),
+                "settlement_source": "PYTH_BENCHMARKS",
+            },
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / f"{stem}_settlement.json").write_text(
+        json.dumps(
+            {
+                "market_id": market_id,
+                "winning_outcome": winning_outcome,
+                "provider": "POLYMARKET_GAMMA",
+                "payload": settlement.raw_payload,
+            },
+            sort_keys=True,
+            indent=2,
+            default=str,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _close_at(day: datetime.date) -> datetime:
@@ -126,10 +181,20 @@ def _string_list(value: object, name: str) -> tuple[str, ...]:
 
 
 def _write_history(path: Path, points: tuple[PriceHistoryPoint, ...]) -> None:
-    path.write_text("DateTime,Price\n" + "".join(f"{item.observed_at.isoformat()},{item.price}\n" for item in points), encoding="utf-8")
+    path.write_text(
+        "DateTime,Price\n" + "".join(f"{item.observed_at.isoformat()},{item.price}\n" for item in points),
+        encoding="utf-8",
+    )
 
 
-def _cached_pyth_price(pyth: PythBenchmarksClient, cache: dict[tuple[str, datetime], object], symbol: str, feed_id: str, observed_at: datetime, pause_seconds: float):
+def _cached_pyth_price(
+    pyth: PythBenchmarksClient,
+    cache: dict[tuple[str, datetime], object],
+    symbol: str,
+    feed_id: str,
+    observed_at: datetime,
+    pause_seconds: float,
+):
     key = (symbol, observed_at)
     cached = cache.get(key)
     if cached is not None:

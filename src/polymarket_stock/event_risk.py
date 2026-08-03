@@ -36,7 +36,12 @@ class FinnhubEarningsCalendarClient:
         try:
             payload = self._get_json(
                 "https://finnhub.io/api/v1/calendar/earnings",
-                {"from": now.date().isoformat(), "to": resolves_at.date().isoformat(), "symbol": symbol.upper(), "token": self.api_key},
+                {
+                    "from": now.date().isoformat(),
+                    "to": resolves_at.date().isoformat(),
+                    "symbol": symbol.upper(),
+                    "token": self.api_key,
+                },
                 timeout_seconds=5.0,
             )
         except PublicApiError as error:

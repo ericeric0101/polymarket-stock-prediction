@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from polymarket_stock.evaluation_payload import PAYLOAD_VERSION
 from polymarket_stock.cross_market import cross_market_diagnostics, research_dashboard_state
 from polymarket_stock.journal import ShadowJournal
 from polymarket_stock.market_discovery import MarketCandidate
@@ -15,10 +16,19 @@ from polymarket_stock.research_web import HTML, ResearchDashboardServer
 
 def contract(strike: float) -> PriceLadderContract:
     return PriceLadderContract(
-        market_id=f"ladder-{strike}", event_id="event", event_slug="event", symbol="TSLA", strike=strike,
-        market_date="2026-08-03", resolves_at=datetime(2026, 8, 3, 20, tzinfo=UTC),
-        pyth_feed="Equity.US.TSLA/USD", yes_token_id=f"yes-{strike}", no_token_id=f"no-{strike}",
-        question="question", rules_hash="hash", raw_payload={},
+        market_id=f"ladder-{strike}",
+        event_id="event",
+        event_slug="event",
+        symbol="TSLA",
+        strike=strike,
+        market_date="2026-08-03",
+        resolves_at=datetime(2026, 8, 3, 20, tzinfo=UTC),
+        pyth_feed="Equity.US.TSLA/USD",
+        yes_token_id=f"yes-{strike}",
+        no_token_id=f"no-{strike}",
+        question="question",
+        rules_hash="hash",
+        raw_payload={},
     )
 
 
@@ -28,26 +38,43 @@ class CrossMarketResearchTests(unittest.TestCase):
             path = Path(directory) / "journal.db"
             core = ShadowJournal(path)
             core.initialize()
-            candidate = MarketCandidate.from_gamma_payload({
-                "id": "monday", "question": "Tesla (TSLA) Up or Down on August 3?",
-                "slug": "tsla-up-down", "description": "Pyth daily close",
-                "resolutionSource": "https://pyth.network/price-feeds/Equity.US.TSLA%2FUSD",
-                "endDate": "2026-08-03T20:00:00+00:00", "outcomes": '["Up", "Down"]',
-                "clobTokenIds": ["up-token", "down-token"],
-            })
+            candidate = MarketCandidate.from_gamma_payload(
+                {
+                    "id": "monday",
+                    "question": "Tesla (TSLA) Up or Down on August 3?",
+                    "slug": "tsla-up-down",
+                    "description": "Pyth daily close",
+                    "resolutionSource": "https://pyth.network/price-feeds/Equity.US.TSLA%2FUSD",
+                    "endDate": "2026-08-03T20:00:00+00:00",
+                    "outcomes": '["Up", "Down"]',
+                    "clobTokenIds": ["up-token", "down-token"],
+                }
+            )
             core.upsert_market_candidate(candidate)
-            core.record_realtime_evaluation({
-                "evaluated_at": "2026-08-01T16:00:00+00:00", "market_id": "monday", "symbol": "TSLA",
-                "spot": None, "price_to_beat": 310, "up_bid": 0.54, "up_ask": 0.56,
-                "down_bid": 0.44, "down_ask": 0.46, "fair_up_probability": None,
-                "up_book": {"best_bid_size": 20, "best_ask_size": 15},
-                "down_book": {"best_bid_size": 30, "best_ask_size": 25},
-                "book_age_seconds": 1, "market_session": "WEEKEND",
-                "signal_status": "NO_PAPER_TRADE",
-                "skip_reasons": ["NON_REGULAR_SESSION:WEEKEND"],
-            })
+            core.record_realtime_evaluation(
+                {
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-08-01T16:00:00+00:00",
+                    "market_id": "monday",
+                    "symbol": "TSLA",
+                    "spot": None,
+                    "price_to_beat": 310,
+                    "up_bid": 0.54,
+                    "up_ask": 0.56,
+                    "down_bid": 0.44,
+                    "down_ask": 0.46,
+                    "fair_up_probability": None,
+                    "up_book": {"best_bid_size": 20, "best_ask_size": 15},
+                    "down_book": {"best_bid_size": 30, "best_ask_size": 25},
+                    "book_age_seconds": 1,
+                    "market_session": "WEEKEND",
+                    "signal_status": "NO_PAPER_TRADE",
+                    "skip_reasons": ["NON_REGULAR_SESSION:WEEKEND"],
+                }
+            )
             state = research_dashboard_state(
-                path, now=datetime(2026, 8, 1, 16, 0, 5, tzinfo=UTC),
+                path,
+                now=datetime(2026, 8, 1, 16, 0, 5, tzinfo=UTC),
             )
         self.assertEqual(state["market_date"], "2026-08-03")
         self.assertFalse(state["market_status"]["decision_enabled"])
@@ -62,34 +89,68 @@ class CrossMarketResearchTests(unittest.TestCase):
             core = ShadowJournal(path)
             core.initialize()
             core.record_checkpoint_observation(
-                checkpoint_date="2026-08-03", checkpoint_name="1200_EDT",
+                checkpoint_date="2026-08-03",
+                checkpoint_name="1200_EDT",
                 payload={
-                    "evaluated_at": "2026-08-03T16:00:00+00:00", "market_id": "updown",
-                    "symbol": "TSLA", "price_to_beat": 310, "fair_up_probability": 0.54,
-                    "up_bid": 0.50, "up_ask": 0.54, "down_bid": 0.46, "down_ask": 0.50,
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-08-03T16:00:00+00:00",
+                    "market_id": "updown",
+                    "symbol": "TSLA",
+                    "price_to_beat": 310,
+                    "fair_up_probability": 0.54,
+                    "up_bid": 0.50,
+                    "up_ask": 0.54,
+                    "down_bid": 0.46,
+                    "down_ask": 0.50,
                     "model_version": "test",
                 },
             )
-            core.record_realtime_evaluation({
-                "evaluated_at": "2026-08-03T15:45:00+00:00", "market_id": "signal-market",
-                "symbol": "TSLA", "spot": 310, "up_ask": 0.45, "down_ask": 0.57,
-                "fair_up_probability": 0.62, "model_outcome": "UP", "signal_status": "PAPER_UP",
-                "skip_reasons": [], "model_version": "test",
-            })
+            core.record_realtime_evaluation(
+                {
+                    "payload_version": PAYLOAD_VERSION,
+                    "evaluated_at": "2026-08-03T15:45:00+00:00",
+                    "market_id": "signal-market",
+                    "symbol": "TSLA",
+                    "spot": 310,
+                    "up_ask": 0.45,
+                    "down_ask": 0.57,
+                    "fair_up_probability": 0.62,
+                    "model_outcome": "UP",
+                    "signal_status": "PAPER_UP",
+                    "skip_reasons": [],
+                    "model_version": "test",
+                }
+            )
             core.record_market_settlement("signal-market", "UP", {"closed": True})
             settled_position, _ = core.open_paper_position(
-                market_id="paper-1", symbol="TSLA", outcome="UP", entry_ask=0.45,
-                fair_probability=0.62, model_version="test", payload={}, contracts=10,
-                fee_rate=0, opened_at=datetime(2026, 8, 3, 16, 10, tzinfo=UTC),
+                market_id="paper-1",
+                symbol="TSLA",
+                outcome="UP",
+                entry_ask=0.45,
+                fair_probability=0.62,
+                model_version="test",
+                payload={},
+                contracts=10,
+                fee_rate=0,
+                opened_at=datetime(2026, 8, 3, 16, 10, tzinfo=UTC),
             )
             core.settle_paper_position(
-                settled_position.position_id, settlement_outcome="UP", settlement_payload={"closed": True},
+                settled_position.position_id,
+                settlement_outcome="UP",
+                settlement_payload={"closed": True},
                 settled_at=datetime(2026, 8, 3, 20, 5, tzinfo=UTC),
             )
             core.open_paper_position(
-                market_id="paper-2", symbol="NVDA", outcome="DOWN", entry_ask=0.55,
-                fair_probability=0.64, model_version="test", payload={}, contracts=5,
-                fee_rate=0, opened_at=datetime(2026, 8, 3, 16, 20, tzinfo=UTC),
+                market_id="paper-2",
+                symbol="NVDA",
+                outcome="DOWN",
+                entry_ask=0.55,
+                fair_probability=0.64,
+                model_version="test",
+                payload={},
+                contracts=5,
+                fee_rate=0,
+                opened_at=datetime(2026, 8, 3, 16, 20, tzinfo=UTC),
             )
             ladder = PriceLadderJournal(path)
             ladder.initialize()
@@ -97,11 +158,19 @@ class CrossMarketResearchTests(unittest.TestCase):
                 item = contract(strike)
                 ladder.upsert_contract(item)
                 ladder.record_snapshot(
-                    item, observed_at=datetime(2026, 8, 3, 16, tzinfo=UTC), checkpoint_name="1200_EDT",
-                    yes_bid=probability - 0.02, yes_ask=probability + 0.02,
-                    no_bid=1 - probability - 0.02, no_ask=1 - probability + 0.02,
-                    yes_bid_depth=100, yes_ask_depth=100, no_bid_depth=100, no_ask_depth=100,
-                    yes_book={}, no_book={},
+                    item,
+                    observed_at=datetime(2026, 8, 3, 16, tzinfo=UTC),
+                    checkpoint_name="1200_EDT",
+                    yes_bid=probability - 0.02,
+                    yes_ask=probability + 0.02,
+                    no_bid=1 - probability - 0.02,
+                    no_ask=1 - probability + 0.02,
+                    yes_bid_depth=100,
+                    yes_ask_depth=100,
+                    no_bid_depth=100,
+                    no_ask_depth=100,
+                    yes_book={},
+                    no_book={},
                 )
             diagnostics = cross_market_diagnostics(path, market_date="2026-08-03")
             state = research_dashboard_state(path, now=datetime(2026, 8, 3, 17, tzinfo=UTC))
