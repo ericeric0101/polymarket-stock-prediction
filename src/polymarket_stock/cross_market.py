@@ -57,6 +57,11 @@ def cross_market_diagnostics(
         if price_to_beat is None or fair_up is None:
             continue
         points = grouped_ladder.get((str(checkpoint_date), str(checkpoint_name), str(symbol).upper()), ())
+        # This view is intentionally limited to symbols for which a ladder was
+        # actually collected. Producing an unreliable row for every core symbol
+        # without a ladder obscures the useful TSLA/NVDA comparison.
+        if not points:
+            continue
         diagnostics.append(
             diagnose_cross_market(
                 symbol=str(symbol),
@@ -102,10 +107,22 @@ def research_dashboard_state(
     ladder.initialize()
     latest = ladder.latest_snapshot_rows(market_date)
     curves = []
+    candidate_rows = []
     for symbol in sorted({item.symbol for item in latest}):
         symbol_rows = tuple(item for item in latest if item.symbol == symbol)
         points = tuple(point for point in (_snapshot_point(item) for item in symbol_rows) if point is not None)
         curve = fit_monotonic_curve(points)
+        snapshots_by_market = {item.market_id: item for item in symbol_rows}
+        for index, point in enumerate(curve.points):
+            candidate_rows.append(
+                _ladder_research_candidate(
+                    symbol=symbol,
+                    point=point,
+                    adjusted_probability=curve.adjusted_probabilities[index],
+                    snapshot=snapshots_by_market[point.market_id],
+                    monotonic_violations=curve.violations,
+                )
+            )
         curves.append(
             {
                 "symbol": symbol,
@@ -127,6 +144,8 @@ def research_dashboard_state(
         current = latest_diagnostic.get(item.symbol)
         if current is None or CHECKPOINTS.index(item.checkpoint_name) > CHECKPOINTS.index(current.checkpoint_name):
             latest_diagnostic[item.symbol] = item
+    diagnostics_by_symbol = {item.symbol: item.as_payload() for item in latest_diagnostic.values()}
+    ladder_symbols = tuple(sorted({item["symbol"] for item in curves}))
     return {
         "generated_at": timestamp.isoformat(),
         "market_date": market_date,
@@ -141,10 +160,109 @@ def research_dashboard_state(
             daily_entry_limit=daily_entry_limit,
         ),
         "ladder_curves": curves,
-        "cross_market": [latest_diagnostic[symbol].as_payload() for symbol in sorted(latest_diagnostic)],
+        "ladder_candidates": sorted(candidate_rows, key=lambda item: (item["symbol"], item["strike"])),
+        "cross_market": [diagnostics_by_symbol[symbol] for symbol in sorted(diagnostics_by_symbol)],
+        "cross_market_readiness": _cross_market_readiness(
+            timestamp=timestamp,
+            ladder_symbols=ladder_symbols,
+            diagnostics=tuple(latest_diagnostic.values()),
+        ),
         "above_x": _above_x_dashboard_payload(),
         "above_x_veto": ladder.list_veto_observations(market_date=market_date),
         "isolation": {"affects_entries": False, "affects_sizing": False, "research_only": True},
+    }
+
+
+def _ladder_research_candidate(
+    *,
+    symbol: str,
+    point: LadderProbabilityPoint,
+    adjusted_probability: float,
+    snapshot: StoredLadderSnapshot,
+    monotonic_violations: int,
+) -> Mapping[str, object]:
+    """Return a transparent, non-executing single-strike research candidate.
+
+    Price-ladder snapshots do not persist per-token fee rates. ``gross_edge``
+    deliberately excludes fees, and the web UI must not call it a net edge.
+    """
+
+    yes_edge = adjusted_probability - snapshot.yes_ask if snapshot.yes_ask is not None else None
+    no_probability = 1.0 - adjusted_probability
+    no_edge = no_probability - snapshot.no_ask if snapshot.no_ask is not None else None
+    available = tuple(
+        (side, probability, ask, edge)
+        for side, probability, ask, edge in (
+            ("YES", adjusted_probability, snapshot.yes_ask, yes_edge),
+            ("NO", no_probability, snapshot.no_ask, no_edge),
+        )
+        if ask is not None and edge is not None
+    )
+    if available:
+        side, probability, ask, gross_edge = max(available, key=lambda item: item[3])
+        action = f"RESEARCH_{side}" if gross_edge > 0 else "NO_GROSS_EDGE"
+    else:
+        side, probability, ask, gross_edge, action = "-", None, None, None, "MISSING_EXECUTABLE_ASK"
+    warnings = []
+    if point.spread > 0.15:
+        warnings.append("WIDE_EXECUTABLE_RANGE")
+    if monotonic_violations:
+        warnings.append("MONOTONICALLY_ADJUSTED")
+    if action == "MISSING_EXECUTABLE_ASK":
+        warnings.append("MISSING_EXECUTABLE_ASK")
+    return {
+        "symbol": symbol,
+        "market_id": point.market_id,
+        "strike": point.strike,
+        "side": side,
+        "action": action,
+        "limit_price": ask,
+        "model_probability": probability,
+        "gross_edge": gross_edge,
+        "yes_ask": snapshot.yes_ask,
+        "yes_probability": adjusted_probability,
+        "yes_gross_edge": yes_edge,
+        "no_ask": snapshot.no_ask,
+        "no_probability": no_probability,
+        "no_gross_edge": no_edge,
+        "lower_bound": point.lower_bound,
+        "upper_bound": point.upper_bound,
+        "executable_width": point.spread,
+        "fee_status": "NOT_CAPTURED_SUBTRACT_CURRENT_TAKER_FEE",
+        "quality_warnings": warnings,
+    }
+
+
+def _cross_market_readiness(
+    *,
+    timestamp: datetime,
+    ladder_symbols: tuple[str, ...],
+    diagnostics: tuple[CrossMarketDiagnostic, ...],
+) -> Mapping[str, object]:
+    """Explain an empty cross-market panel without inventing a comparison."""
+
+    session = us_equity_session(timestamp)
+    if not ladder_symbols:
+        return {
+            "status": "WAITING_FOR_LADDER_SNAPSHOTS",
+            "message": "Start collect-price-ladders; no TSLA/NVDA ladder snapshots exist for this contract date.",
+            "symbols": [],
+        }
+    if not diagnostics:
+        return {
+            "status": "WAITING_FOR_MATCHING_CHECKPOINT",
+            "message": (
+                "Ladder data is live, but a cross-market comparison appears only after the same "
+                "12:00, 14:00, or 15:30 EDT Core checkpoint is recorded."
+                if session == "REGULAR"
+                else "Ladder data is available; the next comparison waits for a regular-session Core checkpoint."
+            ),
+            "symbols": list(ladder_symbols),
+        }
+    return {
+        "status": "READY",
+        "message": "Latest matching checkpoint comparison for collected ladder symbols.",
+        "symbols": list(ladder_symbols),
     }
 
 

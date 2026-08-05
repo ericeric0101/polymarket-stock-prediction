@@ -14,7 +14,7 @@ from typing import Callable, Mapping
 from .domain import EventSink, NEW_YORK
 from .baseline import DailyClose, daily_close_data_is_fresh
 from .calibration import CalibrationRecommendation, load_calibration_recommendation
-from .checkpoints import checkpoint_window
+from .checkpoints import CHECKPOINTS, checkpoint_window
 from .close_source_calibration import calibrate_close_sources, official_pyth_final_minute_close
 from .equity_contracts import DailyEquityCloseContract, EquityContractParseError, parse_daily_equity_close_contract
 from .event_risk import (
@@ -54,6 +54,7 @@ from .streaming import (
 MODEL_VERSION = "realized-vol-observation-v1-buffer-2pct"
 IV_MODEL_VERSION = "iv-blend-v1-buffer-2pct"
 MAX_OPTION_IV_AGE_SECONDS = 900.0
+DEFAULT_PAPER_ENTRY_CHECKPOINTS = ("1200_EDT",)
 
 
 def symbol_from_candidate(candidate: MarketCandidate) -> str | None:
@@ -85,6 +86,14 @@ def select_active_candidates(
         if len(selected) >= max_markets:
             break
     return tuple(selected)
+
+
+def _is_paper_entry_checkpoint(
+    *, checkpoint_name: str | None, checkpoint_recorded: bool, allowed_checkpoints: tuple[str, ...]
+) -> bool:
+    """Paper entries are created only from an immutable first checkpoint snapshot."""
+
+    return checkpoint_recorded and checkpoint_name is not None and checkpoint_name in allowed_checkpoints
 
 
 @dataclass
@@ -148,6 +157,7 @@ class MultiMarketShadowSupervisor:
         maker_reprice_minimum_price_change: float = 0.02,
         maker_minimum_quote_lifetime_seconds: float = 30.0,
         paper_batch_seconds: float = 30.0,
+        paper_entry_checkpoints: tuple[str, ...] = DEFAULT_PAPER_ENTRY_CHECKPOINTS,
         max_daily_paper_entries: int = 3,
         max_per_risk_group: int = 1,
         max_same_direction_paper_entries: int = 2,
@@ -183,6 +193,12 @@ class MultiMarketShadowSupervisor:
                 item.upper() for item in comparison_estimators if item.upper() != volatility_estimator.upper()
             )
         )
+        valid_checkpoint_names = {name for _, _, name in CHECKPOINTS}
+        normalized_paper_entry_checkpoints = tuple(dict.fromkeys(item.upper() for item in paper_entry_checkpoints))
+        if not normalized_paper_entry_checkpoints or any(
+            item not in valid_checkpoint_names for item in normalized_paper_entry_checkpoints
+        ):
+            raise ValueError("paper_entry_checkpoints must contain known checkpoint names")
         if any(item not in {"CLOSE_TO_CLOSE", "EWMA"} for item in normalized_comparisons):
             raise ValueError("supervisor comparison_estimators must be CLOSE_TO_CLOSE or EWMA")
         if max_markets < 1:
@@ -213,6 +229,7 @@ class MultiMarketShadowSupervisor:
         self.maker_reprice_minimum_price_change = maker_reprice_minimum_price_change
         self.maker_minimum_quote_lifetime_seconds = maker_minimum_quote_lifetime_seconds
         self.paper_batch_seconds = paper_batch_seconds
+        self.paper_entry_checkpoints = normalized_paper_entry_checkpoints
         self.max_daily_paper_entries = max_daily_paper_entries
         self.max_per_risk_group = max_per_risk_group
         self.max_same_direction_paper_entries = max_same_direction_paper_entries
@@ -741,6 +758,15 @@ class MultiMarketShadowSupervisor:
                     )
 
         paper_signal = evaluation.paper_outcome is not None and evaluation.fair_up_probability is not None
+        paper_entry_checkpoint = (
+            checkpoint
+            if _is_paper_entry_checkpoint(
+                checkpoint_name=checkpoint.checkpoint_name if checkpoint else None,
+                checkpoint_recorded=checkpoint_recorded,
+                allowed_checkpoints=self.paper_entry_checkpoints,
+            )
+            else None
+        )
         if evaluation.skip_reasons:
             should_record = (
                 runtime.last_skip_reasons != evaluation.skip_reasons
@@ -763,8 +789,13 @@ class MultiMarketShadowSupervisor:
             self._submit_write("REALTIME_EVALUATION", partial(self.journal.record_realtime_evaluation, result))
             runtime.last_evaluation_recorded_at = now
             self.event_sink("REALTIME_BASELINE_EVALUATED", result)
-        if paper_signal:
-            await self._queue_paper_entry(runtime, evaluation, result, now)
+        if paper_signal and paper_entry_checkpoint is not None:
+            entry_payload = {
+                **result,
+                "paper_entry_policy": "CHECKPOINT_ONLY",
+                "paper_entry_checkpoint": paper_entry_checkpoint.checkpoint_name,
+            }
+            await self._queue_paper_entry(runtime, evaluation, entry_payload, now)
 
     def _record_execution_books(
         self,

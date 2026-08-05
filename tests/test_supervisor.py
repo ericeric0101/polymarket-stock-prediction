@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+import json
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from polymarket_stock import supervisor as supervisor_module
 from polymarket_stock.evaluation_payload import PAYLOAD_VERSION
 from polymarket_stock.baseline import DailyClose
 from polymarket_stock.equity_contracts import parse_daily_equity_close_contract
+from polymarket_stock.event_risk import EventCalendarUnavailable
 from polymarket_stock.journal import ShadowJournal
 from polymarket_stock.market_discovery import MarketCandidate, MarketSettlement
 from polymarket_stock.realtime import RealtimeBaselineEvaluator
@@ -18,6 +23,7 @@ from polymarket_stock.supervisor import (
     MultiMarketRouter,
     MultiMarketShadowSupervisor,
     _cross_source_uncertainty_buffer,
+    _is_paper_entry_checkpoint,
     _pyth_primary_risk_reasons,
     select_active_candidates,
     symbol_from_candidate,
@@ -172,6 +178,27 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(buffer, 0.0025)
         self.assertLess(buffer, 0.02)
 
+    def test_paper_entry_is_limited_to_recorded_configured_checkpoint(self) -> None:
+        allowed = ("1200_EDT",)
+        self.assertFalse(
+            _is_paper_entry_checkpoint(checkpoint_name=None, checkpoint_recorded=False, allowed_checkpoints=allowed)
+        )
+        self.assertFalse(
+            _is_paper_entry_checkpoint(
+                checkpoint_name="1000_EDT", checkpoint_recorded=True, allowed_checkpoints=allowed
+            )
+        )
+        self.assertFalse(
+            _is_paper_entry_checkpoint(
+                checkpoint_name="1200_EDT", checkpoint_recorded=False, allowed_checkpoints=allowed
+            )
+        )
+        self.assertTrue(
+            _is_paper_entry_checkpoint(
+                checkpoint_name="1200_EDT", checkpoint_recorded=True, allowed_checkpoints=allowed
+            )
+        )
+
     async def test_shared_router_dispatches_spot_and_books_to_owning_market(self) -> None:
         candidate = _candidate("one", "TSLA", self.future)
         closes = [DailyClose((self.now.date() - timedelta(days=day)).isoformat(), 100.0) for day in range(30, -1, -1)]
@@ -261,6 +288,113 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settled.status, "SETTLED")
         self.assertEqual(settled.settlement_outcome, "UP")
         self.assertEqual(outcome, "UP")
+
+    async def test_finnhub_only_calendar_unavailable_keeps_checkpoint_model_signal(self) -> None:
+        """A calendar outage blocks entries, never the observable model/checkpoint path."""
+
+        fixed_now = datetime(2026, 7, 20, 16, 1, tzinfo=UTC)  # 12:01 EDT
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return fixed_now.replace(tzinfo=None)
+                return fixed_now.astimezone(tz)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "journal.db"
+            journal = ShadowJournal(path)
+            journal.initialize()
+            events: list[tuple[str, dict[str, object]]] = []
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal,
+                log_path=Path(directory) / "events.jsonl",
+                spot_provider="finnhub",
+                spot_mode="FINNHUB_ONLY",
+                paper_batch_seconds=0.01,
+                event_sink=lambda event_type, payload: events.append((event_type, dict(payload))),
+            )
+            candidate = _candidate("market-1", "TSLA", (fixed_now + timedelta(hours=4)).isoformat())
+            contract = parse_daily_equity_close_contract(candidate)
+            closes = [
+                DailyClose((fixed_now.date() - timedelta(days=day)).isoformat(), 100.0 + day)
+                for day in range(30, -1, -1)
+            ]
+            evaluator = RealtimeBaselineEvaluator(
+                market_id=candidate.market_id,
+                symbol="TSLA",
+                resolves_at=contract.resolves_at,
+                closes=closes,
+                spot_provider="FINNHUB",
+                up_fee_rate=0.04,
+                down_fee_rate=0.04,
+                price_to_beat=100.0,
+            )
+            coordinator = ShadowStreamCoordinator(
+                callback=lambda _payload: None,
+                primary_spot_source="FINNHUB",
+            )
+            quote = SpotQuote("FINNHUB", "TSLA", 105.0, fixed_now, fixed_now)
+            coordinator.latest_source_quotes["FINNHUB"] = {"TSLA": quote}
+            coordinator.latest_spots["TSLA"] = quote.price
+            coordinator.latest_best_bids.update({"market-1-up": 0.005, "market-1-down": 0.98})
+            coordinator.latest_best_asks.update({"market-1-up": 0.01, "market-1-down": 0.99})
+            coordinator.freshness.last_spot_at = fixed_now
+            coordinator.freshness.last_book_at = fixed_now
+
+            with patch(
+                "polymarket_stock.supervisor.combined_risk_events",
+                side_effect=EventCalendarUnavailable("calendar timeout"),
+            ):
+                risk_reasons = await supervisor._resolve_risk_reasons(
+                    market_id=candidate.market_id,
+                    symbol="TSLA",
+                    now=fixed_now,
+                    resolves_at=contract.resolves_at,
+                )
+            self.assertEqual(risk_reasons, ("EVENT_CALENDAR_UNAVAILABLE",))
+            runtime = ActiveMarket(
+                candidate,
+                contract,
+                "TSLA",
+                evaluator,
+                "TEST",
+                0.04,
+                0.04,
+                100.0,
+                fixed_now,
+                100.0,
+                {"source": "LOCAL_PYTH_FINAL_CANDLE", "threshold_quality": "EXACT_PYTH"},
+                None,
+                ("OPTION_IV_PROVIDER_UNCONFIGURED",),
+                risk_reasons,
+                0.0,
+                coordinator,
+            )
+
+            await supervisor._writer.start()
+            try:
+                with patch.object(supervisor_module, "datetime", FrozenDateTime):
+                    await supervisor._evaluate_runtime(runtime, {"reasons": ("FINNHUB_TRADE",)})
+                await supervisor._writer.drain()
+            finally:
+                await supervisor._writer.close()
+                await coordinator.close()
+
+            with sqlite3.connect(path) as connection:
+                realtime_payload = json.loads(
+                    connection.execute("SELECT payload_json FROM realtime_evaluations").fetchone()[0]
+                )
+                checkpoint_payload = json.loads(
+                    connection.execute("SELECT payload_json FROM checkpoint_observations").fetchone()[0]
+                )
+            self.assertIsNotNone(realtime_payload["fair_up_probability"])
+            self.assertEqual(realtime_payload["signal_status"], "OBSERVATION_ONLY_UP")
+            self.assertIn("RISK_GATE:EVENT_CALENDAR_UNAVAILABLE", realtime_payload["skip_reasons"])
+            self.assertFalse(realtime_payload["paper_entry_eligible"])
+            self.assertEqual(checkpoint_payload["fair_up_probability"], realtime_payload["fair_up_probability"])
+            self.assertEqual(journal.list_paper_positions(), ())
+            self.assertTrue(any(event_type == "CHECKPOINT_OBSERVATION_RECORDED" for event_type, _ in events))
 
     async def test_run_stops_producers_before_final_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

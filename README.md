@@ -663,11 +663,22 @@ polymarket-stock price-ladder-report --date 2026-08-03
 並保持該 terminal 運行，再用瀏覽器開啟 `http://127.0.0.1:8765`。按 `Ctrl+C` 即停止網站；
 collector 與原本 bot 是另外的程序，不會因為開啟這個網頁而自動啟動。
 
-網頁將 `Core Up/Down`、`Price Distribution`、`Cross-Market` 分頁隔離。因為
-`P(close > K)` 理論上必須隨 strike 上升而下降，曲線使用加權 monotonic regression；
-跨市場只輸出 `CONFIRM / MIXED / DISAGREE / UNRELIABLE`。spread 太寬、strike 不足、
-price-to-beat 沒有被階梯包住或原始曲線違反單調性都會顯示，且不會把兩個市場機率直接
-平均後拿去進場。
+網頁將 `Trade Today` 與研究分頁隔離。`Trade Today` 是唯一顯示 Core `Up/Down`
+checkpoint、Top-5 paper portfolio 與入場 gate 的地方；目前預設僅 `12:00 EDT` 的不可變
+checkpoint 可以建立 paper entry。`Price Distribution` 顯示 TSLA/NVDA 的 live `Above-X`
+研究候選：每個 strike 的 `Yes/No` 側、當前可成交 ask、曲線機率、未扣費的 gross edge、
+executable width 與品質警告。它不是下單指令：price-ladder collector 尚未保存每個 token 的
+即時 taker fee，所以必須從 gross edge 再扣下單當下 fee 後自行判斷。
+
+`Cross-Market` 只列出實際已收集 ladder 的 symbols，且只會在同一交易日的
+`12:00 / 14:00 / 15:30 EDT` Core checkpoint 與 ladder checkpoint 都存在後產生比較。
+在此之前它會明確說明是等待 ladder snapshots 或等待 matching checkpoint，不會用空白或把
+無 ladder 的核心市場偽裝成 `UNRELIABLE`。因為 `P(close > K)` 理論上必須隨 strike 上升而下降，
+曲線使用加權 monotonic regression；spread 太寬、strike 不足、price-to-beat 沒有被階梯包住
+或原始曲線違反單調性都會顯示，且不會把兩個市場機率直接平均後拿去進場。
+
+`Above-X Research` 保留歷史 replay、coverage 與 veto 結果。它和 Price Distribution 的 live
+研究候選都不會改變 supervisor、Core paper entry、Top-5 或 sizing。
 
 ### 目前限制
 
@@ -699,7 +710,7 @@ supervisor 共享一條 Polymarket stream 與一條股價 stream，active univer
 
 supervisor 也會記錄 maker shadow quote。每個有效的 Fair Up/Down 評估都會提出一個低於 fair value、以 `1c` tick 對齊的被動買價，預設理論 edge 為至少 `0.5c`。為避免頻繁取消重掛，只有建議限價至少改變 `2c`，且現有 quote 已存在至少 30 秒，才會重掛；可用 `--maker-reprice-minimum-price-change` 與 `--maker-minimum-quote-lifetime-seconds` 調整。`TOUCHED` 只表示公開 ask 曾觸及該價位，不是成交、不會取得 rebate，也不會建立 paper position。
 
-具有新鮮、完整近 ATM call/put `IV_VALID` surface 的訊號會使用 IV 混合模型。若 IV 無法取得，realized-volatility fallback 仍可進入 paper batch，但 payload 會明確記錄 `OPTION_IV_FALLBACK_REALIZED_VOL` 與 `PAPER_ENTRY_REALIZED_VOL_FALLBACK`。符合條件的訊號會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`；後續分析必須區分 IV-backed 與 realized-volatility fallback entry。
+具有新鮮、完整近 ATM call/put `IV_VALID` surface 的訊號會使用 IV 混合模型。若 IV 無法取得，realized-volatility fallback 仍可進入 paper batch，但 payload 會明確記錄 `OPTION_IV_FALLBACK_REALIZED_VOL` 與 `PAPER_ENTRY_REALIZED_VOL_FALLBACK`。所有符合條件的訊號仍會觀察和記錄，但預設只由 immutable `1200_EDT` checkpoint 的首次有效快照建立 paper-entry 候選，避免開盤任意 tick 與 checkpoint 策略混在一起。研究其他時點時，必須顯式使用 `--paper-entry-checkpoints 1200_EDT,1400_EDT`。候選會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`；後續分析必須區分 IV-backed 與 realized-volatility fallback entry。
 
 美國交易日判定使用紐約時區的週一至週五 `09:30-16:00`，並套用 NYSE 核心休市日。特殊臨時休市與提早收盤仍須由 event calendar 補入。
 

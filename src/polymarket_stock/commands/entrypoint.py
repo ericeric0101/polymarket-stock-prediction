@@ -221,6 +221,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="minimum seconds an active maker quote remains before reprice, default 30",
     )
     supervisor_parser.add_argument("--paper-batch-seconds", type=float, default=30.0)
+    supervisor_parser.add_argument(
+        "--paper-entry-checkpoints",
+        default="1200_EDT",
+        help="comma-separated immutable checkpoints allowed to create paper entries; default 1200_EDT",
+    )
     supervisor_parser.add_argument("--max-daily-paper-entries", type=int, default=5)
     supervisor_parser.add_argument("--max-per-risk-group", type=int, default=1)
     supervisor_parser.add_argument("--max-same-direction-paper-entries", type=int, default=2)

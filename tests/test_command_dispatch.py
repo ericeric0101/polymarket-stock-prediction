@@ -10,6 +10,7 @@ def test_supervise_shadow_defaults_to_finnhub_only() -> None:
     arguments = build_parser().parse_args(["supervise-shadow"])
 
     assert arguments.spot_mode == "FINNHUB_ONLY"
+    assert arguments.paper_entry_checkpoints == "1200_EDT"
 
 
 def test_every_catalog_command_has_a_parser_and_domain_handler() -> None:

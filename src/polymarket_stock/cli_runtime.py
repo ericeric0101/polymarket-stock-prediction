@@ -46,6 +46,9 @@ def supervise_shadow(
         maker_reprice_minimum_price_change=arguments.maker_reprice_minimum_price_change,
         maker_minimum_quote_lifetime_seconds=arguments.maker_minimum_quote_lifetime_seconds,
         paper_batch_seconds=arguments.paper_batch_seconds,
+        paper_entry_checkpoints=tuple(
+            item.strip() for item in arguments.paper_entry_checkpoints.split(",") if item.strip()
+        ),
         max_daily_paper_entries=arguments.max_daily_paper_entries,
         max_per_risk_group=arguments.max_per_risk_group,
         max_same_direction_paper_entries=arguments.max_same_direction_paper_entries,
