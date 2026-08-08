@@ -712,6 +712,17 @@ supervisor 也會記錄 maker shadow quote。每個有效的 Fair Up/Down 評估
 
 具有新鮮、完整近 ATM call/put `IV_VALID` surface 的訊號會使用 IV 混合模型。若 IV 無法取得，realized-volatility fallback 仍可進入 paper batch，但 payload 會明確記錄 `OPTION_IV_FALLBACK_REALIZED_VOL` 與 `PAPER_ENTRY_REALIZED_VOL_FALLBACK`。所有符合條件的訊號仍會觀察和記錄，但預設只由 immutable `1200_EDT` checkpoint 的首次有效快照建立 paper-entry 候選，避免開盤任意 tick 與 checkpoint 策略混在一起。研究其他時點時，必須顯式使用 `--paper-entry-checkpoints 1200_EDT,1400_EDT`。候選會先累積 30 秒，再依保守預設做批次選擇：每日最多 3 筆、每個靜態風險群組最多 1 筆、同方向最多 2 筆。每個通過或拒絕的候選都會寫入 `portfolio_decisions`；後續分析必須區分 IV-backed 與 realized-volatility fallback entry。
 
+
+### Entry-risk research flags
+
+每個可用 evaluation 與 immutable checkpoint 另會記錄三個 **diagnostic-only** flags：
+
+- `NEAR_THRESHOLD_HIGH_RISK`：spot 距離 `price_to_beat` 不超過 100 bps，歷史上這類 close-to-threshold 入場的方向風險較高。
+- `UNCERTAIN_CONTRARIAN_ENTRY`：模型與可成交市場機率相差至少 25 個百分點，且實際選擇 side 的模型機率低於 60%。
+- `CONTRADICTORY_SIDE_ENTRY`：最低 ask/edge 選出的 side 與模型機率多數方向相反。
+
+這些只會顯示於 localhost 的 Trade Today（checkpoint 與 live state）並寫入 SQLite payload；**不會**改變 `paper_entry_eligible`、entry block reason、Top-5 選擇或 sizing。必須先以後續日期的 walk-forward 資料驗證，才可將任何 flag 升格為交易 gate。
+
 美國交易日判定使用紐約時區的週一至週五 `09:30-16:00`，並套用 NYSE 核心休市日。特殊臨時休市與提早收盤仍須由 event calendar 補入。
 
 ### Phase 3 可驗證研究
@@ -824,7 +835,7 @@ polymarket-stock strategy-diagnostics --shares 10 --output data/strategy_diagnos
 
 `walk-forward-top-five` 的機率校正只使用 training dates，接著挑選 checkpoint、buffer 與 minimum edge，再把完全鎖定的策略套到 validation dates。每天是「最多五筆」，不會為了湊滿五筆強迫交易；`--raw-probabilities` 可輸出未校正對照。
 
-`strategy-diagnostics` 同時比較模型方向、市場熱門方向、spot 相對 Pyth threshold 與市場多數方向，並分析 top-five depth VWAP、延遲成交 slippage、Pyth/Finnhub 新鮮報價差、CLOSE_TO_CLOSE/EWMA 分歧、Pyth 當日 realized volatility 相對過往同 checkpoint 的異常，以及使用可成交 bid 的 1/5/15/30 分鐘 exit 回放。跨來源報價以每分鐘一筆規則抽樣並排除 stale/缺 timestamp 的 pair，逐秒原始資料仍完整保留。
+`strategy-diagnostics` 同時比較模型方向、市場熱門方向、spot 相對 Pyth threshold 與市場多數方向，並分析 selected-edge candidate 的 selected-side fair、距 threshold、模型/市場可成交機率分歧、是否逆模型多數方向等 entry-risk cohorts。它也分析 top-five depth VWAP、延遲成交 slippage、Pyth/Finnhub 新鮮報價差、CLOSE_TO_CLOSE/EWMA 分歧、Pyth 當日 realized volatility 相對過往同 checkpoint 的異常，以及使用可成交 bid 的 1/5/15/30 分鐘 exit 回放。所有 entry-risk cohorts 都是歷史研究，不會改變 supervisor、paper entry 或 sizing。 `strategy-diagnostics` 的 `entry_risk.policy_comparison` 會並列 `BASELINE_ALL_POSITIVE_EDGE`、`MODEL_ALIGNED_ONLY` 與 `CONTRARIAN_VALUE` 的交易數、勝率與費後每 share PnL；它用來累積隔離樣本，不能直接當作新入場 gate。`strategy-diagnostics` 預設只報告 live paper policy 使用的 `1200_EDT`；若要研究其他時段，必須明確傳入 `--checkpoint-names 1200_EDT,1400_EDT,1530_EDT`。跨來源報價以每分鐘一筆規則抽樣並排除 stale/缺 timestamp 的 pair，逐秒原始資料仍完整保留。
 
 未達 0.5% hard gate 的新鮮跨來源誤差與 Pyth confidence 會增加 bounded model-error buffer。realized-vol fallback 若與 comparison volatility model 方向不同或 fair probability 相差至少 10 個百分點，仍保留觀察，但不建立 paper position。
 

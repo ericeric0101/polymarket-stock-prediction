@@ -13,8 +13,55 @@ from .baseline import (
     daily_close_data_is_fresh,
     evaluate_realized_vol_baseline,
 )
-from .quality import relative_price_difference, us_equity_session
+from .quality import executable_market_up_probability, relative_price_difference, us_equity_session
 from .evaluation_payload import PAYLOAD_VERSION
+
+
+NEAR_THRESHOLD_HIGH_RISK_BPS = 100.0
+MODEL_MARKET_DIVERGENCE_WARNING = 0.25
+UNCERTAIN_SELECTED_PROBABILITY = 0.60
+
+
+def entry_research_diagnostics(
+    *,
+    spot: float | None,
+    price_to_beat: float | None,
+    fair_up_probability: float | None,
+    market_up_probability: float | None,
+    selected_outcome: str | None,
+) -> tuple[float | None, float | None, str | None, tuple[str, ...]]:
+    """Return non-blocking diagnostics for historical entry-risk research.
+
+    These flags deliberately do not participate in paper eligibility or sizing.
+    They make risky low-price/large-disagreement entries visible for later
+    walk-forward analysis before any rule is promoted into a gate.
+    """
+    threshold_distance_bps = None
+    if spot is not None and price_to_beat is not None and price_to_beat > 0:
+        threshold_distance_bps = abs(spot - price_to_beat) / price_to_beat * 10_000.0
+
+    model_majority_outcome = None
+    if fair_up_probability is not None:
+        model_majority_outcome = "UP" if fair_up_probability >= 0.5 else "DOWN"
+
+    market_model_divergence = None
+    if fair_up_probability is not None and market_up_probability is not None:
+        market_model_divergence = fair_up_probability - market_up_probability
+
+    flags: list[str] = []
+    if threshold_distance_bps is not None and threshold_distance_bps <= NEAR_THRESHOLD_HIGH_RISK_BPS:
+        flags.append("NEAR_THRESHOLD_HIGH_RISK")
+    if selected_outcome in {"UP", "DOWN"} and fair_up_probability is not None:
+        selected_probability = fair_up_probability if selected_outcome == "UP" else 1.0 - fair_up_probability
+        if (
+            market_model_divergence is not None
+            and abs(market_model_divergence) >= MODEL_MARKET_DIVERGENCE_WARNING
+            and selected_probability < UNCERTAIN_SELECTED_PROBABILITY
+        ):
+            flags.append("UNCERTAIN_CONTRARIAN_ENTRY")
+        if model_majority_outcome is not None and selected_outcome != model_majority_outcome:
+            flags.append("CONTRADICTORY_SIDE_ENTRY")
+    return threshold_distance_bps, market_model_divergence, model_majority_outcome, tuple(flags)
 
 
 @dataclass(frozen=True)
@@ -58,6 +105,12 @@ class RealtimeEvaluation:
     paper_outcome: str | None
     paper_entry_eligible: bool
     paper_entry_block_reasons: tuple[str, ...]
+    price_to_beat_distance_bps: float | None
+    market_up_probability: float | None
+    market_model_divergence: float | None
+    model_majority_outcome: str | None
+    entry_diagnostic_flags: tuple[str, ...]
+    entry_policy_category: str
     quality_flags: tuple[str, ...]
     trigger_reasons: tuple[str, ...]
     skip_reasons: tuple[str, ...]
@@ -70,6 +123,7 @@ class RealtimeEvaluation:
         payload["quality_flags"] = list(self.quality_flags)
         payload["skip_reasons"] = list(self.skip_reasons)
         payload["paper_entry_block_reasons"] = list(self.paper_entry_block_reasons)
+        payload["entry_diagnostic_flags"] = list(self.entry_diagnostic_flags)
         payload["comparison_models"] = [dict(item) for item in self.comparison_models]
         if self.paper_outcome:
             payload["signal_status"] = f"PAPER_{self.paper_outcome}"
@@ -261,6 +315,12 @@ class RealtimeBaselineEvaluator:
                 paper_outcome=None,
                 paper_entry_eligible=False,
                 paper_entry_block_reasons=("EVALUATION_SKIPPED",),
+                price_to_beat_distance_bps=None,
+                market_up_probability=None,
+                market_model_divergence=None,
+                model_majority_outcome=None,
+                entry_diagnostic_flags=(),
+                entry_policy_category="NO_EDGE",
                 quality_flags=tuple(sorted(set(quality_flags))),
                 trigger_reasons=trigger_reasons,
                 skip_reasons=tuple(sorted(set(skip_reasons))),
@@ -295,6 +355,24 @@ class RealtimeBaselineEvaluator:
             price_to_beat_override=self._price_to_beat,
         )
         model_outcome = assessment.paper_outcome
+        market_up_probability = executable_market_up_probability(
+            up_bid=up_bid,
+            up_ask=up_ask,
+            down_bid=down_bid,
+            down_ask=down_ask,
+        )
+        (
+            price_to_beat_distance_bps,
+            market_model_divergence,
+            model_majority_outcome,
+            entry_diagnostic_flags,
+        ) = entry_research_diagnostics(
+            spot=spot,
+            price_to_beat=self._price_to_beat,
+            fair_up_probability=assessment.fair_up_probability,
+            market_up_probability=market_up_probability,
+            selected_outcome=model_outcome,
+        )
         comparison_models = []
         for estimator in self._comparison_estimators:
             comparison_volatility = annualized_volatility(
@@ -337,6 +415,7 @@ class RealtimeBaselineEvaluator:
                     "model_error_buffer": comparison.model_error_buffer,
                 }
             )
+        entry_policy_category = classify_entry_policy(model_outcome, model_majority_outcome)
         entry_block_reasons = list(entry_risk_reasons)
         if model_outcome and option_iv_status != "IV_VALID":
             volatility_disagreement = volatility_models_disagree(
@@ -362,6 +441,12 @@ class RealtimeBaselineEvaluator:
             # Eligibility means an actionable paper entry, not merely that IV was valid.
             paper_entry_eligible=model_outcome is not None and not entry_block_reasons,
             paper_entry_block_reasons=tuple(entry_block_reasons),
+            price_to_beat_distance_bps=price_to_beat_distance_bps,
+            market_up_probability=market_up_probability,
+            market_model_divergence=market_model_divergence,
+            model_majority_outcome=model_majority_outcome,
+            entry_diagnostic_flags=entry_diagnostic_flags,
+            entry_policy_category=entry_policy_category,
             quality_flags=tuple(sorted(set(quality_flags))),
             trigger_reasons=trigger_reasons,
             skip_reasons=tuple(entry_risk_reasons),
@@ -383,3 +468,12 @@ def volatility_models_disagree(
         if abs(probability - primary_probability) >= threshold or (probability >= 0.5) != primary_direction_up:
             return True
     return False
+
+
+def classify_entry_policy(selected_outcome: str | None, model_majority_outcome: str | None) -> str:
+    """Classify an entry for counterfactual research without changing its gate."""
+    if selected_outcome not in {"UP", "DOWN"}:
+        return "NO_EDGE"
+    if model_majority_outcome not in {"UP", "DOWN"}:
+        return "UNKNOWN"
+    return "MODEL_ALIGNED" if selected_outcome == model_majority_outcome else "CONTRARIAN_VALUE"

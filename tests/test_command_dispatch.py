@@ -13,6 +13,12 @@ def test_supervise_shadow_defaults_to_finnhub_only() -> None:
     assert arguments.paper_entry_checkpoints == "1200_EDT"
 
 
+def test_strategy_diagnostics_defaults_to_live_entry_checkpoint() -> None:
+    arguments = build_parser().parse_args(["strategy-diagnostics"])
+
+    assert arguments.checkpoint_names == "1200_EDT"
+
+
 def test_every_catalog_command_has_a_parser_and_domain_handler() -> None:
     commands = tuple(command for group in COMMAND_GROUPS.values() for command in group)
     parser = build_parser()

@@ -54,6 +54,12 @@ class CrossMarketResearchTests(unittest.TestCase):
             core.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-08-01T16:00:00+00:00",
                     "market_id": "monday",
                     "symbol": "TSLA",
@@ -82,6 +88,7 @@ class CrossMarketResearchTests(unittest.TestCase):
         self.assertAlmostEqual(state["live_markets"][0]["market_up_probability"], 0.55)
         self.assertEqual(state["live_markets"][0]["state"], "LIVE")
         self.assertIsNone(state["live_markets"][0]["model_up_probability"])
+        self.assertEqual(state["live_markets"][0]["entry_policy_category"], "NO_EDGE")
 
     def test_checkpoint_join_produces_read_only_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -93,6 +100,12 @@ class CrossMarketResearchTests(unittest.TestCase):
                 checkpoint_name="1200_EDT",
                 payload={
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-08-03T16:00:00+00:00",
                     "market_id": "updown",
                     "symbol": "TSLA",
@@ -108,6 +121,12 @@ class CrossMarketResearchTests(unittest.TestCase):
             core.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-08-03T15:45:00+00:00",
                     "market_id": "signal-market",
                     "symbol": "TSLA",
@@ -211,6 +230,9 @@ class CrossMarketResearchTests(unittest.TestCase):
         self.assertIn("portfolio-summary", HTML)
         self.assertIn("Trade Today · Core Up/Down", HTML)
         self.assertIn("OBSERVATION ONLY", HTML)
+        self.assertIn("research flags do not block entries", HTML)
+        self.assertIn("entry_diagnostic_flags", HTML)
+        self.assertIn("CONTRARIAN_VALUE", HTML)
         self.assertIn("Asia/Taipei", HTML)
         self.assertIn("America/New_York", HTML)
         self.assertIn("taipei-time", HTML)

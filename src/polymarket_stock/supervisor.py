@@ -1275,10 +1275,29 @@ class MultiMarketShadowSupervisor:
         if scan_interval_seconds <= 0 or duration_seconds < 0:
             raise ValueError("invalid supervisor timing")
         started_at = datetime.now(UTC)
+        discovery_failures = 0
         await self._writer.start()
         try:
             while True:
-                await self.refresh()
+                try:
+                    await self.refresh()
+                except PublicApiError as error:
+                    discovery_failures += 1
+                    retry_seconds = min(300.0, 5.0 * (2 ** min(discovery_failures - 1, 6)))
+                    self.event_sink(
+                        "SUPERVISOR_DISCOVERY_RETRY",
+                        {
+                            "attempt": discovery_failures,
+                            "retry_in_seconds": retry_seconds,
+                            "reason": str(error),
+                            "recorded_at": datetime.now(UTC).isoformat(),
+                        },
+                    )
+                    if duration_seconds and (datetime.now(UTC) - started_at).total_seconds() >= duration_seconds:
+                        return
+                    await asyncio.sleep(retry_seconds)
+                    continue
+                discovery_failures = 0
                 await asyncio.to_thread(self._maybe_record_pyth_daily_close_cache)
                 await asyncio.to_thread(self._maybe_record_close_source_calibration)
                 if duration_seconds and (datetime.now(UTC) - started_at).total_seconds() >= duration_seconds:

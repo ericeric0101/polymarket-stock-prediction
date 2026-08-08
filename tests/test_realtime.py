@@ -5,7 +5,13 @@ import unittest
 from unittest.mock import patch
 
 from polymarket_stock.baseline import DailyClose
-from polymarket_stock.realtime import RealtimeBaselineEvaluator, volatility_models_disagree
+from polymarket_stock.realtime import (
+    RealtimeBaselineEvaluator,
+    classify_entry_policy,
+    entry_research_diagnostics,
+    executable_market_up_probability,
+    volatility_models_disagree,
+)
 
 
 class RealtimeBaselineEvaluatorTests(unittest.TestCase):
@@ -45,6 +51,75 @@ class RealtimeBaselineEvaluatorTests(unittest.TestCase):
         self.assertAlmostEqual(result.model_error_buffer, 0.02)
         self.assertAlmostEqual(result.minimum_edge, 0.02)
         self.assertAlmostEqual(result.as_payload()["minimum_edge"], 0.02)
+        self.assertEqual(result.entry_policy_category, "MODEL_ALIGNED")
+
+    def test_entry_risk_diagnostics_flag_abnb_and_msft_patterns_without_gating(self) -> None:
+        market_probability = executable_market_up_probability(
+            up_bid=0.88,
+            up_ask=0.91,
+            down_bid=0.07,
+            down_ask=0.09,
+        )
+        distance, divergence, majority, flags = entry_research_diagnostics(
+            spot=150.95,
+            price_to_beat=150.96982,
+            fair_up_probability=0.4912,
+            market_up_probability=market_probability,
+            selected_outcome="DOWN",
+        )
+        self.assertLess(distance or 0.0, 100.0)
+        self.assertLess(divergence or 0.0, -0.25)
+        self.assertEqual(majority, "DOWN")
+        self.assertEqual(flags, ("NEAR_THRESHOLD_HIGH_RISK", "UNCERTAIN_CONTRARIAN_ENTRY"))
+
+        _, _, majority, flags = entry_research_diagnostics(
+            spot=100.698,
+            price_to_beat=100.0,
+            fair_up_probability=0.2834,
+            market_up_probability=0.14,
+            selected_outcome="UP",
+        )
+        self.assertEqual(majority, "DOWN")
+        self.assertIn("CONTRADICTORY_SIDE_ENTRY", flags)
+        self.assertNotIn("UNCERTAIN_CONTRARIAN_ENTRY", flags)
+
+    def test_entry_risk_diagnostics_do_not_change_paper_eligibility(self) -> None:
+        evaluator = RealtimeBaselineEvaluator(
+            market_id="market-1",
+            symbol="TSLA",
+            resolves_at=self.now + timedelta(hours=5),
+            closes=self.closes,
+            spot_provider="FINNHUB",
+            up_fee_rate=0.04,
+            down_fee_rate=0.04,
+            price_to_beat=100.0,
+        )
+        result = evaluator.evaluate(
+            now=self.now,
+            spot=100.01,
+            up_ask=0.91,
+            down_ask=0.09,
+            up_bid=0.88,
+            down_bid=0.07,
+            spot_age_seconds=0.2,
+            book_age_seconds=0.1,
+            stream_ready=True,
+            trigger_reasons=("FINNHUB_TRADE",),
+            option_iv=0.25,
+            option_iv_provider="TEST",
+            option_iv_age_seconds=1.0,
+        )
+        self.assertEqual(result.model_outcome, "DOWN")
+        self.assertTrue(result.paper_entry_eligible)
+        self.assertEqual(result.paper_entry_block_reasons, ())
+        self.assertIn("NEAR_THRESHOLD_HIGH_RISK", result.entry_diagnostic_flags)
+        self.assertIn("UNCERTAIN_CONTRARIAN_ENTRY", result.entry_diagnostic_flags)
+
+    def test_entry_policy_category_is_diagnostic_only(self) -> None:
+        self.assertEqual(classify_entry_policy("UP", "UP"), "MODEL_ALIGNED")
+        self.assertEqual(classify_entry_policy("UP", "DOWN"), "CONTRARIAN_VALUE")
+        self.assertEqual(classify_entry_policy(None, "UP"), "NO_EDGE")
+        self.assertEqual(classify_entry_policy("UP", None), "UNKNOWN")
 
     def test_volatility_disagreement_detects_direction_and_large_probability_gap(self) -> None:
         self.assertTrue(volatility_models_disagree(0.70, ({"fair_up_probability": 0.49},)))

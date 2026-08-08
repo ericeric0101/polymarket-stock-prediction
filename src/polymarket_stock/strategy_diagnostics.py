@@ -8,6 +8,8 @@ from statistics import mean
 from typing import Iterable, Mapping
 from zoneinfo import ZoneInfo
 
+from .analytics.entry_risk import EntryRiskDiagnostics, entry_risk_summary
+from .evaluation_payload import read_paper_outcome
 from .fees import estimate_taker_fee_usdc
 from .journal import BufferSweepObservation, ExecutionObservation, SpotSourceComparison, StoredSpotObservation
 
@@ -86,6 +88,7 @@ class StrategyDiagnosticsReport:
     spot_divergence: SpotDivergenceSummary
     volatility: VolatilityComparisonSummary
     intraday_volatility: IntradayVolatilitySummary
+    entry_risk: EntryRiskDiagnostics
     exits: tuple[ExitHorizonSummary, ...]
 
     def as_payload(self) -> Mapping[str, object]:
@@ -97,6 +100,7 @@ class StrategyDiagnosticsReport:
             "spot_divergence": asdict(self.spot_divergence),
             "volatility": asdict(self.volatility),
             "intraday_volatility": asdict(self.intraday_volatility),
+            "entry_risk": asdict(self.entry_risk),
             "exits": [asdict(item) for item in self.exits],
         }
 
@@ -133,6 +137,7 @@ def strategy_diagnostics(
         spot_divergence=spot_divergence_summary(comparisons),
         volatility=volatility_comparison_summary(checkpoint_items),
         intraday_volatility=intraday_volatility_summary(spots, checkpoint_items),
+        entry_risk=entry_risk_summary(checkpoint_items),
         exits=exit_horizon_replay(execution_items, checkpoint_items, requested_shares=requested_shares),
     )
 
@@ -436,7 +441,7 @@ def _selected_entries(observations: Iterable[ExecutionObservation]) -> tuple[Exe
     for item in observations:
         if item.signal_id is None or item.observation_kind != "PAPER_ENTRY":
             continue
-        paper_outcome = str(item.evaluation_payload.get("paper_outcome") or "")
+        paper_outcome = read_paper_outcome(item.evaluation_payload)
         if item.outcome == paper_outcome:
             selected.append(item)
     return tuple(selected)

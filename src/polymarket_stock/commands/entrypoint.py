@@ -334,9 +334,14 @@ def build_parser() -> argparse.ArgumentParser:
     top_five_walk_forward_parser.add_argument("--raw-probabilities", action="store_true")
     top_five_walk_forward_parser.add_argument("--output", help="optional JSON report output path")
     diagnostics_parser = subparsers.add_parser(
-        "strategy-diagnostics", help="model, execution, source, volatility, and exit diagnostics"
+        "strategy-diagnostics", help="model, entry-risk cohorts, execution, source, volatility, and exit diagnostics"
     )
     diagnostics_parser.add_argument("--shares", type=float, default=10.0)
+    diagnostics_parser.add_argument(
+        "--checkpoint-names",
+        default="1200_EDT",
+        help="comma-separated immutable checkpoints; defaults to the live paper-entry checkpoint",
+    )
     diagnostics_parser.add_argument("--output", help="optional JSON report output path")
     close_calibration_parser = subparsers.add_parser(
         "close-source-calibration",

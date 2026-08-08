@@ -56,6 +56,12 @@ class JournalTests(unittest.TestCase):
             journal.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-07-20T15:00:00+00:00",
                     "market_id": "market-1",
                     "symbol": "TSLA",
@@ -101,6 +107,12 @@ class JournalTests(unittest.TestCase):
                 journal.record_realtime_evaluation(
                     {
                         "payload_version": PAYLOAD_VERSION,
+                        "price_to_beat_distance_bps": None,
+                        "market_up_probability": None,
+                        "market_model_divergence": None,
+                        "model_majority_outcome": None,
+                        "entry_diagnostic_flags": [],
+                        "entry_policy_category": "NO_EDGE",
                         "evaluated_at": evaluated_at,
                         "market_id": market_id,
                         "symbol": symbol,
@@ -118,6 +130,12 @@ class JournalTests(unittest.TestCase):
                 checkpoint_name="1200_EDT",
                 payload={
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-07-30T16:00:00+00:00",
                     "market_id": "current",
                     "symbol": "TSLA",
@@ -232,6 +250,12 @@ class JournalTests(unittest.TestCase):
                 journal.record_realtime_evaluation(
                     {
                         "payload_version": PAYLOAD_VERSION,
+                        "price_to_beat_distance_bps": None,
+                        "market_up_probability": None,
+                        "market_model_divergence": None,
+                        "model_majority_outcome": None,
+                        "entry_diagnostic_flags": [],
+                        "entry_policy_category": "NO_EDGE",
                         "evaluated_at": f"2026-07-20T15:0{minute}:00+00:00",
                         "market_id": "market-1",
                         "symbol": "TSLA",
@@ -256,6 +280,12 @@ class JournalTests(unittest.TestCase):
                 journal.record_realtime_evaluation(
                     {
                         "payload_version": PAYLOAD_VERSION,
+                        "price_to_beat_distance_bps": None,
+                        "market_up_probability": None,
+                        "market_model_divergence": None,
+                        "model_majority_outcome": None,
+                        "entry_diagnostic_flags": [],
+                        "entry_policy_category": "NO_EDGE",
                         "evaluated_at": "2026-07-20T15:00:00+00:00",
                         "market_id": market_id,
                         "symbol": "TSLA",
@@ -282,6 +312,12 @@ class JournalTests(unittest.TestCase):
             journal.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-07-20T15:00:00+00:00",
                     "market_id": "market-1",
                     "symbol": "TSLA",
@@ -302,6 +338,12 @@ class JournalTests(unittest.TestCase):
             journal.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": "2026-07-20T15:01:00+00:00",
                     "market_id": "market-1",
                     "symbol": "TSLA",

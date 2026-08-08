@@ -14,6 +14,7 @@ from polymarket_stock.evaluation_payload import PAYLOAD_VERSION
 from polymarket_stock.baseline import DailyClose
 from polymarket_stock.equity_contracts import parse_daily_equity_close_contract
 from polymarket_stock.event_risk import EventCalendarUnavailable
+from polymarket_stock.http import PublicApiError
 from polymarket_stock.journal import ShadowJournal
 from polymarket_stock.market_discovery import MarketCandidate, MarketSettlement
 from polymarket_stock.realtime import RealtimeBaselineEvaluator
@@ -254,6 +255,12 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             journal.record_realtime_evaluation(
                 {
                     "payload_version": PAYLOAD_VERSION,
+                    "price_to_beat_distance_bps": None,
+                    "market_up_probability": None,
+                    "market_model_divergence": None,
+                    "model_majority_outcome": None,
+                    "entry_diagnostic_flags": [],
+                    "entry_policy_category": "NO_EDGE",
                     "evaluated_at": self.now.isoformat(),
                     "market_id": "market-1",
                     "symbol": "TSLA",
@@ -395,6 +402,36 @@ class SupervisorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(checkpoint_payload["fair_up_probability"], realtime_payload["fair_up_probability"])
             self.assertEqual(journal.list_paper_positions(), ())
             self.assertTrue(any(event_type == "CHECKPOINT_OBSERVATION_RECORDED" for event_type, _ in events))
+
+    async def test_run_retries_transient_discovery_failure_without_exiting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            journal = ShadowJournal(Path(directory) / "journal.db")
+            journal.initialize()
+            events = []
+            supervisor = MultiMarketShadowSupervisor(
+                journal=journal,
+                log_path=Path(directory) / "events.jsonl",
+                spot_provider="finnhub",
+                event_sink=lambda event_type, payload: events.append((event_type, payload)),
+            )
+            attempts = 0
+
+            async def refresh() -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PublicApiError("Gamma timed out")
+                raise asyncio.CancelledError()
+
+            async def no_wait(_: float) -> None:
+                return None
+
+            supervisor.refresh = refresh
+            with patch.object(supervisor_module.asyncio, "sleep", no_wait), self.assertRaises(asyncio.CancelledError):
+                await supervisor.run(scan_interval_seconds=900)
+        self.assertEqual(attempts, 2)
+        self.assertEqual(events[0][0], "SUPERVISOR_DISCOVERY_RETRY")
+        self.assertEqual(events[0][1]["retry_in_seconds"], 5.0)
 
     async def test_run_stops_producers_before_final_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

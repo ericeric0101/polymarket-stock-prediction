@@ -40,6 +40,24 @@ def observable_equity_market_date(now: datetime) -> date:
     return next_nyse_trading_day(local.date())
 
 
+def executable_market_up_probability(
+    *,
+    up_bid: float | None,
+    up_ask: float | None,
+    down_bid: float | None,
+    down_ask: float | None,
+) -> float | None:
+    """Estimate executable Up probability from complementary outcome books."""
+    lower_bounds = [value for value in (up_bid, None if down_ask is None else 1.0 - down_ask) if value is not None]
+    upper_bounds = [value for value in (up_ask, None if down_bid is None else 1.0 - down_bid) if value is not None]
+    if not lower_bounds or not upper_bounds:
+        return None
+    lower_bound, upper_bound = max(lower_bounds), min(upper_bounds)
+    if lower_bound > upper_bound:
+        return None
+    return (lower_bound + upper_bound) / 2.0
+
+
 def relative_price_difference(primary: float, reference: float) -> float:
     if primary <= 0 or reference <= 0:
         raise ValueError("prices must be positive")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 import unittest
 
@@ -14,6 +15,7 @@ from polymarket_stock.strategy_diagnostics import (
     direction_benchmarks,
     execution_quality,
     exit_horizon_replay,
+    entry_risk_summary,
     intraday_volatility_summary,
     spot_divergence_summary,
     volatility_comparison_summary,
@@ -83,6 +85,41 @@ class StrategyDiagnosticsTests(unittest.TestCase):
         assert results["MARKET_FAVORITE"].wins == 1
         assert results["SPOT_VS_THRESHOLD"].wins == 1
         assert results["MARKET_MAJORITY"].wins == 1
+
+    def test_entry_risk_cohorts_stratify_selected_edge_candidates(self) -> None:
+        near_low_confidence = replace(
+            checkpoint(fair_up=0.55, outcome="DOWN", spot=100.01, threshold=100.0),
+            up_bid=0.58,
+            down_bid=0.38,
+            payload={"model_outcome": "UP"},
+        )
+        far_high_confidence = replace(
+            checkpoint("two", fair_up=0.98, outcome="UP", spot=103.0, threshold=100.0),
+            up_bid=0.39,
+            down_bid=0.59,
+            down_ask=0.61,
+            payload={"model_outcome": "UP"},
+        )
+        contradictory = replace(
+            checkpoint("three", fair_up=0.30, outcome="DOWN", spot=101.0, threshold=100.0),
+            up_bid=0.15,
+            down_bid=0.85,
+            down_ask=0.87,
+            payload={"model_outcome": "UP"},
+        )
+        report = entry_risk_summary((near_low_confidence, far_high_confidence, contradictory))
+        self.assertEqual(report.candidates, 3)
+        self.assertEqual(report.wins, 1)
+        self.assertEqual({item.name: item.candidates for item in report.by_selected_probability}["LT_60_PCT"], 2)
+        self.assertEqual({item.name: item.candidates for item in report.by_threshold_distance}["LE_25_BPS"], 1)
+        self.assertEqual(
+            {item.name: item.candidates for item in report.by_model_alignment}["CONTRADICTS_MODEL_MAJORITY"], 1
+        )
+        self.assertEqual({item.name: item.candidates for item in report.by_market_divergence}["GTE_50_PP"], 1)
+        policies = {item.name: item for item in report.policy_comparison}
+        self.assertEqual(policies["BASELINE_ALL_POSITIVE_EDGE"].candidates, 3)
+        self.assertEqual(policies["MODEL_ALIGNED_ONLY"].candidates, 2)
+        self.assertEqual(policies["CONTRARIAN_VALUE"].candidates, 1)
 
     def test_depth_vwap_requires_enough_size_and_reports_slippage(self) -> None:
         entry = execution("PAPER_ENTRY", bid=0.58, ask=0.60)

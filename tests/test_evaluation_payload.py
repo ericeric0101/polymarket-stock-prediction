@@ -6,6 +6,9 @@ import unittest
 from polymarket_stock.evaluation_payload import (
     CURRENT_REQUIRED_KEYS,
     PAYLOAD_VERSION,
+    read_entry_diagnostic_flags,
+    read_entry_policy_category,
+    read_model_outcome,
     read_threshold,
     validate_for_read,
     validate_for_write,
@@ -54,6 +57,12 @@ def make_evaluation() -> RealtimeEvaluation:
         paper_outcome="UP",
         paper_entry_eligible=True,
         paper_entry_block_reasons=(),
+        price_to_beat_distance_bps=None,
+        market_up_probability=0.5,
+        market_model_divergence=0.0,
+        model_majority_outcome="UP",
+        entry_diagnostic_flags=(),
+        entry_policy_category="MODEL_ALIGNED",
         quality_flags=(),
         trigger_reasons=(),
         skip_reasons=(),
@@ -81,6 +90,33 @@ class EvaluationPayloadTests(unittest.TestCase):
                 "skip_reasons": [],
             }
         )
+
+    def test_v1_payload_remains_readable_without_v2_diagnostics(self) -> None:
+        validate_for_read(
+            {
+                "payload_version": 1,
+                "evaluated_at": "2026-08-03T16:00:00+00:00",
+                "market_id": "m",
+                "symbol": "TSLA",
+                "signal_status": "NO_PAPER_TRADE",
+                "skip_reasons": [],
+                "spot": 100.0,
+                "fair_up_probability": 0.5,
+                "up_ask": 0.5,
+                "down_ask": 0.5,
+            }
+        )
+
+    def test_v2_accessors_tolerate_historical_missing_diagnostic_fields(self) -> None:
+        self.assertIsNone(read_model_outcome({"payload_version": 1}))
+        self.assertEqual(read_entry_diagnostic_flags({"payload_version": 1}), ())
+
+    def test_v2_payload_remains_readable_without_policy_category(self) -> None:
+        payload = make_evaluation().as_payload()
+        payload["payload_version"] = 2
+        payload.pop("entry_policy_category")
+        validate_for_read(payload)
+        self.assertEqual(read_entry_policy_category(payload), "MODEL_ALIGNED")
 
     def test_threshold_preserves_zero_instead_of_falling_back(self) -> None:
         self.assertEqual(read_threshold({"price_to_beat": 0.0, "prior_close": 99.0}), 0.0)

@@ -21,6 +21,7 @@ from .price_ladder import (
 )
 from .price_ladder_journal import PriceLadderJournal, StoredLadderSnapshot
 from .probability_calibration import sizing_readiness
+from .evaluation_payload import read_entry_diagnostic_flags, read_entry_policy_category
 from .quality import observable_equity_market_date, us_equity_session
 
 
@@ -341,6 +342,8 @@ def _live_market_payload(
                 "threshold_source_count": row.get("source_count"),
                 "threshold_calibration_samples": row.get("calibration_samples"),
                 "threshold_estimated_error_bps": row.get("estimated_error_bps"),
+                "entry_diagnostic_flags": list(read_entry_diagnostic_flags(row)),
+                "entry_policy_category": read_entry_policy_category(row),
                 "up_book": row.get("up_book") if isinstance(row.get("up_book"), Mapping) else {},
                 "down_book": row.get("down_book") if isinstance(row.get("down_book"), Mapping) else {},
                 "skip_reasons": list(row.get("skip_reasons") or ()),

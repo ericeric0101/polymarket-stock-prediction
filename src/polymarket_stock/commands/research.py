@@ -212,13 +212,17 @@ def handle(context: CommandContext) -> None:
     elif arguments.command == "replay-observations":
         print(json.dumps(replay_market_observations(journal.list_replay_observations()).as_payload(), sort_keys=True))
     elif arguments.command == "strategy-diagnostics":
+        checkpoint_names = tuple(name.strip().upper() for name in arguments.checkpoint_names.split(",") if name.strip())
+        if not checkpoint_names:
+            raise SystemExit("strategy-diagnostics --checkpoint-names must include at least one checkpoint")
         report = strategy_diagnostics(
-            journal.list_buffer_sweep_observations(),
+            (item for item in journal.list_buffer_sweep_observations() if item.checkpoint_name in checkpoint_names),
             journal.list_execution_observations(),
             journal.list_spot_source_comparisons(sample_every_seconds=60),
             spots=journal.list_spot_observations(source="PYTH_HERMES", sample_every_seconds=60),
             requested_shares=arguments.shares,
         ).as_payload()
+        report["checkpoint_names"] = list(checkpoint_names)
         _write_optional_json(arguments.output, report)
         print(json.dumps(report, sort_keys=True))
     elif arguments.command == "close-source-calibration":
